@@ -62,7 +62,7 @@
     "stylelint": "^15.10.3"
   },
   "dependencies": {
-    "@blueking/bkmonitor-cli": "2.0.0-beta.10",
+    "@blueking/bkmonitor-cli": "2.0.0-beta.11",
     "core-js": "^3.34.0",
     "cross-env": "^7.0.3"
   },

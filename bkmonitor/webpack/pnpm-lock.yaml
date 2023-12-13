@@ -38,8 +38,8 @@ importers:
   .:
     dependencies:
       '@blueking/bkmonitor-cli':
-        specifier: 2.0.0-beta.10
-        version: 2.0.0-beta.10(@types/node@20.9.0)(babel-helper-vue-jsx-merge-props@2.0.3)(monaco-editor@0.45.0)(prettier@3.1.0)
+        specifier: 2.0.0-beta.11
+        version: 2.0.0-beta.11(@types/node@20.9.0)(babel-helper-vue-jsx-merge-props@2.0.3)(monaco-editor@0.45.0)(prettier@3.1.0)
       core-js:
         specifier: ^3.34.0
         version: 3.34.0
@@ -2491,8 +2491,8 @@ packages:
     engines: {node: '>=14.18.1'}
     dev: false
 
-  /@blueking/bkmonitor-cli@2.0.0-beta.10(@types/node@20.9.0)(babel-helper-vue-jsx-merge-props@2.0.3)(monaco-editor@0.45.0)(prettier@3.1.0):
-    resolution: {integrity: sha512-XevRNYDzE5+9XfERckfroEzi9qw0i5vmVndTRWJNWvsgu46kweJfrU5LjcFJie+tkTpgyoMlIwCIVnuxohCnAA==}
+  /@blueking/bkmonitor-cli@2.0.0-beta.11(@types/node@20.9.0)(babel-helper-vue-jsx-merge-props@2.0.3)(monaco-editor@0.45.0)(prettier@3.1.0):
+    resolution: {integrity: sha512-L36Zp72AelGGlvH1f9kriXw4ABY4ftGm6pcbgGUvTUIaTWCrgak6rsbcul8xmgB+c8zTQ4uvDXT0cDfJsRPZ/A==}
     engines: {node: '>= 18'}
     hasBin: true
     dependencies:
