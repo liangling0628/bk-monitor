@@ -341,7 +341,7 @@ export default class DashboardAside extends tsc<IProps, IEvents> {
    */
   @Emit('selectedFav')
   handleSelectedFav(item: IFavListItem) {
-    this.checked = item.uid;
+    // this.checked = item.uid;
     return item;
   }
   async handleUnstarred(id: number, name: string) {
@@ -357,7 +357,7 @@ export default class DashboardAside extends tsc<IProps, IEvents> {
 
   @Emit('selectedDashboard')
   handleSelectedGrafana(item: TreeMenuItem) {
-    this.checked = item.uid;
+    // this.checked = item.uid;
     return item;
   }
 

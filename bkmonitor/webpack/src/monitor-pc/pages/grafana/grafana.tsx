@@ -29,6 +29,7 @@ import { Component as tsc } from 'vue-tsx-support';
 import { getDashboardList } from '../../../monitor-api/modules/grafana';
 import bus from '../../../monitor-common/utils/event-bus';
 import { DASHBOARD_ID_KEY } from '../../constant/constant';
+import routeStore from '../../store/modules/router';
 
 import './grafana.scss';
 
@@ -39,6 +40,8 @@ interface IMessageEvent extends MessageEvent {
     href?: string;
     status?: 'login' | 'logout';
     login_url?: string;
+    hasRoutePedding?: boolean;
+    routeStatus?: any;
   };
 }
 @Component({
@@ -51,6 +54,7 @@ export default class MyComponent extends tsc<{}> {
   loading = true;
   hasLogin = false;
   get orignUrl() {
+    return 'http://appdev.woa.com:3000/';
     return process.env.NODE_ENV === 'development' ? `${process.env.proxyUrl}/` : `${location.origin}${window.site_url}`;
   }
   get dashboardCheck() {
@@ -87,6 +91,7 @@ export default class MyComponent extends tsc<{}> {
     }
   }
   async handleGetGrafanaUrl() {
+    return this.orignUrl;
     let grafanaUrl = '';
     if (!this.url) {
       if (this.$route.name === 'grafana-home' || this.$store.getters.bizIdChangePedding) {
@@ -183,7 +188,12 @@ export default class MyComponent extends tsc<{}> {
     return true;
   }
   handleMessage(e: IMessageEvent) {
-    if (e.origin !== location.origin) return;
+    // if (e.origin !== location.origin) return;
+    if (e?.data?.hasRoutePedding) {
+      routeStore.setRoutePenddingStatus(e?.data?.routeStatus);
+      console.info(e?.data, 'hasRoutePedding-------------------');
+      return;
+    }
     // iframe 内路由变化
     if (e?.data?.pathname) {
       const pathname = `${e.data.pathname}`;

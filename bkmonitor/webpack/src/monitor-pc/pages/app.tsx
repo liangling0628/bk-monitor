@@ -46,7 +46,7 @@ import DashboardContainer from './grafana/dashboard-container/dashboard-containe
 import CommonNavBar from './monitor-k8s/components/common-nav-bar';
 import { useCheckVersion } from './check-version';
 import NavTools from './nav-tools';
-
+import routerStore from '../store/modules/router';
 // #if APP !== 'external'
 import BizSelect from '../components/biz-select/biz-select';
 import NoticeGuide, { IStepItem } from '../components/novice-guide/notice-guide';
@@ -231,6 +231,9 @@ export default class App extends tsc<{}> {
     this.handleFetchStickyList();
     bus.$on(WATCH_SPACE_STICKY_LIST, this.handleWatchSpaceStickyList);
     process.env.NODE_ENV === 'production' && process.env.APP === 'pc' && useCheckVersion();
+    routerStore.setPenddingRouteChangeCallBack(() => {
+      this.handleShowRouteChangeConfirm();
+    });
   }
   beforeDestroy() {
     this.needMenu && removeListener(this.navHeaderRef, this.handleNavHeaderResize);
@@ -569,6 +572,23 @@ export default class App extends tsc<{}> {
   handleGlobSettingsShowChange(v: boolean) {
     this.globalSettingShow = v;
     this.headerSettingShow = false;
+  }
+  // 路由变化时展示提示是否取消
+  handleShowRouteChangeConfirm() {
+    return new Promise(resolve => {
+      this.$bkInfo({
+        extCls: 'strategy-config-cancel',
+        title: this.$t('是否放弃本次操作？'),
+        confirmFn: () => {
+          this.$store.commit('router/setRoutePenddingStatus', 'success');
+          resolve(true);
+        },
+        cancelFn: () => {
+          this.$store.commit('router/setRoutePenddingStatus', 'dismiss');
+          resolve(false);
+        }
+      });
+    });
   }
   commonHeader() {
     return (

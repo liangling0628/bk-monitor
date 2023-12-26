@@ -27,6 +27,7 @@ import { Component, Emit, Mixins, Prop, Provide, ProvideReactive, Ref } from 'vu
 import { ofType } from 'vue-tsx-support';
 
 import authorityMixinCreate from '../../../mixins/authorityMixin';
+import routeStore from '../../../store/modules/router';
 import { ISpaceItem } from '../../../types';
 import * as grafanaAuth from '../authority-map';
 
@@ -68,6 +69,7 @@ class DashboardContainer extends Mixins(authorityMixinCreate(grafanaAuth, 'creat
     }
   }
   handleGotoFavaritate(item: IFavListItem) {
+    const { hash } = location;
     if (item.uid === GRAFANA_HOME_ID) {
       this.$router.push({
         name: 'grafana-home'
@@ -77,6 +79,10 @@ class DashboardContainer extends Mixins(authorityMixinCreate(grafanaAuth, 'creat
         path: `/grafana/d/${item.uid}`
       });
     }
+    const routeChangeCallBack = () => {
+      location.hash = hash;
+    };
+    routeStore.setDismissRouteChangeCallBack(routeChangeCallBack);
   }
 
   handleOpenSpace() {

@@ -103,7 +103,7 @@ export default class TreeMenu extends tsc<IProps, IEvents> {
 
   @Emit('selected')
   handleSelectedItem(item: TreeMenuItem) {
-    this.localChecked = item.uid;
+    // this.localChecked = item.uid;
     return item;
   }
   @Emit('more')
