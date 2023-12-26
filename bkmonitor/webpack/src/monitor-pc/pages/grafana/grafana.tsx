@@ -54,7 +54,6 @@ export default class MyComponent extends tsc<{}> {
   loading = true;
   hasLogin = false;
   get orignUrl() {
-    return 'http://appdev.woa.com:3000/';
     return process.env.NODE_ENV === 'development' ? `${process.env.proxyUrl}/` : `${location.origin}${window.site_url}`;
   }
   get dashboardCheck() {
@@ -91,7 +90,6 @@ export default class MyComponent extends tsc<{}> {
     }
   }
   async handleGetGrafanaUrl() {
-    return this.orignUrl;
     let grafanaUrl = '';
     if (!this.url) {
       if (this.$route.name === 'grafana-home' || this.$store.getters.bizIdChangePedding) {
