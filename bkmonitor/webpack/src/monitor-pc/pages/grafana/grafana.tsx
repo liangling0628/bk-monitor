@@ -186,7 +186,7 @@ export default class MyComponent extends tsc<{}> {
     return true;
   }
   handleMessage(e: IMessageEvent) {
-    // if (e.origin !== location.origin) return;
+    if (e.origin !== location.origin) return;
     if (e?.data?.hasRoutePedding) {
       routeStore.setRoutePenddingStatus(e?.data?.routeStatus);
       console.info(e?.data, 'hasRoutePedding-------------------');
