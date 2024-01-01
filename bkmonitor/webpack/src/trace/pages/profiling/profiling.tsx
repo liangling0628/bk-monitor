@@ -228,7 +228,7 @@ export default defineComponent({
         <ResizeLayout
           class='profiling-page-content'
           immediate={true}
-          min={200}
+          min={230}
           max={800}
           v-slots={{
             aside: () => (
