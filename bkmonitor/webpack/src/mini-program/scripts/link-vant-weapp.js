@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const vantUrl = path.resolve(__dirname, '../node_modules/@vant/weapp/lib');
-const wxcomponentsUrl = path.resolve(__dirname, '../src/wxcomponents');
-const wxComponentVanUrl = path.resolve(__dirname, '../src/wxcomponents/vant');
+const wxcomponentsUrl = path.resolve(__dirname, '../src/components/wxcomponents');
+const wxComponentVanUrl = path.resolve(__dirname, '../src/components/wxcomponents/vant');
 console.info(wxcomponentsUrl);
 console.info(wxComponentVanUrl);
 console.info(fs.existsSync(wxcomponentsUrl), fs.existsSync(wxComponentVanUrl));

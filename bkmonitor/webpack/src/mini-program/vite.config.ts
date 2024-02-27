@@ -3,6 +3,9 @@ import { createStyleImportPlugin } from 'vite-plugin-style-import';
 import { existsSync } from 'fs';
 import { resolve } from 'path';
 import uni from '@dcloudio/vite-plugin-uni';
+import { copyDir } from './scripts/copy-wxcomponents';
+let hasCopy = false;
+// import copy from 'rollup-plugin-copy';
 // https://vitejs.dev/config/
 export default defineConfig(async () => {
   let localSettings: UserConfig = {};
@@ -35,6 +38,16 @@ export default defineConfig(async () => {
     plugins: [
       uni(),
       ...plugins,
+      {
+        name: 'copy-components',
+        async buildEnd() {
+          if (hasCopy) return;
+          const srcDir = resolve(__dirname, './src/components/wxcomponents/vant');
+          const destDir = resolve(__dirname, './dist/dev/mp-weixin/wxcomponents/vant');
+          await copyDir(srcDir, destDir);
+          hasCopy = true;
+        },
+      },
     ],
     resolve: {
       alias: {

@@ -12,7 +12,8 @@
     "fix:uniApp": "node scripts/fix-uni-app",
     "change:events": "node scripts/change-events.js",
     "postinstall": "npm run fix:uniApp && npm run change:events && npm run link:vant && npm run css:var && npm run merge:vars",
-    "eslint": "eslint --ext .js,.tsx,.ts,.vue --cache --fix"
+    "eslint": "eslint --ext .js,.tsx,.ts,.vue --cache --fix",
+    "copy:wxcomponents": "node ./scripts/copy-wxcomponents.js"
   },
   "dependencies": {
     "@dcloudio/uni-app": "3.0.0-alpha-3081220230802001",
@@ -53,6 +54,7 @@
     "eslint-plugin-vue": "^9.17.0",
     "postcss-html": "^1.5.0",
     "postcss-scss": "^4.0.7",
+    "rollup-plugin-copy": "^3.5.0",
     "stylelint": "^15.10.3",
     "stylelint-config-recommended-vue": "1.5.0",
     "stylelint-config-standard-scss": "^10.0.0",
@@ -61,6 +63,7 @@
     "typescript": "^5.1.6",
     "uni-app-types": "^0.1.7",
     "vite": "4.0.3",
+    "vite-plugin-static-copy": "0.17.0",
     "vite-plugin-style-import": "~2.0.0",
     "vue-eslint-parser": "^9.3.1"
   }
