@@ -25,6 +25,7 @@ export default defineConfig(async () => {
     localSettings = settings.default;
   }
   return {
+    // publicDir: './src/components/wxcomponents',
     build: {
       outDir: '../../mp', // uni-app官方不支持配置 产出目录不可变更
       rollupOptions: {

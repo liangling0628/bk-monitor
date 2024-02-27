@@ -110,7 +110,7 @@
 		"backgroundColor": "#F8F8F8",
 		"navigationStyle": "default",
 		"usingComponents": {
-			"van-info": "./wxcomponents/vant/info/index",
+			"van-info": "/wxcomponents/vant/info/index",
 			"van-button": "/wxcomponents/vant/button/index",
 			"van-icon": "/wxcomponents/vant/icon/index",
 			"van-nav-bar": "/wxcomponents/vant/nav-bar/index",

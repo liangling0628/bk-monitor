@@ -34,7 +34,6 @@
   import { defineProps, computed } from 'vue';
   import './page-wrapper.scss';
   import { useAppStore } from '../../store/app';
-
   interface PageWrapperPage {
     title?: string,
     needLeftBiz?: boolean,
