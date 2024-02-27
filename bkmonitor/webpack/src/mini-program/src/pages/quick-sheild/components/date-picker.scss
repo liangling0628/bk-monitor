@@ -1,0 +1,53 @@
+.model {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  background-color: rgba(0, 0, 0, .6);
+
+  .date-picker {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 3;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+    overflow: hidden;
+    background-color: white;
+    border-radius: 12px 12px 0 0;
+
+    .van-picker__toolbar {
+      height: 48px;
+      align-items: center;
+    }
+
+    .van-picker__title {
+      font-size: 16px;
+      font-weight: 600;
+      line-height: 24px;
+      letter-spacing: 0;
+      color: #272a2f;
+      text-align: center;
+    }
+
+    .van-picker__cancel {
+      padding: 0 15px;
+      font-size: 14px;
+      font-weight: 400;
+      line-height: 22px;
+      letter-spacing: 0;
+      color: #494b50;
+    }
+
+    .van-picker__confirm {
+      padding: 0 15px;
+      font-size: 14px;
+      font-weight: 400;
+      line-height: 22px;
+      letter-spacing: 0;
+      color: #1768ef;
+    }
+  }
+}

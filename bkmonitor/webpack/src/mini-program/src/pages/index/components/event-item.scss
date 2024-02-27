@@ -1,0 +1,83 @@
+.event-item-warp {
+  width: 100%;
+  margin-bottom: 10px;
+  background-color: #fff;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px 0 #1919290d;
+  box-sizing: border-box;
+
+  &-title {
+    position: relative;
+    display: flex;
+    height: 44px;
+    padding: 0 15px;
+    line-height: 44px;
+    align-items: center;
+
+    &.is-expand {
+      border-bottom: 1px solid #eaebef;
+    }
+
+    .mark {
+      position: absolute;
+      left: 0;
+      width: 4px;
+      height: 16px;
+      background-color: red;
+    }
+
+    .title {
+      overflow: hidden;
+      font-family: PingFangSC-Medium;
+      font-size: 16px;
+      font-weight: 500;
+      color: #000;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+
+    .icon {
+      margin-left: 6px;
+      color: #dcdee5;
+    }
+  }
+
+  &-detail {
+    padding: 0 15px;
+    font-size: 14px;
+    color: #63656e;
+
+    .list-item {
+      padding: 15px 0;
+      border-bottom: 1px solid #eaebef;
+
+      .label-warp {
+        display: flex;
+
+        .label-title {
+          margin-right: 4px;
+        }
+
+        .label-content {
+          flex: 1;
+          word-break: break-all;
+        }
+      }
+    }
+
+    .list-item:last-child {
+      border-bottom: none
+    }
+   
+  }
+ 
+  &-sub-title {
+    height: 30px;
+    padding: 0 15px;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 30px;
+    color: #979ba5;
+  }
+}

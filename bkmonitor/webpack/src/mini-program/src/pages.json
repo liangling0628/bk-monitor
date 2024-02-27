@@ -1,0 +1,137 @@
+{
+	"pages": [
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationBarTitleText": "告警事件",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/dashboard/dashboard",
+			"style": {
+				"navigationBarTitleText": "仪表盘",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/scenes/scenes",
+			"style": {
+				"navigationBarTitleText": "观测场景",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/biz-list/biz-list",
+			"style": {
+				"navigationBarTitleText": "切换业务",
+				"navigationStyle": "default"
+			}
+		},
+		{
+			"path": "pages/alarm-detail/alarm-detail",
+			"style": {
+				"navigationBarTitleText": "告警详情",
+				"navigationStyle": "default",
+				"navigationBarBackgroundColor": "#fff"
+			}
+		},
+		{
+			"path": "pages/event-detail/event-detail",
+			"style": {
+				"navigationBarTitleText": "事件详情",
+				"navigationStyle": "default",
+				"navigationBarBackgroundColor": "#fff"
+			}
+		},
+		{
+			"path": "pages/search/search",
+			"style": {
+				"navigationBarTitleText": "搜索",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/quick-sheild/quick-sheild",
+			"style": {
+				"navigationBarTitleText": "快捷屏蔽",
+				"navigationStyle": "default",
+				"navigationBarBackgroundColor": "#fff"
+			}
+		},
+		{
+			"path": "pages/big-picture/big-picture",
+			"style": {
+				"navigationBarTitleText": "大图",
+				"navigationStyle": "custom",
+				"navigationBarBackgroundColor": "#fff",
+				"pageOrientation": "landscape"
+			}
+		},
+		{
+			"path": "pages/event-chart-detail/event-chart-detail",
+			"style": {
+				"navigationBarTitleText": "图片详情",
+				"navigationStyle": "default",
+				"navigationBarBackgroundColor": "#fff"
+			}
+		}
+	],
+	"tabBar": {
+		"color": "#63656E",
+		"selectedColor": "#1768EF",
+		"backgroundColor": "white",
+		"height": "60px",
+		"list": [
+		{
+			"text": "告警事件",
+			"pagePath": "pages/index/index",
+			"iconPath": "./static/png/alarm.png",
+			"selectedIconPath": "./static/png/alarm.png"
+		},
+		{
+			"text": "仪表盘",
+			"pagePath": "pages/dashboard/dashboard",
+			"iconPath": "./static/png/dashboard.png",
+			"selectedIconPath": "./static/png/dashboard.png"
+		},
+		{
+			"text": "观测场景",
+			"pagePath": "pages/scenes/scenes",
+			"iconPath": "./static/png/scene.png",
+			"selectedIconPath": "./static/png/scene.png"
+		}
+	]
+	},
+	"globalStyle": {
+		"navigationBarTextStyle": "black",
+		"navigationBarTitleText": "uni-app",
+		"navigationBarBackgroundColor": "#F8F8F8",
+		"backgroundColor": "#F8F8F8",
+		"navigationStyle": "default",
+		"usingComponents": {
+			"van-info": "./wxcomponents/vant/info/index",
+			"van-button": "/wxcomponents/vant/button/index",
+			"van-icon": "/wxcomponents/vant/icon/index",
+			"van-nav-bar": "/wxcomponents/vant/nav-bar/index",
+			"van-cell": "/wxcomponents/vant/cell/index",
+			"van-index-anchor": "/wxcomponents/vant/index-anchor/index",
+			"van-index-bar": "/wxcomponents/vant/index-bar/index",
+			"van-tab": "/wxcomponents/vant/tab/index",
+			"van-tabs": "/wxcomponents/vant/tabs/index",
+			"van-collapse": "/wxcomponents/vant/collapse/index",
+			"van-collapse-item": "/wxcomponents/vant/collapse-item/index",
+			"van-dialog": "/wxcomponents/vant/dialog/index",
+			"van-search": "/wxcomponents/vant/search/index",
+			"van-dropdown-menu": "/wxcomponents/vant/dropdown-menu/index",
+			"van-dropdown-item": "/wxcomponents/vant/dropdown-item/index",
+			"van-skeleton": "/wxcomponents/vant/skeleton/index",
+			"van-radio": "/wxcomponents/vant/radio/index",
+  		"van-radio-group": "/wxcomponents/vant/radio-group/index",
+  		"van-datetime-picker": "/wxcomponents/vant/datetime-picker/index",
+  		"van-popup": "/wxcomponents/vant/popup/index",
+  		"van-picker": "/wxcomponents/vant/picker/index",
+  		"van-field": "/wxcomponents/vant/field/index"
+		}
+	}
+}

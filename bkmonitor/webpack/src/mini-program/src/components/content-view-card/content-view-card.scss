@@ -1,0 +1,25 @@
+@import '../../styles/theme/mixins.scss';
+
+.content-view-card {
+  width: 100%;
+
+  &-item {
+    display: flex;
+    font-size: 14px;
+    line-height: 22px;
+    color: #494b50;
+
+    .item-label {
+      min-width: 42px;
+    }
+
+    .item-value {
+      flex: 1;
+      white-space: break-spaces;
+
+      &.ellipsis {
+        @include ellipsis;
+      }
+    }
+  }
+}

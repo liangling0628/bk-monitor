@@ -1,0 +1,16 @@
+$primaryColor: var(--danger-color, '#3a84ff');
+
+// 默认导航栏页面内容区域高度变量
+
+/* #ifdef H5 */
+$pageHeight: calc(100vh - 44px); // h5 可视区域高度为屏幕高度，因此内容高度需要减去导航栏高度
+
+/* #endif */
+
+/* #ifdef MP-WEIXIN */
+$pageHeight: 100vh; // 小程序 可视区域高度为内容区域高度，不包括导航栏高度因此不用减去
+
+/* #endif */
+
+// ios底部安全距离高度
+$iosBottom: env(safe-area-inset-bottom, 0);

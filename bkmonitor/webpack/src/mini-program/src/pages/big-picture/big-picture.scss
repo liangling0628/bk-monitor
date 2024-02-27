@@ -1,0 +1,19 @@
+.big-picture-page {
+  /* #ifdef H5 */
+  width: 100vh;
+  height: 100vw;
+  transform: rotate(90deg);
+  transform-origin: 50vw 50vw;
+  touch-action: none;
+
+  /* #endif */
+
+  /* #ifdef MP-WEIXIN */
+  width: 100vw;
+  height: 100vh;
+
+  /* #endif */
+
+  background-color: #f5f7fa;
+  box-sizing: border-box;
+}

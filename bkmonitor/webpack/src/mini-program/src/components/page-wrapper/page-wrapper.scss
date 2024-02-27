@@ -1,0 +1,32 @@
+.page-wrapper {
+  display: flex;
+  width: 100vw;
+  flex-direction: column;
+
+  &-nav {
+    z-index: 11;
+
+    .nav-left {
+      display: flex;
+      margin-left: 36rpx;
+      font-size: 38rpx;
+      font-weight: 600;
+      color: #272a2f;
+      align-items: center;
+
+      &-icon {
+        font-size: 30rpx;
+        color: #313238;
+        transform: rotate(90deg);
+      }
+    }
+  }
+
+  &-content {
+    z-index: 10;
+    display: flex;
+    height: 100%;
+    box-sizing: border-box;
+    flex-direction: column;
+  }
+}

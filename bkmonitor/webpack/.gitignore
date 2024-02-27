@@ -94,7 +94,6 @@ src/monitor-static/icons/iconfont
 .babelcache
 src/monitor-pc/pages/home/system-import.ts
 src/systemjs/
-mini-program/
 src/mermaid/
 /packages
 /.codecc

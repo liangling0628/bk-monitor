@@ -1,0 +1,66 @@
+.alarm-detail-page {
+  /* #ifdef H5 */
+  height: calc(100vh - 44px);
+
+  /* #endif */
+
+  /* #ifdef MP-WEIXIN */
+  height: 100vh;
+
+  /* #endif */
+  padding-bottom: calc(env(safe-area-inset-bottom, 0) + 50px);
+  background-color: #f5f7fa;
+  box-sizing: border-box;
+
+  &-content {
+    height: 100%;
+    overflow-y: auto;
+
+    .event-list {
+      padding: 16px;
+
+      &-title {
+        font-size: 14px;
+        line-height: 22px;
+        color: #979ba5;
+      }
+
+      &-content {
+        margin-top: 12px;
+      }
+    }
+  }
+
+  &-footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100vw;
+    padding: 5px 16px;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0) + 5px);
+    font-size: 16px;
+    font-weight: 400;
+    background-color: #fff;
+    box-shadow: 0 -1px 0 0 #e5e7eb;
+    box-sizing: border-box;
+
+    .confirm-btn,
+    .confirm-btn button {
+      height: 40px;
+      border-radius: 4px;
+    }
+  }
+
+  .van-dialog__header {
+    font-size: 16px;
+    font-weight: 600;
+    color: #272a2f;
+  }
+
+  .confirm-container {
+    padding: 5px 24px 24px;
+    font-size: 14px;
+    font-weight: 400;
+    color: #494b50;
+  }
+}

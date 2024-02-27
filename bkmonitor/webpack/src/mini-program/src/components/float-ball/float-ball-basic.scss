@@ -1,0 +1,11 @@
+.float-ball-basic {
+  position: fixed;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 56px;
+  height: 56px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 3px 6px 0 #4f55604d;
+}

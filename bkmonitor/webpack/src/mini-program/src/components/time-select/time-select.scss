@@ -1,0 +1,38 @@
+.time-select-dropdown-warp {
+  .time-select-dropdown-item {
+    .van-popup {
+      display: flex;
+      padding: 16px;
+      border-radius: 0 0 12px 12px;
+      box-sizing: border-box;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    
+      .time-select-dropdown-option {
+        display: flex;
+        width: 106px;
+        height: 40px;
+        margin-bottom: 10px;
+        font-size: 16px;
+        font-weight: 400;
+        color: #494b50;
+        background: #f5f6f9;
+        border-radius: 4px;
+        box-sizing: border-box;
+        justify-content: center;
+        align-items: center;
+    
+        &.is-active {
+          color: #1768ef;
+          border: 1px solid #3a84ff;
+        }
+
+        &.is-disabled {
+          color: #c8c9cc;
+        }
+      }
+    }  
+  }
+  
+}
+

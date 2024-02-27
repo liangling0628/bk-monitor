@@ -1,0 +1,22 @@
+{
+  "搜索": "Search",
+  "近5分钟": "5 minutes",
+  "近15分钟": "15 minutes",
+  "近30分钟": "30 minutes",
+  "近1小时": "1 hours",
+  "近3小时": "3 hours",
+  "近6小时": "1 hours",
+  "近12小时": "3 hours",
+  "近1天": "3 days",
+  "近2天": "2 days",
+  "近7天": "7 days",
+  "近30天": "30 days",
+  "今天": "Today",
+  "昨天": "Yesterday",
+  "前天": "BeforeYesterday",
+  "本周": "This week",
+  "致命": "Emergency",
+  "预警": "Critical",
+  "提醒": "Warning",
+  "历史搜索": "History search"
+}

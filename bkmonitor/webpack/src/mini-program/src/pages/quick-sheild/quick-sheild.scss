@@ -1,0 +1,204 @@
+.container {
+  width: 100vw;
+
+  /* #ifdef H5 */
+  // H5：可视区域需要减去 iPhone 底部导航栏 和 提交按钮，还有头部标题栏
+  height: calc(100vh - env(safe-area-inset-bottom, 0) - 48px - 44px);
+
+  /* #endif */
+
+  /* #ifdef MP-WEIXIN */
+  // 小程序：可视区域需要减去 iPhone 底部导航栏 和 提交按钮
+  height: calc(100vh - env(safe-area-inset-bottom, 0) - 48px);
+
+  /* #endif */
+  overflow-y: scroll;
+  background-color: #f5f7fa;
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #272a2f;
+}
+
+@mixin radio-group {
+  padding: 0 14px;
+  background-color: white;
+  border-radius: 4px;
+  box-shadow: 0 1px 0 0 #63656e0d;
+}
+
+.radio-group {
+  .radio {
+    display: flex;
+    padding: 16px 0;
+    font-size: 14px;
+    font-weight: 400;
+    color: #272a2f;
+  }
+
+  // 注意这里，小程序 和 H5 组件的 class 结构不太一样
+  .van-radio-group {
+    @include radio-group;
+  }
+
+  &.van-radio-group {
+    @include radio-group;
+  }
+
+  .van-radio__label {
+    line-height: 22px;
+  }
+}
+
+.sheild-content-container {
+  display: grid;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+  letter-spacing: 0;
+  color: #494b50;
+  background-color: white;
+  // 标题，冒号，内容
+  grid-template-columns: min-content 10px auto;
+  grid-template-rows: auto auto auto;
+  grid-row-gap: 2px;
+
+  .sheild-content-label {
+    max-width: 50px;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@mixin selected {
+  position: absolute;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  color: #1768ef;
+  background-color: #e1ecff;
+  border: 1px solid #3a84ff;
+  justify-content: center;
+  align-items: center;
+}
+
+$border: 1px solid #e5e7eb;
+
+.sheild-time {
+  display: flex;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+  letter-spacing: 0;
+  color: #494b50;
+  background: #fff;
+  border-radius: 4px;
+  box-shadow: 0 1px 0 0 #63656e0d;
+  flex-wrap: wrap;
+
+  .sheild-time-item-container {
+    position: relative;
+    display: flex;
+    width: 33.333333%;
+    height: 50px;
+    text-align: center;
+    box-sizing: border-box;
+    justify-content: center;
+    align-items: center;
+
+    &:nth-child(1) {
+      border-right: $border;
+      border-bottom: $border;
+
+      .selected {
+        border-radius: 4px 0 0 0;
+
+        @include selected;
+      }
+    }
+
+    &:nth-child(2) {
+      border-right: $border;
+      border-bottom: $border;
+
+      .selected {
+        @include selected;
+      }
+    }
+
+    &:nth-child(3) {
+      border-bottom: $border;
+
+      .selected {
+        border-radius: 0 4px 0 0;
+
+        @include selected;
+      }
+    }
+
+    &:nth-child(4) {
+      border-right: $border;
+
+      .selected {
+        border-radius: 0 0 0 4px;
+
+        @include selected;
+      }
+    }
+
+    &:nth-child(5) {
+      border-right: $border;
+
+      .selected {
+        @include selected;
+      }
+    }
+
+    &:nth-child(6) {
+      .selected {
+        border-radius: 0 0 4px 0;
+
+        @include selected;
+      }
+    }
+  }
+}
+
+.submit-container {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 5px 16px 0 16px;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0) + 5px);
+  background: #fff;
+  box-shadow: 0 -1px 0 0 #e5e7eb;
+
+  .van-button {
+    width: 100%;
+    height: 38px;
+    font-size: 16px;
+    font-weight: 400;
+  }
+}
+
+.divider {
+  height: 1px;
+  background: #eaebf0;
+}
+
+.p16 {
+  padding: 16px;
+}
+
+.pb0 {
+  padding-bottom: 0;
+}
+
+.mb8 {
+  margin-bottom: 8px;
+}

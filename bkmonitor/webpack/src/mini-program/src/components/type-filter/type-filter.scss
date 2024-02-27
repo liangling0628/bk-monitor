@@ -1,0 +1,30 @@
+.type-filter {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+
+  .type-item {
+    width: 109px;
+    height: 32px;
+    font-size: 14px;
+    line-height: 32px;
+    color: #63656e;
+    text-align: center;
+    background: #f0f1f5;
+    border: 1px solid #f5f7fb;
+    border-radius: 4px;
+    box-sizing: border-box;
+
+    .svg-icon {
+      vertical-align: middle;
+    }
+
+    .item-name {
+      margin-left: 6px;
+    }
+
+    &.is-active {
+      border: 1px solid #1989fa;
+    }
+  }
+}

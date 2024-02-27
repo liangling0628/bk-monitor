@@ -1,0 +1,42 @@
+.event-detail-page {
+  /* #ifdef H5 */
+  min-height: calc(100vh - 44px);
+
+  /* #endif */
+
+  /* #ifndef H5 */
+  min-height: 100vh;
+
+  /* #endif */
+  padding-bottom: calc(env(safe-area-inset-bottom, 0) + 50px);
+  box-sizing: border-box;
+
+  .charts-container {
+    width: 100vw;
+    height: 237px;
+  }
+
+  .status-condition {
+    padding: 16px 16px 8px;
+  }
+
+  &-footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100vw;
+    padding: 5px 16px;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0) + 5px);
+    font-size: 16px;
+    font-weight: 400;
+    background-color: #fff;
+    box-shadow: 0 -1px 0 0 #e5e7eb;
+    box-sizing: border-box;
+
+    .confirm-btn,
+    .confirm-btn button {
+      height: 40px;
+      border-radius: 4px;
+    }
+  }
+}

@@ -1,0 +1,65 @@
+.event-item-card {
+  margin-bottom: 8px;
+
+  .card-top {
+    display: flex;
+    justify-content: space-between;
+
+    .title {
+      font-size: 16px;
+      font-weight: 600;
+      line-height: 24px;
+      color: #272a2f;
+    }
+
+    .status {
+      font-size: 12px;
+      line-height: 20px;
+
+      &.red {
+        color: #cb2427;
+      }
+
+      &.green {
+        color: #16a24c;
+      }
+
+      &.grey {
+        color: #9b9da1;
+      }
+    }
+
+    .shield-btn .van-button {
+      width: 80px;
+      height: 26px;
+      padding: 0;
+      font-size: 14px;
+      line-height: 22px;
+      color: #1768ef;
+      border: 1px solid #3a84ff;
+      border-radius: 4px;
+    }
+  }
+
+  .time {
+    font-size: 14px;
+    color: #9b9da1;
+  }
+
+  .card-content {
+    display: flex;
+    margin-top: 4px;
+
+    .detail {
+      padding-right: 20px;
+      overflow: hidden;
+      flex: 1;
+    }
+
+    .echarts-container {
+      width: 81px;
+      height: auto;
+      min-height: 36px;
+    }
+  }
+}

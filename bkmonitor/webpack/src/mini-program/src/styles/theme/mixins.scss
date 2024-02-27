@@ -1,0 +1,14 @@
+@import './variatable.scss';
+
+@mixin ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// 页面内容高度，一般在默认导航样式页面使用
+@mixin page-box($height: $pageHeight, $paddingBottom: $iosBottom) {
+  height: $height;
+  padding-bottom: $paddingBottom;
+  box-sizing: border-box;
+}
