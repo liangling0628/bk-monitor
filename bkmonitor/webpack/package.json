@@ -48,6 +48,8 @@
     "@types/throttle-debounce": "^5.0.2",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
     "@typescript-eslint/parser": "^7.16.0",
+    "@unocss/transformer-directives": "^0.62.0",
+    "@unocss/webpack": "^0.62.0",
     "cross-env": "^7.0.3",
     "eslint": "^9.6.0",
     "eslint-config-prettier": "^9.1.0",
@@ -72,6 +74,7 @@
     "stylelint-order": "^6.0.4",
     "stylelint-scss": "^6.4.0",
     "typescript": "^5.5.3",
+    "unocss": "^0.62.0",
     "vue-eslint-parser": "^9.4.3",
     "vue-template-compiler": "^2.7.16"
   },

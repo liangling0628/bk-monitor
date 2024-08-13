@@ -48,7 +48,9 @@ import store from './store/store';
 
 import './static/css/global.scss';
 import './static/css/reset.scss';
+import '@unocss/reset/tailwind.css';
 import 'monitor-static/icons/monitor-icons.css';
+import 'uno.css';
 // todo: 子应用externals
 // import './common/externals';
 // app 标识

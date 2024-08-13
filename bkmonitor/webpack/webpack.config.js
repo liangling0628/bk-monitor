@@ -29,7 +29,7 @@ const fs = require('node:fs');
 const { transformAppDir, transformDistDir } = require('./webpack/utils');
 const CopyPlugin = require('copy-webpack-plugin');
 const MonitorWebpackPlugin = require('./webpack/monitor-webpack-plugin');
-
+// const UnoCSS = require('@unocss/webpack').default;
 const devProxyUrl = 'http://appdev.bktencent.com:9002';
 const devHost = 'appdev.bktencent.com';
 const devPort = 7001;
@@ -44,6 +44,8 @@ if (fs.existsSync(path.resolve(__dirname, './local.settings.js'))) {
   devConfig = Object.assign({}, devConfig, localConfig);
 }
 module.exports = async (baseConfig, { production, app }) => {
+  const { default: UnoCSS } = await import('@unocss/webpack');
+  console.info(UnoCSS, '========');
   const distUrl = path.resolve(`./${transformDistDir(app)}/`);
   const config = baseConfig;
   if (!production) {
@@ -107,6 +109,7 @@ module.exports = async (baseConfig, { production, app }) => {
       ].filter(Boolean),
     })
   );
+  config.plugins.push(UnoCSS());
   return {
     ...config,
     output: {
@@ -136,6 +139,10 @@ module.exports = async (baseConfig, { production, app }) => {
             }
           : {}),
       },
+    },
+    optimization: {
+      ...config.optimization,
+      realContentHash: true,
     },
   };
 };
