@@ -48,7 +48,8 @@
     "@types/throttle-debounce": "^5.0.2",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
     "@typescript-eslint/parser": "^7.16.0",
-    "@unocss/transformer-directives": "^0.62.0",
+    "@unocss/eslint-config": "^0.62.1",
+    "@unocss/preset-rem-to-px": "^0.62.1",
     "@unocss/webpack": "^0.62.0",
     "cross-env": "^7.0.3",
     "eslint": "^9.6.0",
@@ -79,11 +80,7 @@
     "vue-template-compiler": "^2.7.16"
   },
   "nodemonConfig": {
-    "watch": [
-      "local.settings.js",
-      "webpack.config.js",
-      "pnpm-lock.yaml"
-    ]
+    "watch": ["local.settings.js", "webpack.config.js", "pnpm-lock.yaml"]
   },
   "engines": {
     "node": ">= 18.16"
