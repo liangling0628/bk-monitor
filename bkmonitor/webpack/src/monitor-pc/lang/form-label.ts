@@ -1870,4 +1870,5 @@ export default {
   故障链接: 'Fault Link',
   故障内告警: 'Fault Internal Alarm',
   表单: 'Form',
+  维度提取: 'Dimension extraction',
 };
