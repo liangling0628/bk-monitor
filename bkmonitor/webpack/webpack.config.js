@@ -111,7 +111,7 @@ module.exports = async (baseConfig, { production, app }) => {
       ].filter(Boolean),
     })
   );
-  return {
+  const webpackConfig = {
     ...config,
     output: {
       publicPath: '',
@@ -142,4 +142,56 @@ module.exports = async (baseConfig, { production, app }) => {
       },
     },
   };
+  const isBuildApmTrace = app === 'trace' && production;
+  if (isBuildApmTrace) {
+    return {
+      ...webpackConfig,
+      entry: {
+        ...config.entry,
+        main: './src/trace/pages/main/inquire.tsx',
+      },
+      output: {
+        filename: '[name].js',
+        chunkFormat: 'commonjs',
+        library: {
+          name: 'MyLibrary',
+          type: 'umd',
+          umdNamedDefine: true,
+        },
+        // library: {
+        //   type: 'module',
+        // },
+        // environment: {
+        //   module: true,
+        // },
+        // chunkFormat: 'module',
+        // module: true,
+      },
+      // experiments: {
+      //   outputModule: true,
+      // },
+      optimization: {
+        minimize: false,
+        mangleExports: false,
+      },
+      // externalsType: 'module',
+      externals: [
+        /monitor-pc/,
+        /monitor-fta/,
+        {
+          apm: '../',
+        },
+        /monitor-ui/,
+        /monitor-common/,
+        /monitor-api/,
+        /monitor-static/,
+        {
+          vue: '@blueking/bkui-library',
+        },
+        /echarts/,
+      ],
+      plugins: webpackConfig.plugins.filter((_, index) => index !== 0).filter(Boolean),
+    };
+  }
+  return webpackConfig;
 };

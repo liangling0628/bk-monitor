@@ -39,6 +39,7 @@ import { PanelModel } from 'monitor-ui/chart-plugins/typings';
 import authorityMixinCreate from '../../../apm/mixins/authorityMixin';
 import ListMenu, { type IMenuItem } from '../../components/list-menu/list-menu';
 import authorityStore from '../../store/modules/authority';
+import Trace from '../../trace/trace';
 import * as authorityMap from '../home/authority-map';
 import AddAppSide from './add-app/add-app-side';
 import AppHomeList from './components/apm-home-list';
@@ -53,7 +54,6 @@ import type { INavItem } from 'monitor-pc/pages/monitor-k8s/typings';
 
 import './apm-home.scss';
 import '@blueking/search-select-v3/vue2/vue2.css';
-
 @Component({})
 export default class AppList extends Mixins(authorityMixinCreate(authorityMap)) {
   routeList: INavItem[] = [
@@ -325,6 +325,12 @@ export default class AppList extends Mixins(authorityMixinCreate(authorityMap)) 
   }
 
   render() {
+    return (
+      <div>
+        <Trace />
+      </div>
+    );
+    // biome-ignore lint/correctness/noUnreachable: <explanation>
     return (
       <div class='apm-home-wrap-page'>
         <NavBar routeList={this.routeList}>
