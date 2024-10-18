@@ -294,7 +294,11 @@ const store = new Vuex.Store({
     updateIndexItem(state, payload) {
       ['ids', 'items', 'catchUnionBeginList'].forEach(key => {
         if (Array.isArray(state.indexItem[key]) && Array.isArray(payload?.[key] ?? false)) {
-          state.indexItem[key].splice(0, state.indexItem[key].length, ...(payload?.[key] ?? []));
+          state.indexItem[key].splice(
+            0,
+            state.indexItem[key].length,
+            ...(payload?.[key] ?? []).filter(v => v !== null && v !== undefined),
+          );
         }
       });
 
@@ -314,7 +318,11 @@ const store = new Vuex.Store({
       const defaultValue = { ...getDefaultRetrieveParams(), isUnionIndex: false, selectIsUnionSearch: false };
       ['ids', 'items', 'catchUnionBeginList'].forEach(key => {
         if (Array.isArray(state.indexItem[key])) {
-          state.indexItem[key].splice(0, state.indexItem[key].length, ...(payload?.[key] ?? []));
+          state.indexItem[key].splice(
+            0,
+            state.indexItem[key].length,
+            ...(payload?.[key] ?? []).filter(v => v !== null && v !== undefined),
+          );
         }
       });
 
@@ -443,8 +451,16 @@ const store = new Vuex.Store({
       state.indexId = indexId;
     },
     updateUnionIndexList(state, unionIndexList) {
-      state.unionIndexList.splice(0, state.unionIndexList.length, ...unionIndexList);
-      state.indexItem.ids.splice(0, state.indexItem.ids.length, ...unionIndexList);
+      state.unionIndexList.splice(
+        0,
+        state.unionIndexList.length,
+        ...unionIndexList.filter(v => v !== null && v !== undefined),
+      );
+      state.indexItem.ids.splice(
+        0,
+        state.indexItem.ids.length,
+        ...unionIndexList.filter(v => v !== null && v !== undefined),
+      );
       const unionIndexItemList = state.retrieve.indexSetList.filter(item => unionIndexList.includes(item.index_set_id));
       state.unionIndexItemList.splice(0, state.unionIndexItemList.length, ...unionIndexItemList);
     },
@@ -949,7 +965,7 @@ const store = new Vuex.Store({
      */
     requestIndexSetQuery(
       { commit, state, getters, dispatch },
-      payload = { isPagination: false, cancelToken: null, searchCount: undefined, formChartChange: false },
+      payload = { isPagination: false, cancelToken: null, searchCount: undefined, formChartChange: true },
     ) {
       if (
         (!state.indexItem.isUnionIndex && !state.indexId) ||
@@ -969,7 +985,7 @@ const store = new Vuex.Store({
       const [start_time, end_time] = handleTransformToTimestamp(datePickerValue);
       commit('updateIndexItem', { start_time, end_time });
 
-      if (!payload?.isPagination && !payload.formChartChange) {
+      if (!payload?.isPagination && payload.formChartChange) {
         store.commit('retrieve/updateChartKey');
       }
       const searchCount = payload.searchCount ?? state.indexSetQueryResult.search_count + 1;

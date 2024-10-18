@@ -55,12 +55,13 @@
   import { ref, watch, onMounted, computed } from 'vue';
   import useStore from '@/hooks/use-store';
 
-  const emit = defineEmits(['toggle-change']);
+  const emit = defineEmits(['toggle-change', 'change-queue-res']);
 
   const store = useStore();
   const chartKey = computed(() => store.state.retrieve.chartKey);
   const searchTotal = computed(() => store.state.searchTotal);
-  const isResultLoading = computed(() => store.state.indexSetQueryResult.is_loading || store.state.indexFieldInfo.is_loading)
+  const isResultLoading = computed(() => store.state.indexSetQueryResult.is_loading || store.state.indexFieldInfo.is_loading);
+  const getOffsetHeight = computed(() => (chartContainer.value?.offsetHeight || 32) - (!isFold.value ? 0 : 110));
 
   const isFold = ref(false);
   const chartContainer = ref(null);
@@ -69,13 +70,13 @@
 
   const handlePolling = (val) => {
     isLoading.value = val;
+    emit('change-queue-res', val);
   }
 
   const toggleExpand = val => {
     isFold.value = val;
     localStorage.setItem('chartIsFold', val);
-    const offsetHeight = chartContainer.value?.offsetHeight;
-    emit('toggle-change', !isFold.value, offsetHeight);
+    emit('toggle-change', !isFold.value, getOffsetHeight.value);
   };
 
   const handleChangeInterval = v => {
@@ -86,8 +87,7 @@
 
   onMounted(() => {
     isFold.value = JSON.parse(localStorage.getItem('chartIsFold') || 'false');
-    const offsetHeight = chartContainer.value?.offsetHeight;
-    emit('toggle-change', !isFold.value, offsetHeight);
+    emit('toggle-change', !isFold.value, getOffsetHeight.value);
   });
 
   watch(() => chartKey.value, () => {
@@ -97,7 +97,7 @@
 
     store.commit('updateIsSetDefaultTableColumn', false);
     store.dispatch('requestIndexSetFieldInfo').then(() => {
-      store.dispatch('requestIndexSetQuery', { formChartChange: true });
+      store.dispatch('requestIndexSetQuery', { formChartChange: false });
     });
   }, {
     immediate: true

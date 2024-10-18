@@ -27,9 +27,7 @@
 
   const finishPolling = ref(false);
   const isStart = ref(false);
-  const isLoading = ref(false);
 
-  let isRequsting = false;
   let requestInterval = 0;
   let pollingEndTime = 0;
   let pollingStartTime = 0;
@@ -39,7 +37,7 @@
 
   const handleRequestSplit = (startTime, endTime) => {
     const duration = (endTime - startTime) / 3600;
-    if (duration < 6) {
+    if (duration <= 6) {
       // 小于6小时 一次性请求
       return 0;
     }
@@ -70,10 +68,10 @@
       // 小于1小时 1min
       intervalTemp = '1m';
       currentInterval = '1m';
-      intervalTemp = 'auto';
 
       if (durationMin < 5) {
         currentInterval = '30s';
+        intervalTemp = 'auto';
       }
 
       if (durationMin < 2) {
@@ -97,7 +95,10 @@
       currentInterval = '1d';
     }
 
-    store.commit('updateIndexItem', { interval: intervalTemp });
+    // 只有在图表框选范围时才进行interval更新
+    if (/^chart_zoom_/.test(chartKey.value)) {
+      store.commit('updateIndexItem', { interval: intervalTemp });
+    }
   };
 
   // 需要更新图表数据
@@ -109,12 +110,9 @@
     requestInterval = isStart.value ? requestInterval : handleRequestSplit(startTimeStamp, endTimeStamp);
 
     if (!isStart.value) {
-      isRequsting = true;
       optionData.clear();
       // 获取坐标分片间隔
       handleIntervalSplit(startTimeStamp, endTimeStamp);
-      isLoading.value = true;
-      emit('polling', !isLoading.value);
 
       pollingEndTime = endTimeStamp;
       pollingStartTime = requestInterval > 0 ? pollingEndTime - requestInterval : startTimeStamp;
@@ -129,12 +127,16 @@
       pollingStartTime = startTimeStamp;
       // 轮询结束
       finishPolling.value = true;
-      isRequsting = false;
-      emit('polling', false);
     }
 
     if (pollingStartTime < retrieveParams.value.start_time) {
       pollingStartTime = retrieveParams.value.start_time;
+    }
+
+    if (pollingStartTime > pollingEndTime) {
+      // 轮询结束
+      finishPolling.value = true;
+      return;
     }
 
     if ((!isUnionSearch.value && !!route.params?.indexId) || (isUnionSearch.value && unionIndexList.value?.length)) {
@@ -180,8 +182,6 @@
 
           if (!res?.result) {
             finishPolling.value = true;
-            isRequsting = false;
-            emit('polling', false);
             updateChart([]);
             return;
           }
@@ -196,40 +196,42 @@
             getSeriesData(startTimeStamp, endTimeStamp);
             return;
           }
-
-          isRequsting = false;
         })
         .catch(() => {
           finishPolling.value = true;
-          isRequsting = false;
           updateChart([]);
-        })
-
-        .finally(() => {
-          isLoading.value = false;
         });
     } else {
       finishPolling.value = true;
-      isRequsting = false;
-      emit('polling', false);
     }
   };
+
+  let runningTimer = null;
 
   watch(
     () => chartKey.value,
     () => {
-      if (!isRequsting) {
-        finishPolling.value = false;
+      logChartCancel?.();
+      updateChart([]);
+      optionData.clear();
 
+      runningTimer && clearTimeout(runningTimer);
+      runningTimer = setTimeout(() => {
+        finishPolling.value = false;
         isStart.value = false;
-        optionData.clear();
-        logChartCancel?.();
-        updateChart([]);
         getSeriesData(retrieveParams.value.start_time, retrieveParams.value.end_time);
-      }
+      });
     },
     {
       immediate: true,
+    },
+  );
+
+  watch(
+    () => finishPolling.value,
+    () => {
+      console.log('finishPolling', finishPolling.value)
+      emit('polling', finishPolling.value);
     },
   );
 
@@ -244,7 +246,7 @@
 </script>
 <template>
   <div
-    v-bkloading="{ isLoading: isLoading }"
+    v-bkloading="{ isLoading: false }"
     class="monitor-echart-wrap"
   >
     <div
