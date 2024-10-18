@@ -29,7 +29,7 @@ import { useI18n } from 'vue-i18n';
 import { Button, Checkbox, Input, Radio, Select, Switcher, Table } from 'bkui-vue';
 import { debounce, deepClone, transformDataKey } from 'monitor-common/utils/utils';
 
-import CommonItem from '../components/common-item';
+// import CommonItem from '../components/common-item';
 import { localDataConvertToRequest } from '../components/http-editor/utils';
 import ResizeContainer from '../components/resize-container/resize-container';
 import VerifyItem from '../components/verify-item/verify-item';
@@ -918,7 +918,7 @@ export default defineComponent({
             )}
             {this.isEdit ? (
               <div class='sensitivity-failure-judgment'>
-                <CommonItem
+                {/* <CommonItem
                   class='failure'
                   title={this.$t('失败判断')}
                 >
@@ -934,7 +934,7 @@ export default defineComponent({
                       on-change={() => this.emitLocalHeaderInfo()}
                     />
                   </i18n>
-                </CommonItem>
+                </CommonItem> */}
               </div>
             ) : (
               <div class='sensitivity-failure-judgment'>

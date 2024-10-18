@@ -27,6 +27,7 @@ import { defineComponent, provide, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
 
+import { BkTableMap } from 'bk-table-next';
 import { Button, DatePicker, InfoBox, Message, Pagination, SearchSelect, Table } from 'bkui-vue';
 import { disableShield, frontendShieldList } from 'monitor-api/modules/shield';
 import { commonPageSizeGet, commonPageSizeSet } from 'monitor-common/utils';
@@ -39,6 +40,7 @@ import * as authMap from './authority-map';
 
 import type { IAuthority } from '../../typings/authority';
 
+import 'bk-table-next/dist/dist.css';
 import './alarm-shield.scss';
 
 enum EColunm {
@@ -105,7 +107,7 @@ export default defineComponent({
         {
           id: EColunm.id,
           name: 'ID',
-          width: 100,
+          'min-width': 100,
           disabled: true,
           checked: true,
           sort: {
@@ -115,7 +117,7 @@ export default defineComponent({
         {
           id: EColunm.shieldType,
           name: t('分类'),
-          width: 150,
+          'min-width': 150,
           disabled: true,
           checked: true,
           filter: {
@@ -132,14 +134,14 @@ export default defineComponent({
         {
           id: EColunm.shieldContent,
           name: t('屏蔽内容'),
-          width: 250,
+          'min-width': 250,
           disabled: false,
           checked: true,
         },
         {
           id: EColunm.beginTime,
           name: t('开始时间'),
-          width: 150,
+          'min-width': 150,
           disabled: false,
           checked: true,
           sort: {
@@ -149,7 +151,7 @@ export default defineComponent({
         {
           id: EColunm.failureTime,
           name: t('失效时间'),
-          width: 150,
+          'min-width': 150,
           disabled: false,
           checked: true,
           sort: {
@@ -159,35 +161,35 @@ export default defineComponent({
         {
           id: EColunm.cycleDuration,
           name: t('持续周期及时长'),
-          width: 150,
+          'min-width': 150,
           disabled: false,
           checked: true,
         },
         {
           id: EColunm.description,
           name: t('屏蔽原因'),
-          width: 230,
+          'min-width': 230,
           disabled: false,
           checked: true,
         },
         {
           id: EColunm.status,
           name: t('状态'),
-          width: 150,
+          'min-width': 150,
           disabled: false,
           checked: true,
         },
         {
           id: EColunm.updateUser,
           name: t('更新人'),
-          width: 150,
+          'min-width': 150,
           disabled: false,
           checked: true,
         },
         {
           id: EColunm.operate,
           name: t('操作'),
-          width: 150,
+          'min-width': 150,
           disabled: true,
           checked: true,
         },
@@ -514,7 +516,8 @@ export default defineComponent({
      * @description 当前筛选
      * @param opt
      */
-    function handleColumnFilter() {
+    function handleColumnFilter(v) {
+      console.info(v, '===============');
       tableData.pagination.current = 1;
       handleGetShiledList();
     }
@@ -566,6 +569,7 @@ export default defineComponent({
     }
 
     function handleSettingChange(opt) {
+      console.info(opt, '======');
       settings.checked = opt.checked;
       settings.size = opt.size;
     }
@@ -753,7 +757,7 @@ export default defineComponent({
           </div>
           <div class='table-wrap'>
             {!this.tableData.loading ? (
-              <Table
+              <BkTableMap
                 class='shield-table'
                 columns={this.tableData.columns
                   .filter(item => {
@@ -789,7 +793,7 @@ export default defineComponent({
                     />
                   ),
                 }}
-              </Table>
+              </BkTableMap>
             ) : (
               <TableSkeleton />
             )}

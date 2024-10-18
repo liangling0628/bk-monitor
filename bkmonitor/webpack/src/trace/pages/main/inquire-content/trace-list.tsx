@@ -42,6 +42,7 @@ import { useI18n } from 'vue-i18n';
 import { useRoute } from 'vue-router';
 
 import { addListener, removeListener } from '@blueking/fork-resize-detector';
+import { BkTableMap } from 'bk-table-next';
 import { Checkbox, Dialog, Loading, Popover, Radio, Table } from 'bkui-vue';
 import { CancelToken } from 'monitor-api/index';
 import { listOptionValues, spanDetail, traceDetail } from 'monitor-api/modules/apm_trace';
@@ -67,6 +68,7 @@ import TraceDetail from './trace-detail';
 import type { PanelModel } from '../../../plugins/typings';
 import type { IAppItem, ISpanListItem, ITraceListItem } from '../../../typings';
 
+import 'bk-table-next/dist/dist.css';
 import './trace-list.scss';
 
 type AliasMapType = {
@@ -1539,49 +1541,56 @@ export default defineComponent({
         </div>
       </EmptyStatus>
     );
-    const traceTableContent = () => (
-      <div
-        key={this.renderKey}
-        ref='traceTableContainer'
-        class={`trace-content-table-wrap ${this.showTraceDetail ? 'is-show-detail' : ' '}`}
-      >
-        <KeepAlive>
-          {this.store.isTraceLoading && !this.tableLoading ? (
-            <TableSkeleton />
-          ) : (
-            <Table
-              ref='traceTableElem'
-              style='height: 100%'
-              height='100%'
-              class='trace-table'
-              v-slots={{ empty: () => tableEmptyContent() }}
-              rowStyle={(row: { traceID: string[] }) => {
-                if (this.showTraceDetail && row.traceID?.[0] === this.curTraceId) return { background: '#EDF4FF' };
-                return {};
-              }}
-              // rowHeight={40}
-              border={this.isFullscreen ? '' : ['outer']}
-              columns={this.tableColumns}
-              data={this.localTableData}
-              scroll-loading={this.tableLoading}
-              settings={this.store.tableSettings.trace}
-              tabindex={-1}
-              onColumnFilter={this.handleSpanFilter}
-              onColumnSort={this.handleTraceColumnSort}
-              onScrollBottom={this.handleScrollBottom}
-              onSettingChange={this.handleTraceTableSettingsChange}
-            />
-          )}
-        </KeepAlive>
-      </div>
-    );
+    const traceTableContent = () => {
+      console.info({
+        columns: this.tableColumns,
+        data: this.localTableData,
+        settings: this.store.tableSettings.trace,
+      });
+      return (
+        <div
+          key={this.renderKey}
+          ref='traceTableContainer'
+          class={`trace-content-table-wrap ${this.showTraceDetail ? 'is-show-detail' : ' '}`}
+        >
+          <KeepAlive>
+            {this.store.isTraceLoading && !this.tableLoading ? (
+              <TableSkeleton />
+            ) : (
+              <BkTableMap
+                ref='traceTableElem'
+                style='height: 100%'
+                height='100%'
+                class='trace-table'
+                v-slots={{ empty: () => tableEmptyContent() }}
+                rowStyle={(row: { traceID: string[] }) => {
+                  if (this.showTraceDetail && row.traceID?.[0] === this.curTraceId) return { background: '#EDF4FF' };
+                  return {};
+                }}
+                // rowHeight={40}
+                border={this.isFullscreen ? '' : ['outer']}
+                columns={this.tableColumns}
+                data={this.localTableData}
+                scroll-loading={this.tableLoading}
+                settings={this.store.tableSettings.trace}
+                tabindex={-1}
+                onColumnFilter={this.handleSpanFilter}
+                onColumnSort={this.handleTraceColumnSort}
+                onScrollBottom={this.handleScrollBottom}
+                onSettingChange={this.handleTraceTableSettingsChange}
+              />
+            )}
+          </KeepAlive>
+        </div>
+      );
+    };
     const spanTableContent = () => (
       <div class='trace-content-table-wrap'>
         <KeepAlive>
           {this.store.isTraceLoading && !this.tableLoading ? (
             <TableSkeleton />
           ) : (
-            <Table
+            <BkTableMap
               ref='tableSpanElem'
               style='height: 100%'
               height='100%'

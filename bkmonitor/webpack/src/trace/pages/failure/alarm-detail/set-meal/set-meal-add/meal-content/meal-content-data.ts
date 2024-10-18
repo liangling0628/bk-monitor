@@ -26,7 +26,7 @@
 
 import { random } from 'monitor-common/utils/utils';
 
-import { type INoticeWayValue, robot } from '../components/notice-mode';
+// import { type INoticeWayValue, robot } from '../components/notice-mode';
 
 export const mealType = {
   notice: 'notice',
@@ -440,7 +440,7 @@ export const getNotifyConfig = notify_config => {
         ...way,
         // 只有wxwork-bot和bkchat会有receivers
         // 其中wxwork-bot是input框，需要将数组receivers转换为逗号分隔的字符串
-        receivers: way.name === robot.wxworkBot ? way.receivers.join(',') : way.receivers,
+        receivers: way.receivers,
       })) || [],
   }));
 };
