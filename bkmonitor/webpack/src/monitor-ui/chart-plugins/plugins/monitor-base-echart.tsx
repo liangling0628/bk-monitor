@@ -103,11 +103,11 @@ class MonitorBaseEchart extends BaseEchart {
                 left: 0,
                 top: 0,
               };
-              const canSetBootom = window.innerHeight - posRect.y - contentSize[1];
-              if (canSetBootom > 0) {
-                position.top = +pos[1] - Math.min(20, canSetBootom);
+              const canSetBottom = window.innerHeight - posRect.y - contentSize[1];
+              if (canSetBottom > 0) {
+                position.top = +pos[1] - Math.min(20, canSetBottom);
               } else {
-                position.top = +pos[1] + canSetBootom - 20;
+                position.top = +pos[1] + canSetBottom - 20;
               }
               const canSetLeft = window.innerWidth - posRect.x - contentSize[0];
               if (canSetLeft > 0) {
@@ -262,7 +262,7 @@ class MonitorBaseEchart extends BaseEchart {
     let liHtmls = [];
     let ulStyle = '';
     let hasWrapText = true;
-    const pointTime = dayjs.tz(params[0].axisValue).format('YYYY-MM-DD HH:mm:ss');
+    const pointTime = dayjs.tz(+params[0].axisValue).format('YYYY-MM-DD HH:mm:ss');
     if (params[0]?.data?.tooltips) {
       liHtmls.push(params[0].data.tooltips);
     } else {
@@ -270,20 +270,20 @@ class MonitorBaseEchart extends BaseEchart {
         .map(item => ({ color: item.color, seriesName: item.seriesName, value: item.value[1] }))
         .sort((a, b) => Math.abs(a.value - +this.curPoint.yAxis) - Math.abs(b.value - +this.curPoint.yAxis));
       const list = params.filter(item => !item.seriesName.match(/-no-tips$/));
-      liHtmls = (this.sortTooltipsValue ? list.sort((a, b) => b.value[1] - a.value[1]) : list).map(item => {
+      liHtmls = (this.sortTooltipsValue ? list.sort((a, b) => b.value - a.value) : list).map(item => {
         let markColor = 'color: #fafbfd;';
-        if (data[0].value === item.value[1]) {
+        if (data[0].value === item.value) {
           markColor = 'color: #fff;font-weight: bold;';
           this.curPoint = {
             color: item.color,
             name: item.seriesName,
             seriesIndex: item.seriesIndex,
             dataIndex: item.dataIndex,
-            xAxis: item.value[0],
-            yAxis: item.value[1],
+            xAxis: item.axisValue,
+            yAxis: item.value,
           };
         }
-        if (item.value[1] === null) return undefined;
+        if (item.value === null) return undefined;
         let curSeries: any = (this as any).curChartOption.series[item.seriesIndex];
         if (curSeries?.stack?.includes('boundary-')) {
           curSeries = (this as any).curChartOption.series.find((item: any) => !item?.stack?.includes('boundary-'));
@@ -292,7 +292,7 @@ class MonitorBaseEchart extends BaseEchart {
         const minBase = curSeries.minBase || 0;
         const precision =
           !['none', ''].some(val => val === curSeries.unit) && +curSeries.precision < 1 ? 2 : +curSeries.precision;
-        const valueObj = unitFormater(item.value[1] - minBase, precision);
+        const valueObj = unitFormater(item.value - minBase, precision);
         return `<li class="tooltips-content-item">
                   <span class="item-series"
                    style="background-color:${item.color};">

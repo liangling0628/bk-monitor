@@ -194,8 +194,8 @@ export const MONITOR_LINE_OPTIONS: MonitorEchartOptions = {
     axisLabel: {
       fontSize: 12,
       color: '#979BA5',
-      showMinLabel: false,
-      showMaxLabel: false,
+      // showMinLabel: false,
+      // showMaxLabel: false,
       align: 'left',
     },
     splitLine: {

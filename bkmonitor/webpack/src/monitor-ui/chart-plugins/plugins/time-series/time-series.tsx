@@ -55,6 +55,7 @@ import {
 import { isShadowEqual, reviewInterval } from '../../utils';
 import { getSeriesMaxInterval, getTimeSeriesXInterval } from '../../utils/axis';
 import { handleRelateAlert } from '../../utils/menu';
+import { timeseries2category } from '../../utils/timeseries-categroy';
 import { VariablesService } from '../../utils/variable';
 import BaseEchart from '../monitor-base-echart';
 
@@ -527,8 +528,8 @@ export class LineChart
             });
           });
         }
-        const formatData = seriesList.find(item => item.data?.length > 0)?.data || [];
-        const formatterFunc = this.handleSetFormatterFunc(formatData);
+        // const formatData = seriesList.find(item => item.data?.length > 0)?.data || [];
+        // const formatterFunc = this.handleSetFormatterFunc(formatData);
         const { canScale, minThreshold, maxThreshold } = this.handleSetThreholds();
 
         const chartBaseOptions = MONITOR_LINE_OPTIONS;
@@ -539,49 +540,49 @@ export class LineChart
         );
         const isBar = this.panel.options?.time_series?.type === 'bar';
         const xInterval = getTimeSeriesXInterval(maxXInterval, this.width, maxSeriesCount);
-        this.options = Object.freeze(
-          deepmerge(echartOptions, {
-            animation: hasShowSymbol,
-            color: isBar ? COLOR_LIST_BAR : COLOR_LIST,
-            animationThreshold: 1,
-            yAxis: {
-              axisLabel: {
-                formatter: seriesList.every((item: any) => item.unit === seriesList[0].unit)
-                  ? (v: any) => {
-                      if (seriesList[0].unit !== 'none') {
-                        const obj = getValueFormat(seriesList[0].unit)(v, seriesList[0].precision);
-                        return obj.text + (this.yAxisNeedUnitGetter ? obj.suffix : '');
-                      }
-                      return v;
+        const options = deepmerge(echartOptions, {
+          animation: hasShowSymbol,
+          color: isBar ? COLOR_LIST_BAR : COLOR_LIST,
+          animationThreshold: 1,
+          yAxis: {
+            axisLabel: {
+              formatter: seriesList.every((item: any) => item.unit === seriesList[0].unit)
+                ? (v: any) => {
+                    if (seriesList[0].unit !== 'none') {
+                      const obj = getValueFormat(seriesList[0].unit)(v, seriesList[0].precision);
+                      return obj.text + (this.yAxisNeedUnitGetter ? obj.suffix : '');
                     }
-                  : (v: number) => this.handleYxisLabelFormatter(v - this.minBase),
-              },
-              splitNumber: this.height < 120 ? 2 : 4,
-              minInterval: 1,
-              scale: this.height < 120 ? false : canScale,
-              max: v => Math.max(v.max, +maxThreshold),
-              min: v => {
-                let min = Math.min(v.min, +minThreshold);
-                // 柱状图y轴不能以最小值作为起始点
-                if (isBar) min = min <= 10 ? 0 : min - 10;
-                return min;
-              },
+                    return v;
+                  }
+                : (v: number) => this.handleYxisLabelFormatter(v - this.minBase),
             },
-            xAxis: {
-              axisLabel: {
-                formatter: formatterFunc || '{value}',
-              },
-              ...xInterval,
+            splitNumber: this.height < 120 ? 2 : 4,
+            minInterval: 1,
+            scale: this.height < 120 ? false : canScale,
+            max: v => Math.max(v.max, +maxThreshold),
+            min: v => {
+              let min = Math.min(v.min, +minThreshold);
+              // 柱状图y轴不能以最小值作为起始点
+              if (isBar) min = min <= 10 ? 0 : min - 10;
+              return min;
             },
-            series: seriesList,
-            tooltip: this.handleSetTooltip(),
-            customData: {
-              // customData 自定义的一些配置 用户后面echarts实例化后的配置
-              maxXInterval,
-              maxSeriesCount,
-            },
-          })
-        );
+          },
+          xAxis: {
+            // axisLabel: {
+            //   formatter: formatterFunc || '{value}',
+            // },
+            // ...xInterval,
+          },
+          series: seriesList,
+          tooltip: this.handleSetTooltip(),
+          customData: {
+            // customData 自定义的一些配置 用户后面echarts实例化后的配置
+            maxXInterval,
+            maxSeriesCount,
+          },
+        });
+        this.options = timeseries2category(options);
+        console.info(options, '__________');
         this.handleDrillDownOption(this.metrics);
         this.inited = true;
         this.empty = false;

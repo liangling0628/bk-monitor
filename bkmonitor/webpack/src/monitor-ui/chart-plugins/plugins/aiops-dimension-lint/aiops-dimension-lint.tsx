@@ -37,6 +37,7 @@ import ListLegend from '../../components/chart-legend/common-legend';
 import TableLegend from '../../components/chart-legend/table-legend';
 import ChartHeader from '../../components/chart-title/chart-title';
 import { MONITOR_BAR_OPTIONS } from '../../constants';
+import { timeseries2category } from '../../utils/timeseries-categroy';
 import { VariablesService } from '../../utils/variable';
 import BaseEchart from '../monitor-base-echart';
 import { LineChart } from '../time-series/time-series';
@@ -162,6 +163,7 @@ export default class AiopsDimensionLine extends LineChart {
       const promiseList = [];
       const timeShiftList = ['', ...this.timeOffset];
       const variablesService = new VariablesService(this.viewOptions);
+      // biome-ignore lint/complexity/noForEach: <explanation>
       timeShiftList.forEach(time_shift => {
         const list = this.panel.targets.map(item =>
           (this as any).$api[item.apiModule]
@@ -217,6 +219,7 @@ export default class AiopsDimensionLine extends LineChart {
           series.map(item => ({
             name: item.name,
             cursor: 'auto',
+            // biome-ignore lint/style/noCommaOperator: <explanation>
             data: item.datapoints.reduce((pre: any, cur: any) => (pre.push(cur.reverse()), pre), []),
             stack: item.stack || random(10),
             unit: item.unit,
@@ -233,45 +236,42 @@ export default class AiopsDimensionLine extends LineChart {
           max: v => Math.max(v.max, +maxThreshold),
           min: v => Math.min(v.min, +minThreshold),
         };
-        const formatterFunc = this.handleSetFormatterFunc(seriesList[0].data);
         const echartOptions: any = MONITOR_BAR_OPTIONS;
         this.options = Object.freeze(
-          deepmerge(echartOptions, {
-            animation: true,
-            animationThreshold: 1,
-            grid: {
-              top: 10,
-              right: 32,
-            },
-            yAxis: {
-              axisLabel: {
-                formatter: seriesList.every((item: any) => item.unit === seriesList[0].unit)
-                  ? (v: any) => {
-                      if (seriesList[0].unit !== 'none') {
-                        const obj = getValueFormat(seriesList[0].unit)(v, seriesList[0].precision);
-                        return obj.text + (this.yAxisNeedUnitGetter ? obj.suffix : '');
+          timeseries2category(
+            deepmerge(echartOptions, {
+              animation: true,
+              animationThreshold: 1,
+              grid: {
+                top: 10,
+                right: 32,
+              },
+              yAxis: {
+                axisLabel: {
+                  formatter: seriesList.every((item: any) => item.unit === seriesList[0].unit)
+                    ? (v: any) => {
+                        if (seriesList[0].unit !== 'none') {
+                          const obj = getValueFormat(seriesList[0].unit)(v, seriesList[0].precision);
+                          return obj.text + (this.yAxisNeedUnitGetter ? obj.suffix : '');
+                        }
+                        return v;
                       }
-                      return v;
-                    }
-                  : (v: number) => this.handleYxisLabelFormatter(v - this.minBase),
+                    : (v: number) => this.handleYxisLabelFormatter(v - this.minBase),
+                },
+                splitNumber: this.height < 200 ? 2 : 4,
+                minInterval: 1,
+                scale: this.height < 120 ? false : canScale,
+                max: v => Math.max(v.max, +maxThreshold),
+                ...yAxis,
               },
-              splitNumber: this.height < 200 ? 2 : 4,
-              minInterval: 1,
-              scale: this.height < 120 ? false : canScale,
-              max: v => Math.max(v.max, +maxThreshold),
-              ...yAxis,
-            },
-            xAxis: {
-              axisLabel: {
-                formatter: formatterFunc || '{value}',
+              xAxis: {
+                // splitNumber: Math.ceil((this.$el as Element).getBoundingClientRect().width / 150),
+                // min: 'dataMin',
               },
-              splitNumber: Math.ceil((this.$el as Element).getBoundingClientRect().width / 150),
-              min: 'dataMin',
-            },
-            series: seriesList,
-          })
-        ) as MonitorEchartOptions;
-
+              series: seriesList,
+            }) as MonitorEchartOptions
+          )
+        );
         this.metrics = metrics || [];
         this.inited = true;
         this.empty = false;
@@ -454,8 +454,9 @@ export default class AiopsDimensionLine extends LineChart {
 
     return (
       <span class='aiops-correlation-reason'>
-        {this.reasons.map(reasons => (
+        {this.reasons.map((reasons, index) => (
           <span
+            key={index}
             class={[reasons.indexOf('异常') > -1 ? 'err-reason' : '']}
             v-bk-overflow-tips
           >
