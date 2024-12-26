@@ -38,7 +38,9 @@ import useLocale from '@/hooks/use-locale';
 import useResizeObserve from '@/hooks/use-resize-observe';
 import useStore from '@/hooks/use-store';
 import useWheel from '@/hooks/use-wheel';
+import { RetrieveUrlResolver } from '@/store/url-resolver';
 import { uniqueId } from 'lodash';
+import { useRoute, useRouter } from 'vue-router/composables';
 
 import ExpandView from '../original-log/expand-view.vue';
 import OperatorTools from '../original-log/operator-tools.vue';
@@ -114,6 +116,9 @@ export default defineComponent({
     const tableList = computed(() => indexSetQueryResult.value?.list ?? []);
     const fullColumns = ref([]);
     const showCtxType = ref(props.contentType);
+
+    const router = useRouter();
+    const route = useRoute();
 
     const totalCount = computed(() => {
       const count = store.state.indexSetQueryResult.total;
@@ -416,10 +421,26 @@ export default defineComponent({
       return data;
     };
 
+    const setRouteParams = () => {
+      const query = { ...route.query };
+
+      const resolver = new RetrieveUrlResolver({
+        keyword: store.getters.retrieveParams.keyword,
+        addition: store.getters.retrieveParams.addition,
+      });
+
+      Object.assign(query, resolver.resolveParamsToUrl());
+
+      router.replace({
+        query,
+      });
+    };
+
     const handleAddCondition = (field, operator, value, isLink = false, depth = undefined) => {
       store
         .dispatch('setQueryCondition', { field, operator, value, isLink, depth })
         .then(([newSearchList, searchMode, isNewSearchPage]) => {
+          setRouteParams();
           if (isLink) {
             const openUrl = getConditionRouterParams(newSearchList, searchMode, isNewSearchPage);
             window.open(openUrl, '_blank');
@@ -521,6 +542,14 @@ export default defineComponent({
       }
     };
 
+    const isRequesting = ref(false);
+
+    const debounceSetLoading = () => {
+      setTimeout(() => {
+        isRequesting.value = false;
+      }, 120);
+    };
+
     const expandOption = {
       render: ({ row }) => {
         return (
@@ -612,6 +641,9 @@ export default defineComponent({
         });
         updateTableRowConfig(oldVal?.[0] ?? 0);
       },
+      {
+        immediate: true,
+      },
     );
 
     const handleColumnWidthChange = (w, col) => {
@@ -647,18 +679,11 @@ export default defineComponent({
       const field = visibleFields.value.find(item => item.field_name === col.field);
       field.width = width;
 
-      store.commit('updateVisibleFields', visibleFields.value);
       store.dispatch('userFieldConfigChange', {
         fieldsWidth: newFieldsWidthObj,
       });
-    };
 
-    const isRequesting = ref(false);
-
-    const debounceSetLoading = () => {
-      setTimeout(() => {
-        isRequesting.value = false;
-      }, 120);
+      store.commit('updateVisibleFields', visibleFields.value);
     };
 
     const loadMoreTableData = () => {
@@ -708,12 +733,14 @@ export default defineComponent({
       };
 
       const leftWidth = leftColumns.value.reduce(callback, 0);
-
       const rightWidth = rightColumns.value.reduce(callback, 0);
-
       const visibleWidth = getFieldColumns().reduce(callback, 0);
 
-      return leftWidth + rightWidth + visibleWidth;
+      if (isNaN(visibleWidth)) {
+        return offsetWidth.value;
+      }
+
+      return leftWidth + rightWidth + visibleWidth - 2;
     });
 
     const hasScrollX = computed(() => {
@@ -902,7 +929,11 @@ export default defineComponent({
     };
 
     const renderFixRightShadow = () => {
-      return <div class='fixed-right-shadown'></div>;
+      if (tableDataSize.value > 0) {
+        return <div class='fixed-right-shadown'></div>;
+      }
+
+      return null;
     };
 
     const isTableLoading = computed(() => {
