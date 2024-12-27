@@ -558,8 +558,9 @@
     });
   };
 
-  const handleConditionValueInputFocus = () => {
+  const handleConditionValueInputFocus = e => {
     isConditionValueInputFocus.value = true;
+    handleInputVlaueChange(e);
   };
 
   const hanleDeleteTagItem = index => {
@@ -879,6 +880,8 @@
       e.target.value = '';
       appendConditionValue(value);
     }
+
+    handleInputVlaueChange(e);
   };
 
   const handleConditionValueInputBlur = e => {
@@ -1089,6 +1092,7 @@
                       class="tag-item-input"
                       v-model="condition.value[index]"
                       type="text"
+                      @input="handleInputVlaueChange"
                       @blur.stop="handleTagInputBlur"
                       @keyup.enter="handleTagInputEnter"
                     />
