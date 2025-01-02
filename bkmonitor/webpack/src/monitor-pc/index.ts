@@ -39,6 +39,7 @@ import Axios from 'monitor-api/axios/axios';
 import { setVue } from 'monitor-api/utils/index';
 import { immediateRegister } from 'monitor-common/service-worker/service-wroker';
 import { getUrlParam, mergeSpaceList, setGlobalBizId } from 'monitor-common/utils';
+import { registerMicroApps } from 'qiankun';
 
 import './common/global-login';
 import App from './pages/app';
@@ -49,6 +50,14 @@ import store from './store/store';
 import './static/css/global.scss';
 import './static/css/reset.scss';
 import 'monitor-static/icons/monitor-icons.css';
+registerMicroApps([
+  {
+    name: 'apm',
+    entry: '//appdev.woa.com:7002/',
+    container: '#apmPageWrap',
+    activeRule: '#/apm/home',
+  },
+]);
 // import './tailwind.css';
 // todo: 子应用externals
 // import './common/externals';

@@ -26,8 +26,8 @@
 import { Component } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
 
-import { activated, deactivated, loadApp } from '@blueking/bk-weweb';
 import EventDetailSlider from 'fta-solutions/pages/event/event-detail/event-detail-slider';
+import { start } from 'qiankun';
 
 import introduce from '../../common/introduce';
 import GuidePage from '../../components/guide-page/guide-page';
@@ -73,40 +73,41 @@ export default class ApmPage extends tsc<object> {
   }
   async mounted() {
     if (this.showGuidePage) return;
-    this.loading = true;
-    await loadApp({
-      url: this.apmUrl,
-      id: this.appkey,
-      container: this.$refs.apmPageWrap as HTMLElement,
-      showSourceCode: true,
-      scopeCss: true,
-      scopeJs: true,
-      scopeLocation: false,
-      setShodowDom: false,
-      keepAlive: false,
-      data: {
-        host: this.apmHost,
-        baseroute: '/apm/',
-        $baseStore: this.$store,
-        showDetailSlider: this.handleShowDetail,
-      },
-    });
-    activated(this.appkey, this.$refs.apmPageWrap as HTMLElement);
-    window.requestIdleCallback(() => (this.loading = false));
+    start();
+    // this.loading = true;
+    // await loadApp({
+    //   url: this.apmUrl,
+    //   id: this.appkey,
+    //   container: this.$refs.apmPageWrap as HTMLElement,
+    //   showSourceCode: true,
+    //   scopeCss: true,
+    //   scopeJs: true,
+    //   scopeLocation: false,
+    //   setShodowDom: false,
+    //   keepAlive: false,
+    //   data: {
+    //     host: this.apmHost,
+    //     baseroute: '/apm/',
+    //     $baseStore: this.$store,
+    //     showDetailSlider: this.handleShowDetail,
+    //   },
+    // });
+    // activated(this.appkey, this.$refs.apmPageWrap as HTMLElement);
+    // window.requestIdleCallback(() => (this.loading = false));
   }
   beforeRouteLeave(to, from, next) {
     next();
   }
   async activated() {
     if (this.showGuidePage || this.loading) return;
-    activated(this.appkey, this.$refs.apmPageWrap as HTMLElement);
+    // activated(this.appkey, this.$refs.apmPageWrap as HTMLElement);
   }
   beforeDestroy() {
     if (this.showGuidePage) return;
-    this.$route.name !== 'application-add' && deactivated(this.appkey);
+    // this.$route.name !== 'application-add' && deactivated(this.appkey);
   }
   deactivate() {
-    this.$route.name !== 'application-add' && deactivated(this.appkey);
+    // this.$route.name !== 'application-add' && deactivated(this.appkey);
   }
   /**
    * @description: 显示详情数据
@@ -121,6 +122,7 @@ export default class ApmPage extends tsc<object> {
     return (
       <div class='apm-wrap'>
         <div
+          id='apmPageWrap'
           ref='apmPageWrap'
           class='apm-wrap-iframe'
         />
