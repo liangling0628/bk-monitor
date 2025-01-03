@@ -78,7 +78,7 @@ export default class ApmPage extends tsc<object> {
       url: this.apmUrl,
       id: this.appkey,
       container: this.$refs.apmPageWrap as HTMLElement,
-      showSourceCode: true,
+      showSourceCode: false,
       scopeCss: true,
       scopeJs: true,
       scopeLocation: false,
