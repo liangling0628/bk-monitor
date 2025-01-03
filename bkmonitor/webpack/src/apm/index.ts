@@ -146,6 +146,8 @@ async function bootstrap() {
 }
 
 async function mount(props) {
+  window.xxxxxxxx = 'asdfasdfsad';
+  console.info(window, '+++++++++++++++');
   console.log('[vue] props from main framework', props);
   render();
 }

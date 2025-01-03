@@ -55,7 +55,9 @@ registerMicroApps([
     name: 'apm',
     entry: '//appdev.woa.com:7002/',
     container: '#apmPageWrap',
-    activeRule: '#/apm/home',
+    activeRule: (location: Location) => {
+      return location.hash.startsWith('#/apm');
+    },
   },
 ]);
 // import './tailwind.css';

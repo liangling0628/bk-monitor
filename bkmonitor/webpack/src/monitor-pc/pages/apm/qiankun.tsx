@@ -33,7 +33,6 @@ import introduce from '../../common/introduce';
 import GuidePage from '../../components/guide-page/guide-page';
 
 import './apm.scss';
-
 Component.registerHooks(['beforeRouteLeave']);
 @Component
 export default class ApmPage extends tsc<object> {
@@ -73,7 +72,15 @@ export default class ApmPage extends tsc<object> {
   }
   async mounted() {
     if (this.showGuidePage) return;
-    start();
+    window.__BK_WEWEB_DATA__ = {
+      baseroute: '/apm/',
+    };
+    start({
+      sandbox: {
+        // strictStyleIsolation: true,
+        loose: false,
+      },
+    });
     // this.loading = true;
     // await loadApp({
     //   url: this.apmUrl,
