@@ -10,6 +10,8 @@ specific language governing permissions and limitations under the License.
 """
 from typing import Dict, Optional
 
+from django.db.models import F, Max, Value
+from django.db.models.functions import Concat
 from django.utils.functional import cached_property
 
 from apm_web.utils import get_interval_number
@@ -29,7 +31,7 @@ class FilterCollection(object):
     def __init__(self, meta):
         self.filters = dict()
         self.meta = meta
-        self.query_set = meta.resource_class.objects.all()
+        self.query_set = meta.resource_class.objects.all().order_by("id")
         if meta.only_fields:
             self.query_set = self.query_set.only(*self.meta.only_fields)
 
@@ -117,8 +119,8 @@ class K8sResourceMeta(object):
         self.bk_biz_id = bk_biz_id
         self.bcs_cluster_id = bcs_cluster_id
         self.setup_filter()
-        self.set_agg_method()
         self.agg_interval = ""
+        self.set_agg_method()
 
     def set_agg_interval(self, start_time, end_time):
         """设置聚合查询的间隔"""
@@ -163,6 +165,11 @@ class K8sResourceMeta(object):
         从 meta 获取数据
         """
         return self.filter.filter_queryset
+
+    @classmethod
+    def distinct(cls, queryset):
+        # pod不需要去重，因为不会重名，workload，container 在不同ns下会重名，因此需要去重
+        return queryset
 
     def get_from_promql(self, start_time, end_time, order_by="", page_size=20, method="sum"):
         """
@@ -315,7 +322,7 @@ class K8sPodMeta(K8sResourceMeta):
                 f"{metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m])[{self.agg_interval}:]))"
             )
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace, pod_name) "
+            f"{self.method} by (workload_kind, workload_name, namespace, pod_name) "
             f"(rate({metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m]))"
         )
 
@@ -328,7 +335,7 @@ class K8sPodMeta(K8sResourceMeta):
             )
 
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace, pod_name) "
+            f"{self.method} by (workload_kind, workload_name, namespace, pod_name) "
             f"({metric_name}{{{self.filter.filter_string(exclude=exclude)}}})"
         )
 
@@ -343,7 +350,7 @@ class K8sPodMeta(K8sResourceMeta):
             )
 
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace, pod_name) "
+            f"{self.method} by (workload_kind, workload_name, namespace, pod_name) "
             f"((increase(container_cpu_cfs_throttled_periods_total{{{self.filter.filter_string()}}}[1m]) / increase("
             f"container_cpu_cfs_periods_total{{{self.filter.filter_string()}}}[1m])))"
         )
@@ -490,7 +497,7 @@ class K8sNamespaceMeta(K8sResourceMeta):
                 f"{metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m])[{self.agg_interval}:]))"
             )
         return (
-            f"{self.agg_method} by (namespace) "
+            f"{self.method} by (namespace) "
             f"(rate({metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m]))"
         )
 
@@ -501,7 +508,7 @@ class K8sNamespaceMeta(K8sResourceMeta):
                 f"sum by (namespace) ({self.agg_method}_over_time("
                 f"{metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[{self.agg_interval}:]))"
             )
-        return f"{self.agg_method} by (namespace) ({metric_name}{{{self.filter.filter_string(exclude=exclude)}}})"
+        return f"{self.method} by (namespace) ({metric_name}{{{self.filter.filter_string(exclude=exclude)}}})"
 
     @property
     def meta_prom_with_container_cpu_cfs_throttled_ratio(self):
@@ -514,7 +521,7 @@ class K8sNamespaceMeta(K8sResourceMeta):
             )
 
         return (
-            f"{self.agg_method} by (namespace) "
+            f"{self.method} by (namespace) "
             f"((increase(container_cpu_cfs_throttled_periods_total{{{self.filter.filter_string()}}}[1m]) / increase("
             f"container_cpu_cfs_periods_total{{{self.filter.filter_string()}}}[1m])))"
         )
@@ -549,7 +556,7 @@ class K8sWorkloadMeta(K8sResourceMeta):
                 f"{metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m])[{self.agg_interval}:]))"
             )
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace) "
+            f"{self.method} by (workload_kind, workload_name, namespace) "
             f"(rate({metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m]))"
         )
 
@@ -560,7 +567,7 @@ class K8sWorkloadMeta(K8sResourceMeta):
                 f"({metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[{self.agg_interval}:]))"
             )
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace) "
+            f"{self.method} by (workload_kind, workload_name, namespace) "
             f"({metric_name}{{{self.filter.filter_string(exclude=exclude)}}})"
         )
 
@@ -575,7 +582,7 @@ class K8sWorkloadMeta(K8sResourceMeta):
             )
 
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace) "
+            f"{self.method} by (workload_kind, workload_name, namespace) "
             f"((increase(container_cpu_cfs_throttled_periods_total{{{self.filter.filter_string()}}}[1m]) / increase("
             f"container_cpu_cfs_periods_total{{{self.filter.filter_string()}}}[1m])))"
         )
@@ -648,6 +655,19 @@ class K8sWorkloadMeta(K8sResourceMeta):
         )
         return promql
 
+    @classmethod
+    def distinct(cls, queryset):
+        query_set = (
+            queryset.values('type', "name")
+            .order_by()
+            .annotate(
+                distinct_name=Max("id"),
+                workload=Concat(F("type"), Value(":"), F("name")),
+            )
+            .values("workload")
+        )
+        return query_set
+
 
 class K8sContainerMeta(K8sResourceMeta):
     resource_field = "container_name"
@@ -659,6 +679,17 @@ class K8sContainerMeta(K8sResourceMeta):
     def resource_field_list(self):
         return ["pod_name", self.resource_field]
 
+    @classmethod
+    def distinct(cls, queryset):
+        query_set = (
+            queryset.values('name')
+            .order_by()
+            .annotate(distinct_name=Max("id"))
+            .annotate(container=F("name"))
+            .values("container")
+        )
+        return query_set
+
     def tpl_prom_with_rate(self, metric_name, exclude=""):
         if self.agg_interval:
             return (
@@ -667,7 +698,7 @@ class K8sContainerMeta(K8sResourceMeta):
                 f"(rate({metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m])[{self.agg_interval}:]))"
             )
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace, container_name, pod_name) "
+            f"{self.method} by (workload_kind, workload_name, namespace, container_name, pod_name) "
             f"(rate({metric_name}{{{self.filter.filter_string(exclude=exclude)}}}[1m]))"
         )
 
@@ -680,7 +711,7 @@ class K8sContainerMeta(K8sResourceMeta):
             )
         """按内存排序的资源查询promql"""
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace, container_name, pod_name)"
+            f"{self.method} by (workload_kind, workload_name, namespace, container_name, pod_name)"
             f" ({metric_name}{{{self.filter.filter_string(exclude=exclude)}}})"
         )
 
@@ -695,7 +726,7 @@ class K8sContainerMeta(K8sResourceMeta):
             )
 
         return (
-            f"{self.agg_method} by (workload_kind, workload_name, namespace, pod_name, container_name) "
+            f"{self.method} by (workload_kind, workload_name, namespace, pod_name, container_name) "
             f"((increase(container_cpu_cfs_throttled_periods_total{{{self.filter.filter_string()}}}[1m]) / increase("
             f"container_cpu_cfs_periods_total{{{self.filter.filter_string()}}}[1m])))"
         )
