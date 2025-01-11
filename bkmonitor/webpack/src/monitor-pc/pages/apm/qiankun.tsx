@@ -75,12 +75,7 @@ export default class ApmPage extends tsc<object> {
     window.__BK_WEWEB_DATA__ = {
       baseroute: '/apm/',
     };
-    start({
-      sandbox: {
-        // strictStyleIsolation: true,
-        loose: false,
-      },
-    });
+    start();
     // this.loading = true;
     // await loadApp({
     //   url: this.apmUrl,
