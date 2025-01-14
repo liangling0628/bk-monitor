@@ -8,18 +8,29 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+"""
+测试使用，配置vm模块， target: test 集群的 故障影响范围
+"""
 
-from config.default import FRONTEND_BACKEND_SEPARATION
 
-from .default import *  # noqa
+from alarm_backends.service.alert.qos.scope import EmptyScope
 
-# 预发布环境
-RUN_MODE = "STAGING"
 
-# 前后端开发模式下支持跨域配置
-if FRONTEND_BACKEND_SEPARATION:
-    INSTALLED_APPS += ("corsheaders",)
-    # 该跨域中间件需要放在前面
-    MIDDLEWARE = ("corsheaders.middleware.CorsMiddleware",) + MIDDLEWARE
-    CORS_ALLOW_ALL_ORIGINS = True
-    CORS_ALLOW_CREDENTIALS = True
+class Scope(EmptyScope):
+    duration = 60 * 10
+
+    def get_scope_dimension(self):
+        return {
+            "id": __name__,
+            'category': 'dimension',
+            'scope_type': '',
+            # 根据实际情况更新
+            'begin_time': 0,
+            'end_time': 0,
+            'dimension_config': {
+                'dimension_conditions': [
+                    {'key': 'bk_biz_id', 'value': [2], 'method': 'eq', 'condition': 'and', 'name': 'bk_biz_id'}
+                ]
+            },
+            'cycle_config': {'type': 1},
+        }

@@ -9,17 +9,40 @@ an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express o
 specific language governing permissions and limitations under the License.
 """
 
-from config.default import FRONTEND_BACKEND_SEPARATION
+"""
+故障发布流程:
+新增故障缓存，记录故障影响的模块和目标
 
-from .default import *  # noqa
+failure_publish
+"""
 
-# 预发布环境
-RUN_MODE = "STAGING"
 
-# 前后端开发模式下支持跨域配置
-if FRONTEND_BACKEND_SEPARATION:
-    INSTALLED_APPS += ("corsheaders",)
-    # 该跨域中间件需要放在前面
-    MIDDLEWARE = ("corsheaders.middleware.CorsMiddleware",) + MIDDLEWARE
-    CORS_ALLOW_ALL_ORIGINS = True
-    CORS_ALLOW_CREDENTIALS = True
+class FailureCollection:
+    def __init__(
+        self,
+    ):
+        self.collection = {}
+
+    def add(self, tag, cls):
+        if tag not in self.collection:
+            self.collection[tag] = cls
+
+
+FC = FailureCollection()
+
+
+def register_influence(module):
+    # 注册功能控制
+    def register(cls):
+        cls.module = module
+        FC.add(module, cls)
+        return cls
+
+    return register
+
+
+class IncidentInfluence:
+    module = ""
+
+    def __init__(self):
+        self._cache = {}

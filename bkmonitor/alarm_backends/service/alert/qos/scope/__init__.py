@@ -8,18 +8,24 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+from django.utils.module_loading import import_string
 
-from config.default import FRONTEND_BACKEND_SEPARATION
 
-from .default import *  # noqa
+class EmptyScope:
+    duration = 0
 
-# 预发布环境
-RUN_MODE = "STAGING"
+    def get_scope_dimension(self):
+        return {}
 
-# 前后端开发模式下支持跨域配置
-if FRONTEND_BACKEND_SEPARATION:
-    INSTALLED_APPS += ("corsheaders",)
-    # 该跨域中间件需要放在前面
-    MIDDLEWARE = ("corsheaders.middleware.CorsMiddleware",) + MIDDLEWARE
-    CORS_ALLOW_ALL_ORIGINS = True
-    CORS_ALLOW_CREDENTIALS = True
+    def get_scope_duration(self):
+        return self.duration
+
+
+empty = EmptyScope()
+
+
+def load_scope(module_name, target):
+    try:
+        return import_string(f"{__name__}.{module_name}_{target}.Scope")()
+    except ImportError:
+        return empty
