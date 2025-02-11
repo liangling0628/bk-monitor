@@ -519,7 +519,8 @@
   const confirmLoading = ref(false);
   // 字段表格校验
   const checkFieldsTable = () => {
-    return formData.value.etl_config === 'bk_log_json' ? indexfieldTable.value.validateFieldTable() : [];
+    return indexfieldTable.value.validateFieldTable()
+    // return formData.value.etl_config === 'bk_log_json' ? indexfieldTable.value.validateFieldTable() : [];
   };
 
   const originfieldTable = ref(null);
@@ -528,13 +529,13 @@
     validateForm.value.validate().then(res => {
       if (res) {
         const promises = [];
-        if (formData.value.etl_config === 'bk_log_json') {
+        // if (formData.value.etl_config === 'bk_log_json') {
           promises.splice(1, 0, ...checkFieldsTable());
-        }
+        // }
         Promise.all(promises).then(
           async () => {
             confirmLoading.value = true;
-
+            sliderLoading.value = true;
             const originfieldTableData = originfieldTable.value.getData();
             const indexfieldTableData = indexfieldTable.value.getAllData().filter(item=> item.query_alias)
             const data = {
@@ -576,9 +577,12 @@
                     isEdit.value = false;
                   });
                 }
+                //请求成功后更新field
+                store.dispatch('requestIndexSetFieldInfo',)
               })
               .finally(() => {
                 confirmLoading.value = false;
+                sliderLoading.value = false;
               });
           },
           validator => {
@@ -623,6 +627,7 @@
 
   .field-slider-content {
     min-height: 394px;
+    max-height: calc(-119px + 100vh);
     overflow-y: auto;
 
     .add-collection-title {
@@ -706,7 +711,9 @@
     }
 
     .submit-container {
-      padding: 16px 36px 36px;
+      position: fixed;
+      bottom: 0;
+      padding: 16px 36px 16px;
     }
   }
 </style>

@@ -2378,7 +2378,6 @@
               this.getDetail();
               await this.getCleanStash(id);
               this.getDataLog('init');
-              this.requestFields(res.data.index_set_id)
             }
           })
           .finally(() => {
@@ -2608,6 +2607,7 @@
             let name = item.field_name.split('.')[0]
             item.field_type = typeConversion[item.field_type]
             item.is_objectKey = true
+            item.is_delete = false
             this.copyBuiltField.forEach( builtField => {
               if(builtField.field_type === "object" && name.includes(builtField.field_name)){
                 if (!Array.isArray(builtField.children)) {
