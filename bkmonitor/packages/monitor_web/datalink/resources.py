@@ -12,7 +12,7 @@ import copy
 import json
 import re
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Tuple
@@ -516,33 +516,83 @@ class TransferLatestMsgResource(BaseStatusResource):
 
     def find_timestamps(self, series: dict) -> str:
         """
-        查找数据解构中的时间，并转化成指定的格式输出
+        基于广度优先搜索 (BFS) 快速提取时间值
+        支持任意嵌套层级的 dict/list/tuple 结构
+        返回去重后的时间值列表（保持原始顺序）
         """
         logger.info(f"kafka tail series: {series}")
-        timestamps = []
 
-        def is_valid_timestamp(value):
-            # 检查是否为有效的时间戳
+        # 目标键名集合
+        target_keys = {"utctime", "timestamp", "@timestamp"}
+        # 预编译正则提高效率
+        iso8601_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z?$")
+        # 结果集（有序且去重）
+        result = []
+        seen = set()
+        # BFS队列初始化
+        queue = deque([series])
+
+        def _is_valid_time_value(value, iso_pattern) -> bool:
+            """
+            校验时间值是否符合以下格式
+            ```python
+            [
+                # int类型 时间戳
+                1640995200,
+                1640995200000,
+                # str类型 时间戳
+                "1640995200",
+                "1640995200000",
+                # str类型 ISO 8601格式
+                "2023-01-01T00:00:00Z",
+                "2023-01-01 00:00:00",
+                '2025-02-26T09:59:39.407Z',
+            ]
+            ```
+            """
+            if isinstance(value, int):
+                return 1_000_000_000 <= value < 10_000_000_000_000  # 10位 ~ 13位
             if isinstance(value, str):
-                # 检查是否为 ISO 8601 格式
-                iso_pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
-                if re.match(iso_pattern, value):
-                    return True
-                # 检查10位或13位的字符串
-                return len(value) == 10 or len(value) == 13
-            elif isinstance(value, int):
-                # 检查10位或13位的整数
-                return len(str(value)) == 10 or len(str(value)) == 13
+                if value.isdigit():
+                    length = len(value)
+                    if length not in (10, 13):
+                        return False
+                    try:
+                        num = int(value)
+                        return 1_000_000_000 <= num < 10_000_000_000_000
+                    except ValueError:
+                        return False
+                return bool(iso_pattern.match(value))
+
             return False
 
+        def _add_unique_value(value: str | int, result: list, seen: set):
+            """去重并保持顺序"""
+            if isinstance(value, int):
+                key = ("int", value)
+            else:
+                key = ("str", value.strip().lower())  # 字符串忽略大小写和空格
+            if key not in seen:
+                seen.add(key)
+                result.append(value)
+
         def convert_to_string(ts):
+            """
+            格式化时间戳
+            示例: 2022-01-01 00:00:00
+            """
             if isinstance(ts, str):
                 if len(ts) == 10:  # 10位字符串时间戳（秒）
                     dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
                 elif len(ts) == 13:  # 13位字符串时间戳（毫秒）
                     dt = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
-                else:  # ISO 8601 格式
-                    dt = datetime.fromisoformat(ts[:-1])  # 去掉最后的 'Z'
+                else:
+                    if re.match(
+                        r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$', ts
+                    ):  # ISO 8601 格式: %Y-%m-%dT%H:%M:%SZ
+                        dt = datetime.fromisoformat(ts[:-1])  # 去掉最后的 'Z'
+                    else:
+                        dt = datetime.fromisoformat(ts)
             elif isinstance(ts, int):
                 if len(str(ts)) == 10:  # 10位整数时间戳（秒）
                     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -551,22 +601,30 @@ class TransferLatestMsgResource(BaseStatusResource):
 
             return dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        def recurse(item):
-            if isinstance(item, dict):
-                for key, value in item.items():
-                    if key in ['timestamp', "@timestamp"]:  # 如果有更多包含的字段，将在这里补充
-                        if is_valid_timestamp(value):
-                            timestamps.append(value)
-                    else:
-                        recurse(value)
-            elif isinstance(item, list):
-                for element in item:
-                    recurse(element)
+        """
+        广度优先搜索，遍历数据结构，找出符合以下时间戳格式的值, 并保存到 result 中
+        ```
+        [
+            1640995200, 1640995200000,
+            "1640995200","1640995200000",
+            "2023-01-01T00:00:00Z","2023-01-01 00:00:00", "2025-02-26T09:59:39.407Z"
+        ]
+        ```
+        """
+        while queue:
+            current = queue.popleft()
 
-        recurse(series)
-        # 转换时间戳为字符串格式
-        formatted_timestamps = [convert_to_string(ts) for ts in timestamps]
-        return formatted_timestamps[0] if formatted_timestamps else ""
+            if isinstance(current, dict):
+                for k, v in current.items():
+                    if k in target_keys:
+                        if _is_valid_time_value(v, iso8601_pattern):
+                            _add_unique_value(v, result, seen)
+                    queue.append(v)
+            elif isinstance(current, (list, tuple)):
+                queue.extend(current)
+
+        logger.info(f"find_timestamps: {result}")
+        return convert_to_string(result[0]) if result else ""
 
     def query_latest_metric_msg(self, table_id: str, size: int = 10) -> List[Dict]:
         """查询一个指标的最新数据"""
