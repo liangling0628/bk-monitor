@@ -48,7 +48,7 @@ const FIELD_SETTINGS = {
   unit: { label: '单位', width: 125 },
   aggregateMethod: { label: '汇聚方法', width: 125 },
   interval: { label: '上报周期', width: 125 },
-  func: { label: '函数', width: 125 },
+  // func: { label: '函数', width: 125 },
   dimension: { label: '关联维度', width: 215 },
   disabled: { label: '启/停', width: 115 },
   hidden: { label: '显示', width: 115 },
@@ -270,15 +270,15 @@ export default class IndicatorTableSlide extends tsc<any> {
                       header:
                         key === 'unit'
                           ? () => (
-                            <bk-popover
-                              ref='metricSliderPopover'
-                              placement='bottom-start'
-                              tippyOptions={{ appendTo: 'parent' }}
-                            >
-                              {this.$t('单位')} <i class='icon-monitor icon-mc-wholesale-editor' />
-                              {this.renderUnitConfigPopover()}
-                            </bk-popover>
-                          )
+                              <bk-popover
+                                ref='metricSliderPopover'
+                                placement='bottom-start'
+                                tippyOptions={{ appendTo: 'parent' }}
+                              >
+                                {this.$t('单位')} <i class='icon-monitor icon-mc-wholesale-editor' />
+                                {this.renderUnitConfigPopover()}
+                              </bk-popover>
+                            )
                           : null,
                     }}
                     label={this.$t(config.label)}
@@ -511,6 +511,10 @@ export default class IndicatorTableSlide extends tsc<any> {
       >
         <bk-tag-input
           v-model={row.dimensions}
+          v-bk-tooltips={{
+            disabled: !this.autoDiscover,
+            content: this.$t('已开启自动发现新增指标，无法操作'),
+          }}
           clearable={false}
           disabled={this.autoDiscover}
           list={this.dimensions}
