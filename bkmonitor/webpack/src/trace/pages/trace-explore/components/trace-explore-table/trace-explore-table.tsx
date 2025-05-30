@@ -59,6 +59,7 @@ import FieldTypeIcon from '../field-type-icon';
 import StatisticsList from '../statistics-list';
 import ExploreConditionMenu from './components/explore-condition-menu';
 import ExploreTableEmpty from './components/explore-table-empty';
+import TagsCell from './components/table-cell/tags-cell';
 import {
   CAN_TABLE_SORT_FIELD_TYPES,
   ENABLED_TABLE_CONDITION_MENU_CLASS_NAME,
@@ -206,8 +207,8 @@ export default defineComponent({
       }
     );
 
-    /** table 显示列配置 */
-    const displayColumnFields = deepRef<string[]>([]);
+    /** 用户自定义配置 table 显示列后缓存的显示列配置数据 */
+    const customDisplayColumnFields = deepRef<string[]>([]);
     /** 当前需要打开的抽屉类型(trace详情抽屉/span详情抽屉) */
     const sliderMode = shallowRef<'' | 'span' | 'trace'>('');
     /** 打开抽屉所需的数据Id(traceId/spanId) */
@@ -247,9 +248,21 @@ export default defineComponent({
     /** 表格行可用作 唯一主键值 的字段名 */
     const tableRowKeyField = computed(() => (isSpanVisual.value ? 'span_id' : 'trace_id'));
     /** table 列配置本地缓存时的 key */
-    const displayColumnFieldsCacheKey = computed(
+    const customDisplayColumnFieldsCacheKey = computed(
       () => `${props.mode}_${props.appName}_${TABLE_DISPLAY_COLUMNS_FIELD_SUFFIX}`
     );
+    /** table 显示列配置 */
+    const displayColumnFields = computed(() => {
+      // 前端写死的兜底默认显示列配置(优先级：userConfig -> appList -> defaultConfig)
+      const defaultColumnsConfig = isSpanVisual.value ? spanConfig : traceConfig;
+      const applicationColumnConfig = store?.currentApp?.view_config?.[`${props.mode}_config`]?.display_columns || [];
+      // 需要展示的字段列名数组
+      return customDisplayColumnFields.value?.length
+        ? customDisplayColumnFields.value
+        : applicationColumnConfig?.length
+          ? applicationColumnConfig
+          : ((defaultColumnsConfig?.displayFields || []) as string[]);
+    });
     /** 当前是否进行了本地 "耗时" 的筛选操作 */
     const isLocalFilterMode = computed(() => store?.filterTableList?.length);
     /** table 数据（所有请求返回的数据） */
@@ -387,13 +400,6 @@ export default defineComponent({
     });
 
     watch(
-      () => displayColumnFieldsCacheKey.value,
-      () => {
-        getDisplayColumnFields();
-      }
-    );
-
-    watch(
       [
         () => isSpanVisual.value,
         () => props.appName,
@@ -409,16 +415,18 @@ export default defineComponent({
         tableLoading[ExploreTableLoadingEnum.HEADER_SKELETON] = true;
         store.updateTableList([]);
         emit('backTop');
-        if (nVal[0] !== oVal[0]) {
+
+        if (nVal[0] !== oVal[0] || nVal[1] !== oVal[1]) {
           sortContainer.sortBy = '';
           sortContainer.descending = null;
+          getCustomDisplayColumnFields();
         }
         debouncedGetExploreList();
       }
     );
 
     onMounted(() => {
-      getDisplayColumnFields();
+      getCustomDisplayColumnFields();
       debouncedGetExploreList();
       addScrollListener();
       setTimeout(() => {
@@ -433,6 +441,7 @@ export default defineComponent({
       removeScrollListener();
       abortController?.abort?.();
       abortController = null;
+      store.updateTableList([]);
     });
 
     /**
@@ -587,7 +596,7 @@ export default defineComponent({
         trace_id: {
           renderType: ExploreTableColumnTypeEnum.CLICK,
           colKey: 'trace_id',
-          title: t('Trace ID'),
+          title: 'Trace ID',
           width: 240,
           fixed: 'left',
           clickCallback: row => handleSliderShowChange('trace', row.trace_id),
@@ -641,12 +650,13 @@ export default defineComponent({
           title: t('状态码'),
           width: 100,
           getRenderValue: row => {
-            const alias = row?.root_service_status_code as string;
-            if (!alias) return [];
+            const value = row?.root_service_status_code as string;
+            if (!value) return [];
             const type = row?.root_service_status_code === 200 ? 'normal' : 'error';
             return [
               {
-                alias: alias,
+                alias: value,
+                value,
                 ...SERVICE_STATUS_COLOR_MAP[type],
               },
             ];
@@ -699,6 +709,23 @@ export default defineComponent({
           width: 100,
           getRenderValue: (row, column) => SPAN_STATUS_CODE_MAP[row?.[column.colKey]],
         },
+        'collections.kind': {
+          renderType: ExploreTableColumnTypeEnum.TAGS,
+          colKey: 'collections.kind',
+          title: t('状态码'),
+          width: 120,
+          getRenderValue: row => {
+            let value = row?.['collections.kind'];
+            if (!value) return [];
+            if (!Array.isArray(value)) value = [value];
+            return value.map(v => ({
+              alias: SPAN_KIND_MAPS[v]?.alias,
+              value: v,
+              tagColor: '#63656e',
+              tagBgColor: 'rgba(151,155,165,.1)',
+            }));
+          },
+        },
       };
     }
 
@@ -706,14 +733,11 @@ export default defineComponent({
      * @description: 获取 table 表格列配置
      *
      */
-    async function getDisplayColumnFields() {
+    async function getCustomDisplayColumnFields() {
+      customDisplayColumnFields.value = [];
       if (!props.appName || !props.mode) return;
-      const defaultColumnsConfig = isSpanVisual.value ? spanConfig : traceConfig;
-      const cacheColumns = (await handleGetUserConfig<string[]>(displayColumnFieldsCacheKey.value)) || [];
-      // 需要展示的字段列名数组
-      displayColumnFields.value = cacheColumns?.length
-        ? cacheColumns
-        : ((defaultColumnsConfig?.displayFields || []) as string[]);
+      customDisplayColumnFields.value =
+        (await handleGetUserConfig<string[]>(customDisplayColumnFieldsCacheKey.value)) || [];
     }
 
     /**
@@ -839,7 +863,7 @@ export default defineComponent({
      *
      */
     function handleDisplayColumnFieldsChange(displayFields: string[]) {
-      displayColumnFields.value = displayFields;
+      customDisplayColumnFields.value = displayFields;
       // 缓存列配置
       handleSetUserConfig(JSON.stringify(displayFields));
     }
@@ -957,36 +981,6 @@ export default defineComponent({
     }
 
     /**
-     * @description traceId详情抽屉 渲染方法
-     *
-     */
-    // function traceSliderRender() {
-    //   return (
-    //     <ExploreTraceSlider
-    //       appName={props.appName}
-    //       isShow={sliderMode.value === 'trace'}
-    //       traceId={activeSliderId.value}
-    //       onSliderClose={() => handleSliderShowChange('', '')}
-    //     />
-    //   );
-    // }
-
-    // /**
-    //  * @description spanId详情抽屉 渲染方法
-    //  *
-    //  */
-    // function spanSliderRender() {
-    //   return (
-    //     <ExploreSpanSlider
-    //       appName={props.appName}
-    //       isShow={sliderMode.value === 'span'}
-    //       spanId={activeSliderId.value}
-    //       onSliderClose={() => handleSliderShowChange('', '')}
-    //     />
-    //   );
-    // }
-
-    /**
      * @description 字段分析组件渲染方法
      *
      */
@@ -998,7 +992,6 @@ export default defineComponent({
           ref='statisticsListRef'
           commonParams={props.commonParams}
           fieldType={fieldOptions?.type}
-          isDimensions={fieldOptions?.is_dimensions}
           isShow={showStatisticsPopover.value}
           selectField={fieldOptions?.name}
           onConditionChange={handleConditionChange}
@@ -1227,26 +1220,10 @@ export default defineComponent({
         return textColumnFormatter(textColumn as unknown as ExploreTableColumn<ExploreTableColumnTypeEnum.TEXT>, row);
       }
       return (
-        <div class='explore-col explore-tags-col '>
-          {tags.map(tag => (
-            <div
-              key={tag.alias}
-              style={{
-                '--tag-color': tag.tagColor,
-                '--tag-bg-color': tag.tagBgColor,
-              }}
-              class='tag-item'
-            >
-              <span
-                class={`${ENABLED_TABLE_CONDITION_MENU_CLASS_NAME}`}
-                data-cell-source={tag.alias}
-                data-col-key={column.colKey}
-              >
-                {tag.alias}
-              </span>
-            </div>
-          ))}
-        </div>
+        <TagsCell
+          column={column}
+          tags={tags}
+        />
       );
     }
 
@@ -1262,7 +1239,7 @@ export default defineComponent({
         <div class={`explore-col explore-text-col ${ENABLED_TABLE_ELLIPSIS_CELL_CLASS_NAME}`}>
           <span
             class={`explore-col-text ${ENABLED_TABLE_CONDITION_MENU_CLASS_NAME}`}
-            data-cell-source={JSON.stringify(value || '')}
+            data-cell-source={Array.isArray(value) ? JSON.stringify(value || '') : value}
             data-col-key={column.colKey}
           >
             {alias == null || alias === '' ? defaultTableConfig.emptyPlaceholder : alias}
