@@ -24,8 +24,7 @@
  * IN THE SOFTWARE.
  */
 
-import { defineComponent, useTemplateRef, watch } from 'vue';
-import { shallowRef } from 'vue';
+import { defineComponent, useTemplateRef, watch, onUnmounted, shallowRef } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { useEventListener } from '@vueuse/core';
@@ -80,6 +79,10 @@ export default defineComponent({
     function init() {
       cleanup = useEventListener(window, 'keydown', handleKeyDownSlash);
     }
+
+    onUnmounted(() => {
+      cleanup?.();
+    });
 
     async function handleShowSelect(event: MouseEvent) {
       if (popoverInstance.value) {
@@ -170,7 +173,12 @@ export default defineComponent({
      * @param {KeyboardEvent} event 键盘事件对象
      */
     function handleKeyDownSlash(event) {
-      if (event.key === '/' && !inputValue.value && !showSelector.value && event.target?.tagName !== 'INPUT') {
+      if (
+        event.key === '/' &&
+        !inputValue.value &&
+        !showSelector.value &&
+        !['BK-WEWEB', 'INPUT'].includes(event.target?.tagName)
+      ) {
         event.preventDefault();
         handleClickComponent();
         cleanup();

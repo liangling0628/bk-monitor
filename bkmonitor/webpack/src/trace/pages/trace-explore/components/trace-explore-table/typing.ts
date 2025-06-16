@@ -36,6 +36,8 @@ export interface ExploreTableColumn<T extends ExploreTableColumnTypeEnum = Explo
   renderType?: T;
   /** 列描述(popover形式展现) **/
   headerDescription?: string;
+  /** 单元格后置插槽（tag类型列暂未支持） */
+  suffixSlot?: (row, column: ExploreTableColumn) => SlotReturnValue;
   /** 需要自定义定义 渲染值 时可用 */
   getRenderValue?: (row, column: ExploreTableColumn<T>) => GetTableCellRenderValue<T>;
   /** 点击列回调 -- 列类型为 ExploreTableColumnTypeEnum.CLICK 时可用 */
@@ -98,4 +100,32 @@ export enum ExploreTableLoadingEnum {
   HEADER_SKELETON = 'table_header_skeleton',
   /** 滚动 -- 显示 表格底部 loading */
   SCROLL = 'scrollLoading',
+}
+
+/** 自定义显示列字段缓存配置 */
+export interface CustomDisplayColumnFieldsConfig {
+  displayFields: string[];
+  fieldsWidth: { [colKey: string]: number };
+}
+
+/** 表格条件菜单项 */
+export interface ExploreConditionMenuItem {
+  /** 菜单 id */
+  id: string;
+  /** 菜单名称 */
+  name: string;
+  /** 菜单图标 */
+  icon: string;
+  /** 菜单点击回调 */
+  onClick: (event: MouseEvent) => void;
+  /** 菜单后缀icon渲染 */
+  suffixRender?: () => SlotReturnValue;
+}
+
+/** 激活的条件菜单目标 */
+export interface ActiveConditionMenuTarget {
+  rowId: string;
+  colId: string;
+  conditionValue: string;
+  customMenuList?: ExploreConditionMenuItem[];
 }

@@ -133,14 +133,7 @@ class _TransferApi:
             description=_("修改数据源"),
             before_request=add_esb_info_before_request,
         )
-        self.modify_datasource_result_table = DataAPI(
-            method="POST",
-            url=self._build_url("modify_datasource_result_table/", "metadata_modify_datasource_result_table/"),
-            module=self.MODULE,
-            description=_("修改数据源与结果表的关系"),
-            before_request=add_esb_info_before_request,
-            bk_tenant_id=biz_to_tenant_getter(),
-        )
+
         self.create_result_table = DataAPI(
             method="POST",
             url=self._build_url("create_result_table/", "metadata_create_result_table/"),
@@ -215,7 +208,6 @@ class _TransferApi:
             module=self.MODULE,
             description=_("创建存储集群"),
             before_request=create_cluster_info_before,
-            bk_tenant_id=biz_to_tenant_getter(key=lambda p: p["custom_option"]["bk_biz_id"]),
         )
         self.modify_cluster_info = DataAPI(
             method="POST",
@@ -223,7 +215,6 @@ class _TransferApi:
             module=self.MODULE,
             description=_("修改存储集群"),
             before_request=create_cluster_info_before,
-            bk_tenant_id=biz_to_tenant_getter(key=lambda p: p["custom_option"]["bk_biz_id"]),
         )
         self.list_result_table = DataAPI(
             method="GET",
