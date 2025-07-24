@@ -23,6 +23,7 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
+import 'xss/typings/xss';
 
 import type { IBizItem, ISpaceItem } from './types';
 import type VueI18n from 'vue-i18n';
@@ -44,7 +45,7 @@ interface IBkInfoProps {
   showFooter?: boolean;
   extCls?: string;
   okText?: string | TranslateResult;
-  cancelText?: string;
+  cancelText?: string | TranslateResult;
   confirmFn: (v: unknown) => void;
   cancelFn: (v: unknown) => void;
 }
