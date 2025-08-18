@@ -24,8 +24,7 @@
  * IN THE SOFTWARE.
  */
 
-import { defineComponent, reactive, shallowRef, watch, computed, type PropType } from 'vue';
-import { useI18n } from 'vue-i18n';
+import { type PropType, computed, defineComponent, reactive, shallowRef, watch } from 'vue';
 
 import { $bkPopover, Progress, Sideslider } from 'bkui-vue';
 import { CancelToken } from 'monitor-api/cancel';
@@ -38,11 +37,12 @@ import {
 import { downloadFile, formatPercent } from 'monitor-common/utils';
 import loadingIcon from 'monitor-ui/chart-plugins/icons/spinner.svg';
 import { storeToRefs } from 'pinia';
+import { useI18n } from 'vue-i18n';
 
 import EmptyStatus from '../../../components/empty-status/empty-status';
 import { NULL_VALUE_NAME } from '../../../components/retrieval-filter/utils';
 import { handleTransformTime, handleTransformToTimestamp } from '../../../components/time-range/utils';
-import { formatDurationWithUnit, formatDuration } from '../../../components/trace-view/utils/date';
+import { formatDuration, formatDurationWithUnit } from '../../../components/trace-view/utils/date';
 import { transformTableDataToCsvStr } from '../../../plugins/utls/menu';
 import { useAppStore } from '../../../store/modules/app';
 import { useTraceExploreStore } from '../../../store/modules/explore';
@@ -208,7 +208,9 @@ export default defineComponent({
           fields: [localField.value],
         },
         {
-          cancelToken: new CancelToken(c => (topKCancelFn = c)),
+          cancelToken: new CancelToken(c => {
+            topKCancelFn = c;
+          }),
         }
       ).catch(() => [{ distinct_count: 0, field: '', list: [] }]);
       if (count !== getStatisticsListCount.value) return;
@@ -240,7 +242,9 @@ export default defineComponent({
           },
         },
         {
-          cancelToken: new CancelToken(c => (topKInfoCancelFn = c)),
+          cancelToken: new CancelToken(c => {
+            topKInfoCancelFn = c;
+          }),
         }
       ).catch(() => []);
       /** 如果是取消接口，不进行后续操作 */
@@ -268,7 +272,9 @@ export default defineComponent({
           },
         },
         {
-          cancelToken: new CancelToken(c => (topKChartCancelFn = c)),
+          cancelToken: new CancelToken(c => {
+            topKChartCancelFn = c;
+          }),
         }
       ).catch(() => ({ series: [] }));
 
@@ -384,7 +390,9 @@ export default defineComponent({
         });
         try {
           downloadFile(data.data, 'txt', data.filename);
-        } catch {}
+        } catch (err) {
+          console.log('err', err);
+        }
       }
     }
 
@@ -562,11 +570,11 @@ export default defineComponent({
                         <span class='value'> {this.statisticsInfo.total_count}</span>
                       </div>
                       <div class='label-item'>
-                        <span class='label'>{this.t('出现行数')}:</span>
+                        <span class='label'>{this.t('非空数据')}:</span>
                         <span class='value'> {this.statisticsInfo.field_count}</span>
                       </div>
                       <div class='label-item'>
-                        <span class='label'>{this.t('日志条数')}:</span>
+                        <span class='label'>{this.t('非空数据占比')}:</span>
                         <span class='value'> {this.statisticsInfo.field_percent}%</span>
                       </div>
                     </div>

@@ -275,17 +275,19 @@ class ResultTableFlow(BaseModelWithTime):
         :param schemaless: 是否是标准四元祖数据
         :return: bool 是否接入成功
         """
-        # 组装参数
-        req_data = {
-            "project_id": settings.BK_DATA_RECORD_RULE_PROJECT_ID,
-            "flow_name": cls.compose_flow_name(table_id),
-        }
         # 获取预计算结果表数据
         try:
             rule_obj = RecordRule.objects.get(table_id=table_id)
         except RecordRule.DoesNotExist:
             logger.error("create_flow：table_id->[%s] not found record rule", table_id)
             return False
+
+        # 组装参数
+        req_data = {
+            "project_id": settings.BK_DATA_RECORD_RULE_PROJECT_ID,
+            "flow_name": cls.compose_flow_name(table_id),
+        }
+
         # 检测并授权结果表
         if not batch_add_permission(
             settings.BK_DATA_RECORD_RULE_PROJECT_ID, settings.BK_DATA_BK_BIZ_ID, rule_obj.src_vm_table_ids
@@ -304,7 +306,7 @@ class ResultTableFlow(BaseModelWithTime):
         logger.info("create_flow: try to create flow for table_id->[%s] with params->[%s]", table_id, req_data)
         # 调用接口，然后保存数据
         try:
-            data = api.bkdata.apply_data_flow(req_data)
+            data = api.bkdata.apply_data_flow(bk_tenant_id=rule_obj.bk_tenant_id, **req_data)
             logger.info("create_flow: create flow for table_id->[%s] successfully", table_id)
         except BKAPIError as e:
             logger.error("create_flow: create data flow for table_id->[%s] failed,error->[%s]", table_id, e)

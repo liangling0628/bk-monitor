@@ -28,7 +28,7 @@ import { Component as tsc } from 'vue-tsx-support';
 
 import { getVariableValue } from 'monitor-api/modules/grafana';
 
-import { CONDITION, NUMBER_CONDITION_METHOD_LIST, STRING_CONDITION_METHOD_LIST } from '../../../constant/constant';
+import { CONDITION, NEW_NUMBER_CONDITION_METHOD_LIST, NEW_STRING_CONDITION_METHOD_LIST } from '../../../constant/constant';
 import SelectMenu from '../../strategy-config/strategy-config-set-new/components/select-menu';
 import SimpleSelectInput from './simple-select-input';
 
@@ -40,39 +40,39 @@ const nullOptions = {
   name: `- ${window.i18n.tc('空')} -`,
 };
 
-interface IConditionItem {
-  key: string;
-  value: string | string[];
-  method: string;
-  condition?: string;
-  dimensionName?: string;
-}
 export interface IDimensionItem {
   id: number | string;
+  is_dimension?: boolean;
   name: string;
   type?: string;
-  is_dimension?: boolean;
+}
+interface IConditionItem {
+  condition?: string;
+  dimensionName?: string;
+  key: string;
+  method: string;
+  value: string | string[];
+}
+
+interface IEvents {
+  // biome-ignore lint/suspicious/noConfusingVoidType: <explanation>
+  onChange?: void;
+  onKeyLoading?: (v: boolean) => void;
 }
 
 interface IMetricMeta {
   dataSourceLabel: string;
   dataTypeLabel: string;
+  indexSetId?: number | string;
   metricField: string;
   resultTableId: number | string;
-  indexSetId?: number | string;
 }
-
 interface IProps {
-  dimensionsList: IDimensionItem[];
   conditionList: IConditionItem[];
-  metricMeta: IMetricMeta;
+  dimensionsList: IDimensionItem[];
   hasLeftLabel?: boolean;
   isHasNullOption?: boolean;
-}
-interface IEvents {
-  // biome-ignore lint/suspicious/noConfusingVoidType: <explanation>
-  onChange?: void;
-  onKeyLoading?: (v: boolean) => void;
+  metricMeta: IMetricMeta;
 }
 
 @Component
@@ -84,11 +84,11 @@ export default class SimpleConditionInput extends tsc<IProps, IEvents> {
   @Prop({ default: false, type: Boolean }) hasLeftLabel: boolean;
 
   conditions: {
-    key: string; // 维度id
-    dimensionName: string; // 维度输入框的值
-    value: string | string[]; // 维度值
-    method?: string; // 运算符
     condition?: string; // 条件
+    dimensionName: string; // 维度输入框的值
+    key: string; // 维度id
+    method?: string; // 运算符
+    value: string | string[]; // 维度值
   }[] = [];
 
   dimensionsValueMap: Record<string, { id: string; name: string }[]> = {};
@@ -167,12 +167,12 @@ export default class SimpleConditionInput extends tsc<IProps, IEvents> {
    */
   handleGetMethodList(type: 'number' | 'string') {
     if (type === 'number') {
-      return NUMBER_CONDITION_METHOD_LIST;
+      return NEW_NUMBER_CONDITION_METHOD_LIST;
     }
-    return STRING_CONDITION_METHOD_LIST;
+    return NEW_STRING_CONDITION_METHOD_LIST;
   }
   handleGetMethodNameById(id: string) {
-    return NUMBER_CONDITION_METHOD_LIST.find(item => item.id === id)?.name || '';
+    return NEW_NUMBER_CONDITION_METHOD_LIST.find(item => item.id === id)?.name || '';
   }
 
   // 粘贴条件时触发(tag-input)

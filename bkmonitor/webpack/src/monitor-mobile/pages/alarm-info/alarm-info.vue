@@ -32,10 +32,10 @@
     >
       <van-collapse-item
         v-for="item in header.list"
+        :key="item.id"
         class="header-item"
         :border="item.id !== 'message'"
         :is-link="item.id === 'message'"
-        :key="item.id"
         :name="item.id"
         :title="item.title"
       >
@@ -56,8 +56,8 @@
     <van-list class="card-list">
       <div
         v-for="(item, index) in eventList"
-        class="card-list-item"
         :key="index"
+        class="card-list-item"
         @click="handleGotoDetail(item)"
       >
         <div class="card-title">
@@ -136,6 +136,7 @@
       </div>
     </van-list>
     <footer-button
+      v-show="alarmConfirmButtonShow"
       :disabled="alarmConfirmDisabled"
       @click="handleAlarmCheck"
     >
@@ -181,6 +182,17 @@ export default class AlarmDetail extends Vue {
 
   get alarmConfirmDisabled() {
     return this.eventList.every(item => item.isAck);
+  }
+
+  // 事件列表全部为已屏蔽状态时，隐藏告警确认按钮
+  get alarmConfirmButtonShow() {
+    if (!this.eventList.length) return false;
+    const isAllShielded = this.eventList.every(item => {
+      if (item.isAck) return false; // 已确认
+      if (['closed', 'recovered'].includes(item.status.toLocaleLowerCase())) return false; // 已恢复、已关闭
+      return item.isShielded && item.shieldType === 'saas_config'; // 已屏蔽状态
+    });
+    return !isAllShielded;
   }
   get chartOption() {
     return {
@@ -355,7 +367,7 @@ export default class AlarmDetail extends Vue {
 }
 </script>
 <style lang="scss">
-@import '../../static/scss/variate.scss';
+@import '../../static/scss/variate';
 
 $colorList: $deadlyColor $shieldColor $shieldColor $recoverColor;
 $statusList: 'abnormal' 'shield_abnormal' 'closed' 'recovered';
@@ -365,7 +377,7 @@ $statusList: 'abnormal' 'shield_abnormal' 'closed' 'recovered';
   font-size: 14px;
 
   &-header {
-    box-shadow: 0 1px 0 0 rgba(99, 101, 110, 0.05);
+    box-shadow: 0 1px 0 0 rgb(99 101 110 / 5%);
 
     &.van-hairline {
       &--top-bottom::after {
@@ -437,10 +449,10 @@ $statusList: 'abnormal' 'shield_abnormal' 'closed' 'recovered';
     &-item {
       position: relative;
       padding: 15px 20px;
-      margin: 0 16px 8px 16px;
+      margin: 0 16px 8px;
       background-color: #fff;
       border-radius: 4px;
-      box-shadow: 0 1px 0 0 rgba(99, 101, 110, 0.05);
+      box-shadow: 0 1px 0 0 rgb(99 101 110 / 5%);
 
       .card-title {
         display: flex;
@@ -507,7 +519,7 @@ $statusList: 'abnormal' 'shield_abnormal' 'closed' 'recovered';
     bottom: 0;
     width: 100%;
     height: 15px;
-    background: linear-gradient(rgba(255, 255, 255, 0) 0, #fff 100%);
+    background: linear-gradient(rgb(255 255 255 / 0%) 0, #fff 100%);
   }
 }
 </style>

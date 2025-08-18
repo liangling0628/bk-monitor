@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
 Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
@@ -12,12 +11,13 @@ specific language governing permissions and limitations under the License.
 import json
 import logging
 import random
-from typing import Dict, Optional
 
 from django.conf import settings
 from django.db.models import Q
 from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
+from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id, get_tenant_datalink_biz_id
+from constants.common import DEFAULT_TENANT_ID
 from constants.data_source import DATA_LINK_V3_VERSION_NAME, DATA_LINK_V4_VERSION_NAME
 from core.drf_resource import api
 from core.prometheus import metrics
@@ -31,7 +31,6 @@ from metadata.models import (
 )
 from metadata.models.data_link import DataLink
 from metadata.models.data_link.constants import DataLinkResourceStatus
-from metadata.models.data_link.service import create_vm_data_link
 from metadata.models.data_link.utils import (
     compose_bkdata_data_id_name,
     compose_bkdata_table_id,
@@ -56,7 +55,7 @@ def refine_bkdata_kafka_info():
     kafka_clusters = ClusterInfo.objects.filter(cluster_type=ClusterInfo.TYPE_KAFKA).values("cluster_id", "domain_name")
     kafka_domain_cluster_id = {obj["domain_name"]: obj["cluster_id"] for obj in kafka_clusters}
     # 通过集群平台获取可用的 kafka host
-    bkdata_kafka_data = api.bkdata.get_kafka_info()[0]
+    bkdata_kafka_data = api.bkdata.get_kafka_info(bk_tenant_id=DEFAULT_TENANT_ID)[0]
     bkdata_kafka_host_list = bkdata_kafka_data.get("ip_list", "").split(",")
 
     # NOTE: 获取 metadata 和接口返回的交集，然后任取其中一个; 如果不存在，则直接报错
@@ -82,6 +81,8 @@ def access_bkdata(bk_biz_id: int, table_id: str, data_id: int):
     logger.info("bk_biz_id: %s, table_id: %s, data_id: %s start access vm", bk_biz_id, table_id, data_id)
 
     from metadata.models import AccessVMRecord, KafkaStorage, Space, SpaceVMInfo
+
+    bk_tenant_id = bk_biz_id_to_bk_tenant_id(bk_biz_id)
 
     # NOTE: 0 业务没有空间信息，不需要查询或者创建空间及空间关联的 vm
     space_data = {}
@@ -158,6 +159,7 @@ def access_bkdata(bk_biz_id: int, table_id: str, data_id: int):
 
     try:
         AccessVMRecord.objects.create(
+            bk_tenant_id=bk_tenant_id,
             data_type=data_type,
             result_table_id=table_id,
             bcs_cluster_id=bcs_cluster_id,
@@ -212,7 +214,7 @@ def access_bkdata(bk_biz_id: int, table_id: str, data_id: int):
             )
 
 
-def access_vm_by_kafka(table_id: str, raw_data_name: str, vm_cluster_name: str, timestamp_len: int) -> Dict:
+def access_vm_by_kafka(table_id: str, raw_data_name: str, vm_cluster_name: str, timestamp_len: int) -> dict:
     """通过 kafka 配置接入 vm"""
     from metadata.models import BkDataStorage, KafkaStorage, ResultTable
 
@@ -289,7 +291,7 @@ def access_vm_by_kafka(table_id: str, raw_data_name: str, vm_cluster_name: str, 
         return {"err_msg": f"request vm storage api error, {e}"}
 
 
-def get_data_type_cluster(data_id: int) -> Dict:
+def get_data_type_cluster(data_id: int) -> dict:
     from metadata.models import AccessVMRecord, BCSClusterInfo
 
     # NOTE: data id 不允许跨集群
@@ -353,8 +355,8 @@ def report_metadata_data_link_status_info(data_link_name: str, biz_id: str, kind
 
 
 def get_vm_cluster_id_name(
-    space_type: Optional[str] = "", space_id: Optional[str] = "", vm_cluster_name: Optional[str] = ""
-) -> Dict:
+    space_type: str | None = "", space_id: str | None = "", vm_cluster_name: str | None = ""
+) -> dict:
     """获取 vm 集群 ID 和名称
 
     1. 如果 vm 集群名称存在，则需要查询到对应的ID，如果查询不到，则需要抛出异常
@@ -401,10 +403,10 @@ def get_vm_cluster_id_name(
 
 def get_storage_cluster_id_name_for_space(
     storage_type=ClusterInfo.TYPE_VM,
-    space_type: Optional[str] = "",
-    space_id: Optional[str] = "",
-    cluster_name: Optional[str] = "",
-) -> Dict:
+    space_type: str | None = "",
+    space_id: str | None = "",
+    cluster_name: str | None = "",
+) -> dict:
     """
     TODO 待数据与SpaceVMInfo打平后,将原先选择逻辑切换至SpaceRelatedStorageInfo
     获取指定空间关联的指定存储类型的集群ID和名称
@@ -460,14 +462,14 @@ def get_storage_cluster_id_name_for_space(
     return {"cluster_id": cluster.cluster_id, "cluster_name": cluster.cluster_name}
 
 
-def get_bkbase_data_name_and_topic(table_id: str) -> Dict:
+def get_bkbase_data_name_and_topic(table_id: str) -> dict:
     """获取 bkbase 的结果表名称"""
     # 如果以 '__default__'结尾，则取前半部分
     if table_id.endswith("__default__"):
         table_id = table_id.split(".__default__")[0]
     name = f"{table_id.replace('-', '_').replace('.', '_').replace('__', '_')[-40:]}"
     # NOTE: 清洗结果表不能出现双下划线
-    vm_name = f"vm_{name}".replace('__', '_')
+    vm_name = f"vm_{name}".replace("__", "_")
     # 兼容部分场景中划线和下划线允许同时存在的情况
     is_exist = AccessVMRecord.objects.filter(vm_result_table_id__contains=vm_name).exists()
     if is_exist:
@@ -478,7 +480,7 @@ def get_bkbase_data_name_and_topic(table_id: str) -> Dict:
     return {"data_name": vm_name, "topic_name": f"{vm_name}{settings.DEFAULT_BKDATA_BIZ_ID}"}
 
 
-def get_bcs_convergence_data_name_and_dp_id(table_id: str) -> Dict:
+def get_bcs_convergence_data_name_and_dp_id(table_id: str) -> dict:
     """获取 bcs 合流对应的结果表及数据处理 ID"""
     if table_id.endswith("__default__"):
         table_id = table_id.split(".__default__")[0]
@@ -487,7 +489,7 @@ def get_bcs_convergence_data_name_and_dp_id(table_id: str) -> Dict:
     return {"data_name": f"dp_{name}", "dp_id": f"{settings.DEFAULT_BKDATA_BIZ_ID}_{name}_dp_metric_all"}
 
 
-def get_timestamp_len(data_id: Optional[int] = None, etl_config: Optional[str] = None) -> int:
+def get_timestamp_len(data_id: int | None = None, etl_config: str | None = None) -> int:
     """通过 data id 或者 etl config 获取接入 vm 是清洗时间的长度
 
     1. 如果 data id 在指定的白名单中，则为 纳米
@@ -578,6 +580,7 @@ def access_v2_bkdata_vm(bk_biz_id: int, table_id: str, data_id: int):
         logger.info("table_id: %s has already been created,now try to create fed vm data link", table_id)
 
         create_fed_bkbase_data_link(
+            bk_biz_id=bk_biz_id,
             monitor_table_id=table_id,
             data_source=ds,
             storage_cluster_name=vm_cluster_name,
@@ -587,30 +590,19 @@ def access_v2_bkdata_vm(bk_biz_id: int, table_id: str, data_id: int):
 
     # 5. 接入 vm 链路
     try:
-        # 如果开启了新版接入方式，使用新版方式接入，灰度验证中
-        if settings.ENABLE_V2_ACCESS_BKBASE_METHOD:
-            logger.info(
-                "access_v2_bkdata_vm: enable_v2_access_bkbase_method is True, now try to create bkbase data link"
-            )
-            bcs_cluster_id = None
-            bcs_record = BCSClusterInfo.objects.filter(K8sMetricDataID=ds.bk_data_id)
-            if bcs_record:
-                bcs_cluster_id = bcs_record.first().cluster_id
+        logger.info("access_v2_bkdata_vm: enable_v2_access_bkbase_method is True, now try to create bkbase data link")
+        bcs_cluster_id = None
+        bcs_record = BCSClusterInfo.objects.filter(K8sMetricDataID=ds.bk_data_id)
+        if bcs_record:
+            bcs_cluster_id = bcs_record.first().cluster_id
 
-            create_bkbase_data_link(
-                data_source=ds,
-                monitor_table_id=table_id,
-                storage_cluster_name=vm_cluster_name,
-                bcs_cluster_id=bcs_cluster_id,
-            )
-        else:
-            logger.info("access_v2_bkdata_vm: enable_v2_access_bkbase_method is False")
-            create_vm_data_link(
-                table_id=table_id,
-                data_source=ds,
-                vm_cluster_name=vm_cluster_name,
-                bcs_cluster_id=data_type_cluster["bcs_cluster_id"],
-            )
+        create_bkbase_data_link(
+            bk_biz_id=bk_biz_id,
+            data_source=ds,
+            monitor_table_id=table_id,
+            storage_cluster_name=vm_cluster_name,
+            bcs_cluster_id=bcs_cluster_id,
+        )
 
         report_metadata_data_link_access_metric(
             version=DATA_LINK_V4_VERSION_NAME,
@@ -643,6 +635,7 @@ def access_v2_bkdata_vm(bk_biz_id: int, table_id: str, data_id: int):
     try:
         # 创建联邦
         create_fed_bkbase_data_link(
+            bk_biz_id=bk_biz_id,
             monitor_table_id=table_id,
             data_source=ds,
             storage_cluster_name=vm_cluster_name,
@@ -668,15 +661,17 @@ def access_v2_bkdata_vm(bk_biz_id: int, table_id: str, data_id: int):
 
 
 def create_bkbase_data_link(
+    bk_biz_id: int,
     data_source: DataSource,
     monitor_table_id: str,
     storage_cluster_name: str,
     data_link_strategy: str = DataLink.BK_STANDARD_V2_TIME_SERIES,
-    namespace: Optional[str] = settings.DEFAULT_VM_DATA_LINK_NAMESPACE,
-    bcs_cluster_id: Optional[str] = None,
+    namespace: str | None = settings.DEFAULT_VM_DATA_LINK_NAMESPACE,
+    bcs_cluster_id: str | None = None,
 ):
     """
     申请计算平台链路
+    @param bk_biz_id: 业务ID
     @param data_source: 数据源
     @param monitor_table_id: 监控平台自身结果表ID
     @param storage_cluster_name: 存储集群名称
@@ -707,8 +702,15 @@ def create_bkbase_data_link(
         logger.info("create_bkbase_data_link: bcs_cluster_id->[%s] is a federal proxy cluster!", bcs_cluster_id)
         data_link_strategy = DataLink.BCS_FEDERAL_PROXY_TIME_SERIES
 
+    # TODO: 优化为MAP形式选取
+    if data_source.etl_config == EtlConfigs.BK_EXPORTER.value:
+        data_link_strategy = DataLink.BK_EXPORTER_TIME_SERIES
+    elif data_source.etl_config == EtlConfigs.BK_STANDARD.value:
+        data_link_strategy = DataLink.BK_STANDARD_TIME_SERIES
+
     # 2. 创建链路资源对象
     data_link_ins, _ = DataLink.objects.get_or_create(
+        bk_tenant_id=data_source.bk_tenant_id,
         data_link_name=bkbase_data_name,
         namespace=namespace,
         data_link_strategy=data_link_strategy,
@@ -726,7 +728,10 @@ def create_bkbase_data_link(
             monitor_table_id,
         )
         data_link_ins.apply_data_link(
-            data_source=data_source, table_id=monitor_table_id, storage_cluster_name=storage_cluster_name
+            bk_biz_id=bk_biz_id,
+            data_source=data_source,
+            table_id=monitor_table_id,
+            storage_cluster_name=storage_cluster_name,
         )
         # 2.1 上报链路接入指标
     except Exception as e:  # pylint: disable=broad-except
@@ -768,13 +773,15 @@ def create_bkbase_data_link(
         storage_cluster_id,
         data_link_strategy,
     )
+    datalink_biz_id = get_tenant_datalink_biz_id(bk_tenant_id=data_source.bk_tenant_id, bk_biz_id=bk_biz_id)
     AccessVMRecord.objects.update_or_create(
+        bk_tenant_id=data_source.bk_tenant_id,
         result_table_id=monitor_table_id,
         bk_base_data_id=data_source.bk_data_id,
         bk_base_data_name=bkbase_data_name,
         defaults={
             "vm_cluster_id": storage_cluster_id,
-            "vm_result_table_id": f"{settings.DEFAULT_BKDATA_BIZ_ID}_{bkbase_rt_name}",
+            "vm_result_table_id": f"{datalink_biz_id.data_biz_id}_{bkbase_rt_name}",
             "bcs_cluster_id": bcs_cluster_id,
         },
     )
@@ -788,11 +795,12 @@ def create_bkbase_data_link(
 
 
 def create_fed_bkbase_data_link(
+    bk_biz_id: int,
     monitor_table_id: str,
     data_source: DataSource,
     storage_cluster_name: str,
     bcs_cluster_id: str,
-    namespace: Optional[str] = settings.DEFAULT_VM_DATA_LINK_NAMESPACE,
+    namespace: str | None = settings.DEFAULT_VM_DATA_LINK_NAMESPACE,
 ):
     """
     创建联邦集群汇聚链路（子集群->代理集群）
@@ -830,6 +838,7 @@ def create_fed_bkbase_data_link(
         bkbase_data_name,
     )
     data_link_ins, _ = DataLink.objects.get_or_create(
+        bk_tenant_id=data_source.bk_tenant_id,
         data_link_name=bkbase_data_name,
         namespace=namespace,
         data_link_strategy=DataLink.BCS_FEDERAL_SUBSET_TIME_SERIES,
@@ -845,6 +854,7 @@ def create_fed_bkbase_data_link(
             bkbase_data_name,
         )
         data_link_ins.apply_data_link(
+            bk_biz_id=bk_biz_id,
             data_source=data_source,
             table_id=monitor_table_id,
             storage_cluster_name=storage_cluster_name,
@@ -876,35 +886,3 @@ def create_fed_bkbase_data_link(
         bcs_cluster_id,
         storage_cluster_name,
     )
-
-
-def check_create_fed_vm_data_link(cluster):
-    """
-    检查该集群是否需要以及是否完成联邦集群子集群的汇聚链路创建
-    """
-    from metadata.models import DataLinkResource, DataSource, DataSourceResultTable
-
-    # 检查是否存在对应的联邦集群记录
-    objs = BcsFederalClusterInfo.objects.filter(sub_cluster_id=cluster.cluster_id, is_deleted=False)
-    # 若该集群为联邦集群的子集群且此前未创建联邦集群的汇聚链路，尝试创建
-    if objs and not DataLinkResource.objects.filter(data_bus_name__contains=f"{cluster.K8sMetricDataID}_fed").exists():
-        logger.info(
-            "check_create_fed_vm_data_link:cluster_id->{} is federal sub cluster and has not create fed data "
-            "link,try to create".format(cluster.cluster_id)
-        )
-        # 创建联邦汇聚链路
-        try:
-            ds = DataSource.objects.get(bk_data_id=cluster.K8sMetricDataID)
-            table_id = DataSourceResultTable.objects.get(bk_data_id=cluster.K8sMetricDataID).table_id
-            vm_cluster = get_vm_cluster_id_name(space_type='bkcc', space_id=str(cluster.bk_biz_id))
-            create_fed_bkbase_data_link(
-                monitor_table_id=table_id,
-                data_source=ds,
-                storage_cluster_name=vm_cluster.get("cluster_name"),
-                bcs_cluster_id=cluster.cluster_id,
-            )
-            logger.info("check_create_fed_vm_data_link:success cluster_id->{}".format(cluster.cluster_id))
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error(
-                "check_create_fed_vm_data_link:error occurs cluster_id->{},error->{}".format(cluster.cluster_id, str(e))
-            )

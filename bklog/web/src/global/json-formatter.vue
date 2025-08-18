@@ -32,14 +32,14 @@
           :data-with-intersection="true"
           :data-field-name="item.name"
           :ref="item.formatter.ref"
-          v-html="item.formatter.stringValue"
-        ></span>
+        >{{ item.formatter.stringValue }}</span>
       </span>
     </template>
     <template v-if="showMoreTextAction && hasScrollY">
       <span
         class="btn-more-action"
-        @click="handleClickMore"
+        @mouseup="handleMouseUp"
+        @mousedown="handleMouseDown"
       >
         {{ btnText }}
       </span>
@@ -55,7 +55,7 @@
 
   import useJsonRoot from '../hooks/use-json-root';
   import useStore from '../hooks/use-store';
-  import RetrieveHelper from '../views/retrieve-helper';
+  import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
   import { BK_LOG_STORAGE } from '../store/store.type';
   import { debounce } from 'lodash';
   import JSONBig from 'json-bigint';
@@ -67,7 +67,7 @@
 
   const props = defineProps({
     jsonValue: {
-      type: [Object, String, Number],
+      type: [Object, String, Number, Boolean],
       default: () => ({}),
     },
     fields: {
@@ -154,11 +154,22 @@
     return ` ...${$t('更多')}`;
   });
 
-  const handleClickMore = e => {
+  let mousedownItem = null;
+  const handleMouseDown = e => {
+    mousedownItem = e.target;
+  }
+
+
+  const handleMouseUp = e => {
     e.stopPropagation();
     e.preventDefault();
-    showAllText.value = !showAllText.value;
-  };
+    e.stopImmediatePropagation();
+    if (mousedownItem === e.target) {
+      showAllText.value = !showAllText.value;
+    }
+
+    mousedownItem = null;
+  }
 
   const onSegmentClick = args => {
     emit('menu-click', args);
@@ -233,12 +244,12 @@
 
   const getFieldFormatter = (field, formatDate) => {
     const [objValue, val] = getFieldValue(field);
-
+    const strVal = getDateFieldValue(field, getCellRender(val), formatDate);
     return {
       ref: ref(),
       isJson: typeof objValue === 'object' && objValue !== undefined,
       value: getDateFieldValue(field, objValue, formatDate),
-      stringValue: getDateFieldValue(field, getCellRender(val), formatDate),
+      stringValue: strVal?.replace?.(/<\/?mark>/igm, '') ?? strVal,
       field,
     };
   };
@@ -307,12 +318,15 @@
     },
   );
 
+  RetrieveHelper.on(RetrieveEvent.RESULT_ROW_BOX_RESIZE, setIsOverflowY);
+
   onMounted(() => {
     setIsOverflowY();
   });
 
   onBeforeUnmount(() => {
     destroy();
+    RetrieveHelper.off(RetrieveEvent.RESULT_ROW_BOX_RESIZE, setIsOverflowY);
   });
 </script>
 <style lang="scss">
@@ -321,6 +335,7 @@
   .bklog-json-formatter-root {
     position: relative;
     width: 100%;
+    overflow: hidden;
     font-family: var(--table-fount-family);
     font-size: var(--table-fount-size);
     line-height: 20px;
