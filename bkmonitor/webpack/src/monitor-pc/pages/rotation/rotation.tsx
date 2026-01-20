@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -45,10 +45,10 @@ export default class Rotation extends tsc<object> {
   get rotationData() {
     return JSON.stringify({
       host: this.rotationHost,
-      baseroute: '/trace/',
+      parentRoute: '/trace/',
     });
   }
-  beforeRouteLeave(to, from, next) {
+  beforeRouteLeave(_to, _fromm, next) {
     unmount(wewebId);
     next();
   }
@@ -59,7 +59,7 @@ export default class Rotation extends tsc<object> {
           id={wewebId}
           class='rotation-iframe'
           data={this.rotationData}
-          setShodowDom={true}
+          setShadowDom={true}
           showSourceCode={true}
           url={this.rotationUrl}
         />

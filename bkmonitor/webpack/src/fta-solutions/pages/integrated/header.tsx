@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -149,7 +149,7 @@ export default class ContentHeader extends tsc<{ filterWidth: number; searchValu
           </div>
           <bk-input
             class='search'
-            placeholder={this.$t('搜索事件源名称、ID、分类、方式、作者、创建人、更新人')}
+            placeholder={this.$t('搜索 事件源名称、ID、分类、方式、作者、创建人、更新人')}
             right-icon='bk-icon icon-search'
             value={this.searchValue}
             onChange={this.handleSearchValueChange}

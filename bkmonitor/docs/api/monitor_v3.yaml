@@ -1581,6 +1581,17 @@
   path: /v2/monitor_v3/metadata_delete_result_table_snapshot/
   method: POST
 
+- api_type: operate
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
+  dest_path: /api/v3/meta/retry_result_table_snapshot/
+  is_hidden: true
+  label: 重试结果表快照配置
+  label_en: retry result table snapshot
+  name: retry_result_table_snapshot
+  path: /v2/monitor_v3/metadata_retry_result_table_snapshot/
+  method: POST
+
 - api_type: query
   comp_codename: generic.v2.monitor_v3.monitor_v3_component
   dest_http_method: POST
@@ -1612,6 +1623,17 @@
   label_en: verify es snapshot repository
   name: get_result_table_snapshot_state
   path: /v2/monitor_v3/metadata_get_result_table_snapshot_state/
+  method: POST
+
+- api_type: query
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
+  dest_path: /api/v3/meta/get_result_table_snapshot_recent_state/
+  is_hidden: true
+  label: 结果表最近一次快照状态
+  label_en: get result table snapshot recent state
+  name: get_result_table_snapshot_recent_state
+  path: /v2/monitor_v3/metadata_get_result_table_snapshot_recent_state/
   method: POST
 
 - api_type: operate
@@ -1647,6 +1669,17 @@
   path: /v2/monitor_v3/metadata_delete_restore_result_table_snapshot/
   method: POST
 
+- api_type: operate
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
+  dest_path: /api/v3/meta/retry_restore_result_table_snapshot/
+  is_hidden: true
+  label: 重试快照回溯
+  label_en: retry restore result table snapshot
+  name: retry_restore_result_table_snapshot
+  path: /v2/monitor_v3/metadata_retry_restore_result_table_snapshot/
+  method: POST
+
 - api_type: query
   comp_codename: generic.v2.monitor_v3.monitor_v3_component
   dest_http_method: POST
@@ -1667,6 +1700,17 @@
   label_en: restore result table snapshot state
   name: get_restore_result_table_snapshot_state
   path: /v2/monitor_v3/metadata_get_restore_result_table_snapshot_state/
+  method: POST
+
+- api_type: query
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
+  dest_path: /api/v3/meta/get_restore_result_table_snapshot_indices/
+  is_hidden: true
+  label: 快照回溯索引详情
+  label_en: restore result table snapshot indices
+  name: get_restore_result_table_snapshot_indices
+  path: /v2/monitor_v3/metadata_get_restore_result_table_snapshot_indices/
   method: POST
 
 
@@ -1778,6 +1822,17 @@
   label_en: search alert by event
   name: search_alert_by_event
   path: /v2/monitor_v3/search_alert_by_event/
+  method: POST
+
+- api_type: operate
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
+  dest_path: /api/v4/alert/alert/close/
+  is_hidden: true
+  label: 关闭告警
+  label_en: close alert
+  name: close_alert
+  path: /v2/monitor_v3/close_alert/
   method: POST
 
 - api_type: operate
@@ -2659,94 +2714,6 @@
 - api_type: query
   comp_codename: generic.v2.monitor_v3.monitor_v3_component
   dest_http_method: GET
-  dest_path: /api/v3/meta/list_data_pipeline/
-  is_hidden: true
-  label: 查询链路管道
-  label_en: list_data_pipeline
-  name: metadata_list_data_pipeline
-  path: /v2/monitor_v3/metadata_list_data_pipeline/
-  method: GET
-
-- api_type: operate
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: POST
-  dest_path: /api/v3/meta/create_data_pipeline/
-  is_hidden: true
-  label: 创建链路管道
-  label_en: create_data_pipeline
-  name: metadata_create_data_pipeline
-  path: /v2/monitor_v3/metadata_create_data_pipeline/
-  method: POST
-
-- api_type: operate
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: POST
-  dest_path: /api/v3/meta/update_data_pipeline/
-  is_hidden: true
-  label: 更新链路管道
-  label_en: update_data_pipeline
-  name: metadata_update_data_pipeline
-  path: /v2/monitor_v3/metadata_update_data_pipeline/
-  method: POST
-
-- api_type: query
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: GET
-  dest_path: /api/v3/meta/get_storage_cluster_info/
-  is_hidden: true
-  label: 查询集群信息
-  label_en: get_storage_cluster_info
-  name: metadata_get_storage_cluster_info
-  path: /v2/monitor_v3/metadata_get_storage_cluster_info/
-  method: GET
-
-- api_type: query
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: GET
-  dest_path: /api/v3/meta/get_etl_config/
-  is_hidden: true
-  label: 查询场景类型
-  label_en: get_etl_config
-  name: metadata_get_etl_config
-  path: /v2/monitor_v3/metadata_get_etl_config/
-  method: GET
-
-- api_type: query
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: GET
-  dest_path: /api/v3/meta/get_transfer_list/
-  is_hidden: true
-  label: 查询 transfer 集群列表
-  label_en: get_transfer_list
-  name: metadata_get_transfer_list
-  path: /v2/monitor_v3/metadata_get_transfer_list/
-  method: GET
-
-- api_type: query
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: GET
-  dest_path: /api/v3/meta/check_cluster_health/
-  is_hidden: true
-  label: 检测集群连通性
-  label_en: check_cluster_health
-  name: metadata_check_cluster_health
-  path: /v2/monitor_v3/metadata_check_cluster_health/
-  method: GET
-
-- api_type: query
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: GET
-  dest_path: /api/v3/meta/list_data_source_by_data_pipeline/
-  is_hidden: true
-  label: 查询使用管道的数据源信息
-  label_en: list_data_source_by_data_pipeline
-  name: metadata_list_data_source_by_data_pipeline
-  path: /v2/monitor_v3/metadata_list_data_source_by_data_pipeline/
-  method: GET
-
-- api_type: query
-  comp_codename: generic.v2.monitor_v3.monitor_v3_component
-  dest_http_method: GET
   dest_path: /api/v3/meta/list_clusters/
   is_hidden: true
   label: 查询已经注册的集群
@@ -2802,6 +2769,17 @@
 - api_type: operate
   comp_codename: generic.v2.monitor_v3.monitor_v3_component
   dest_http_method: POST
+  dest_path: /api/v4/service_web/service_config/
+  is_hidden: true
+  label: 【APM】应用下服务配置修改
+  label_en: update apm service config
+  name: apm_update_service_config
+  path: /v2/monitor_v3/apm/service/update_service_config/
+  suggest_method: POST
+
+- api_type: operate
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
   dest_path: /api/v4/application_web/create_application/
   is_hidden: true
   label: 【APM】应用创建
@@ -2842,6 +2820,39 @@
   name: apm_check_duplicate_app_name
   path: /v2/monitor_v3/apm/check_duplicate_app_name/
   method: GET
+
+- api_type: query
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: GET
+  dest_path: /api/v4/application_web/list_application_info/
+  is_hidden: true
+  label: 【APM】应用列表详情查询
+  label_en: apm list application info
+  name: apm_application_info
+  path: /v2/monitor_v3/apm/list_application_info/
+  suggest_method: GET
+
+- api_type: query
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
+  dest_path: /api/v4/trace_query_web/list_traces/
+  is_hidden: true
+  label: 【APM】trace 列表查询
+  label_en: trace query list traces
+  name: trace_query_list_traces
+  path: /v2/monitor_v3/trace_query/list_traces/
+  suggest_method: POST
+
+- api_type: query
+  comp_codename: generic.v2.monitor_v3.monitor_v3_component
+  dest_http_method: POST
+  dest_path: /api/v4/trace_query_web/list_spans/
+  is_hidden: true
+  label: 【APM】span 列表查询
+  label_en: trace query list spans
+  name: trace_query_list_spans
+  path: /v2/monitor_v3/trace_query/list_spans/
+  suggest_method: POST
 
 - api_type: query
   comp_codename: generic.v2.monitor_v3.monitor_v3_component

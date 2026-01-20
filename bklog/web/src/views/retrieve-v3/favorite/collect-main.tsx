@@ -34,7 +34,7 @@ import CollectHead from './components/collect-head/collect-head';
 import CollectList from './components/collect-list/collect-list';
 import CollectTab from './components/collect-tab/collect-tab';
 import CollectTool from './components/collect-tool/collect-tool';
-import { useFavorite } from './hooks/useFavorite';
+import { useFavorite } from './hooks/use-favorite';
 import { ITabItem } from './types';
 import { getGroupNameRules } from './utils';
 
@@ -178,7 +178,7 @@ export default defineComponent({
     // 监听显示状态变化
     watch(
       () => props.isShowCollect,
-      value => {
+      (value) => {
         if (value) {
           getFavoriteList();
         } else {
@@ -195,6 +195,7 @@ export default defineComponent({
           <CollectHead
             total={allFavoriteNumber.value}
             on-collapse={handleCollapse}
+            on-refresh={handleRefresh}
           />
           <bk-input
             class='collect-main-search-input'

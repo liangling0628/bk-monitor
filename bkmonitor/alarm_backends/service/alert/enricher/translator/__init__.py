@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -35,6 +34,7 @@ from alarm_backends.service.alert.enricher.translator.uptimecheck import (
     UptimecheckConfigTranslator,
 )
 from alarm_backends.service.alert.enricher.translator.biz_name import BizNameTranslator
+from alarm_backends.service.alert.enricher.translator.apm import ApmTranslator
 
 logger = logging.getLogger("alert.enricher")
 
@@ -48,12 +48,13 @@ INSTALLED_TRANSLATORS = (
     IndexSetTranslator,
     CoreFileTranslator,
     ResultTableTranslator,
+    ApmTranslator,
     BcsClusterTranslator,
     BizNameTranslator,
 )
 
 
-class TranslatorFactory(object):
+class TranslatorFactory:
     def __init__(self, strategy):
         self.strategy = strategy
         self.translators = []
@@ -62,7 +63,7 @@ class TranslatorFactory(object):
             try:
                 self._create_translators_by_item(item)
             except Exception as e:
-                logger.exception("dimension translate error, reason：{}".format(e))
+                logger.exception(f"dimension translate error, reason：{e}")
 
     def _create_translators_by_item(self, item):
         for translator_cls in INSTALLED_TRANSLATORS:
@@ -83,9 +84,7 @@ class TranslatorFactory(object):
                 translated_data = translator.translate(translated_data)
             except Exception as e:
                 logger.exception(
-                    "dimension translate error, reason: {}. origin data: {}, middle data: {}".format(
-                        e, data, translated_data
-                    )
+                    f"dimension translate error, reason: {e}. origin data: {data}, middle data: {translated_data}"
                 )
 
         for name, value in list(translated_data.items()):

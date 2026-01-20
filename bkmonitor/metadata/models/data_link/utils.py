@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+from typing import Any
 
 from django.conf import settings
 from jinja2.sandbox import SandboxedEnvironment as Environment
@@ -91,7 +92,7 @@ def parse_and_get_rt_biz_id(table_id: str) -> int:
         return settings.DEFAULT_BKDATA_BIZ_ID
 
 
-def compose_config(tpl: str, render_params: dict, err_msg_prefix: str | None = "compose config") -> dict:
+def compose_config(tpl: str, render_params: dict, err_msg_prefix: str | None = "compose config") -> dict[str, Any]:
     """渲染配置模板"""
     content = Environment().from_string(tpl).render(**render_params)
     try:
@@ -122,6 +123,9 @@ def compose_bkdata_data_id_name(data_name: str, strategy: str | None = None) -> 
     if chinese_characters:
         chinese_pinyin = "".join(lazy_pinyin(chinese_characters))  # 转为全拼音
         refine_data_name += chinese_pinyin  # 拼接拼音到 refined_name
+
+    # 将减号替换为下划线
+    refine_data_name = refine_data_name.replace("-", "_")
 
     # 替换连续的下划线为单个下划线
     data_id_name = f"bkm_{re.sub(r'_+', '_', refine_data_name)}"

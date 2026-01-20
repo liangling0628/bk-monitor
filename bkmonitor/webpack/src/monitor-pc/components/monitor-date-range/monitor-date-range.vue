@@ -2,7 +2,7 @@
 * Tencent is pleased to support the open source community by making
 * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
 *
-* Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+* Copyright (C) 2017-2025 Tencent.  All rights reserved.
 *
 * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
 *
@@ -183,7 +183,7 @@ export default {
       this.initDateTimeRange = v;
     },
     handleConfirm() {
-      this.date = `${dayjs.tz(this.initDateTimeRange[0]).format('YYYY-MM-DD HH:mm:ss')} -- ${dayjs.tz(this.initDateTimeRange[1]).format('YYYY-MM-DD HH:mm:ss')}`;
+      this.date = `${dayjs.tz(this.initDateTimeRange[0]).format('YYYY-MM-DD HH:mm:ssZZ')} -- ${dayjs.tz(this.initDateTimeRange[1]).format('YYYY-MM-DD HH:mm:ssZZ')}`;
       if (!this.options.some(set => set.value === this.date)) {
         // 重复的不新增
         this.$emit('add-option', { name: this.date, value: this.date });
@@ -233,7 +233,7 @@ export default {
 
       &.is-focus {
         border-color: #3a84ff;
-        box-shadow: 0 0 4px rgba(58, 132, 255, 0.4);
+        box-shadow: 0 0 4px rgb(58 132 255 / 40%);
       }
 
       .icon-angle-down {
@@ -314,7 +314,7 @@ export default {
       top: 20px !important;
 
       /* stylelint-disable-next-line declaration-no-important */
-      right: 0px !important;
+      right: 0 !important;
 
       /* stylelint-disable-next-line declaration-no-important */
       left: inherit !important;
@@ -330,7 +330,7 @@ export default {
       top: 20px !important;
 
       /* stylelint-disable-next-line declaration-no-important */
-      right: 0px !important;
+      right: 0 !important;
 
       /* stylelint-disable-next-line declaration-no-important */
       left: inherit !important;
@@ -349,7 +349,7 @@ export default {
       top: 20px !important;
 
       /* stylelint-disable-next-line declaration-no-important */
-      left: 0px !important;
+      left: 0 !important;
 
       /* stylelint-disable-next-line declaration-no-important */
       left: inherit !important;
@@ -365,7 +365,7 @@ export default {
       top: 20px !important;
 
       /* stylelint-disable-next-line declaration-no-important */
-      left: 0px !important;
+      left: 0 !important;
 
       /* stylelint-disable-next-line declaration-no-important */
       left: inherit !important;

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -181,7 +181,7 @@ class AlarmEventChart
       const point3 = data[2].datapoints;
       const point4 = data[3].datapoints;
       let i = 0;
-      const time1 = +new Date();
+      const time1 = Date.now();
       const interval = 60000;
       while (i < 20) {
         const value = Math.random() * 10;
@@ -233,7 +233,7 @@ class AlarmEventChart
         padding: [8, 8, 8, 8],
         transitionDuration: 0,
         formatter: params => {
-          const time = dayjs(params[0].value[0]).format('YYYY-MM-DD HH:mm:ss');
+          const time = dayjs(params[0].value[0]).format('YYYY-MM-DD HH:mm:ssZZ');
           const alarms = [];
           for (const param of params) {
             alarms.push({

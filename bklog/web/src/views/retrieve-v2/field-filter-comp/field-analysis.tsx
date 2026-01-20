@@ -24,19 +24,20 @@
  * IN THE SOFTWARE.
  */
 
-import { Component, Prop, Ref, Vue, Emit, Watch } from 'vue-property-decorator';
+import { Component, Emit, Prop, Ref, Vue, Watch } from 'vue-property-decorator';
 
 import ChartSkeleton from '@/skeleton/chart-skeleton';
 import ItemSkeleton from '@/skeleton/item-skeleton';
 import axios from 'axios';
 import dayjs from 'dayjs';
 
+import store from '@/store';
+import * as echarts from 'echarts';
 import $http from '../../../api';
 import { formatNumberWithRegex } from '../../../common/util';
 import { lineOrBarOptions, pillarChartOption } from '../../../components/monitor-echarts/options/echart-options-config';
 import { lineColor } from '../../../store/constant';
 import AggChart from './agg-chart';
-import store from '@/store';
 
 import './field-analysis.scss';
 
@@ -219,8 +220,6 @@ export default class FieldAnalysis extends Vue {
       );
 
       Object.assign(this.fieldData, res.data);
-    } catch (error) {
-      // console.error('Field statistics info error:', error);
     } finally {
       this.infoLoading = false;
     }
@@ -330,7 +329,7 @@ export default class FieldAnalysis extends Vue {
     }
 
     this.height = CHART_HEIGHTS.LINE_BASE;
-    const series = [];
+    const series: any[] = [];
     const echarts = this.echarts || (await this.loadEChartsLibrary());
 
     seriesData.forEach((el: any, index: number) => {
@@ -364,7 +363,7 @@ export default class FieldAnalysis extends Vue {
     const maxTimestamp = Math.max(...allTimestamps);
 
     const {
-      xAxis: { minInterval, splitNumber, ...resetxAxis },
+      xAxis: { minInterval: _minInterval, splitNumber: _splitNumber, ...resetxAxis },
     } = lineOrBarOptions;
     this.lineOptions = { ...lineOrBarOptions };
 
@@ -413,13 +412,19 @@ export default class FieldAnalysis extends Vue {
       }
     });
   }
-
   setFormatStr(start: number, end: number) {
-    if (!start || !end) return;
+    const FIVE_MINUTES = 5 * 60 * 1000;
 
-    const differenceInHours = Math.abs(start - end) / 3600000;
+    if (!(start && end)) {
+      return;
+    }
 
-    if (differenceInHours <= 24) {
+    const diffMs = Math.abs(start - end);
+    const differenceInHours = diffMs / 3600000;
+
+    if (diffMs <= FIVE_MINUTES) {
+      this.formatStr = 'HH:mm:ss';
+    } else if (differenceInHours <= 24) {
       this.formatStr = 'HH:mm';
     } else if (differenceInHours > 24 && differenceInHours <= 168) {
       this.formatStr = 'MM-DD HH:mm';
@@ -430,7 +435,9 @@ export default class FieldAnalysis extends Vue {
   }
 
   async initFieldChart() {
-    if (this.isShowEmpty || !this.chartRef) return;
+    if (this.isShowEmpty || !this.chartRef) {
+      return;
+    }
 
     try {
       // 清理旧图表实例
@@ -465,7 +472,7 @@ export default class FieldAnalysis extends Vue {
 
   handleSetTimeTooltip(params: any[]) {
     const sortedParams = [...params].sort((a, b) => b.value[1] - a.value[1]);
-    const liHtmls = sortedParams.map(item => {
+    const liHtmls = sortedParams.map((item) => {
       const formattedName = item.seriesName.replace(/(.{85})(?=.{85})/g, '$1\n');
       const formattedValue = formatNumberWithRegex(item.value[1]);
       /** 折线图tooltips不能使用纯CSS来处理换行 会有宽度贴图表边缘变小问题 字符串添加换行倍数为85 */
@@ -501,7 +508,7 @@ export default class FieldAnalysis extends Vue {
   }
   /** 设置定位 */
 
-  handleSetPosition(pos: [number, number], params: any, dom: any, rect: any, size: any) {
+  handleSetPosition(pos: [number, number], _params: any, _dom: any, _rect: any, size: any) {
     if (!this.chartRect) {
       this.chartRect = this.chartRef.getBoundingClientRect();
     }
@@ -521,14 +528,18 @@ export default class FieldAnalysis extends Vue {
   }
   /** 点击分组 */
   handleLegendEvent(e: MouseEvent, actionType: LegendActionType, item: any) {
-    if (this.legendData.length < 2) return;
+    if (this.legendData.length < 2) {
+      return;
+    }
 
     const eventType = e.shiftKey && actionType === 'click' ? 'shift-click' : actionType;
 
     const newLegendData = [...this.legendData];
     const itemIndex = newLegendData.findIndex(legend => legend.name === item.name);
 
-    if (itemIndex === -1) return;
+    if (itemIndex === -1) {
+      return;
+    }
 
     if (eventType === 'shift-click') {
       newLegendData[itemIndex].show = !newLegendData[itemIndex].show;
@@ -573,8 +584,8 @@ export default class FieldAnalysis extends Vue {
     }
   }
 
-  getChartsCancelFn = () => {};
-  getInfoCancelFn = () => {};
+  getChartsCancelFn = () => { };
+  getInfoCancelFn = () => { };
 
   // 添加防抖处理
   legendWheel = (event: WheelEvent) => {
@@ -592,6 +603,83 @@ export default class FieldAnalysis extends Vue {
     this.$emit('showMore', this.fieldData, !!show);
   }
 
+  // 清理现有数据
+  clearChartData() {
+    // 取消正在进行的请求
+    this.getInfoCancelFn?.();
+    this.getChartsCancelFn?.();
+
+    // 重置字段数据
+    this.fieldData = {
+      total_count: 0,
+      field_count: 0,
+      distinct_count: 0,
+      field_percent: 0,
+      value_analysis: {
+        avg: 0,
+        max: 0,
+        median: 0,
+        min: 0,
+      },
+    };
+
+    // 清空图表数据
+    this.seriesData = [];
+    this.legendData = [];
+    this.lineOptions = {};
+    this.pillarOption = {};
+    this.height = 0;
+
+    // 重置状态
+    this.isShowEmpty = false;
+    this.emptyTipsStr = '';
+    this.emptyStr = window.mainComponent.$t('暂无数据');
+    this.currentPageNum = 1;
+    this.legendMaxPageNum = 1;
+    this.isShowPageIcon = false;
+
+    // 清理图表实例
+    if (this.chart) {
+      this.chart.dispose();
+      this.chart = null;
+    }
+  }
+
+  async handleAddCondition() {
+    // 1. 清理现有数据
+    this.clearChartData();
+
+    // 2. 显示加载状态
+    this.infoLoading = true;
+    this.chartLoading = true;
+
+    try {
+      // 3. 根据最新参数重新请求数据
+      await this.$nextTick();
+
+      if (!this.isPillarChart) {
+        const { start_time: startTime, end_time: endTime } = this.queryParams;
+        this.setFormatStr(startTime, endTime);
+      }
+
+      // 并行请求统计信息和图表数据
+      await Promise.all([this.queryStatisticsInfo(), this.loadEChartsLibrary()]);
+      await this.queryStatisticsGraph();
+
+      // 4. 重新初始化图表
+      await this.$nextTick();
+      this.initFieldChart();
+    } catch (error) {
+      console.error('刷新图表数据失败:', error);
+      this.isShowEmpty = true;
+      this.emptyTipsStr = error.message || window.mainComponent.$t('查询失败');
+      this.emptyStr = window.mainComponent.$t('查询异常');
+    } finally {
+      this.chartLoading = false;
+    }
+  }
+
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: reason
   render() {
     const {
       isPillarChart,
@@ -611,7 +699,7 @@ export default class FieldAnalysis extends Vue {
       pillarQueryTime,
     } = this;
 
-    const distinctCount = formatNumberWithRegex(fieldData.distinct_count);
+    // const distinctCount = formatNumberWithRegex(fieldData.distinct_count);
     const fieldPercent = (fieldData.field_percent * 100).toFixed(2);
 
     return (
@@ -671,7 +759,7 @@ export default class FieldAnalysis extends Vue {
 
         <div
           style={{
-            maxHeight: isPillarChart ? `${CHART_HEIGHTS.PILLAR_BOX}px` : `${CHART_HEIGHTS.LINE_BOX}px`,
+            // maxHeight: isPillarChart ? `${CHART_HEIGHTS.PILLAR_BOX}px` : `${CHART_HEIGHTS.LINE_BOX}px`,
             alignItems: 'center',
           }}
         >
@@ -687,7 +775,7 @@ export default class FieldAnalysis extends Vue {
                     <i
                       class='bk-icon icon-exclamation-circle'
                       v-bk-tooltips={{ content: emptyTipsStr }}
-                    ></i>
+                    />
                   )}
                 </div>
               </bk-exception>
@@ -708,7 +796,7 @@ export default class FieldAnalysis extends Vue {
                 />
               )}
 
-              {!chartLoading && !isPillarChart && (
+              {!(chartLoading || isPillarChart) && (
                 <div
                   style={{ height: `${CHART_HEIGHTS.LEGEND_BOX}px` }}
                   class='legend-box'
@@ -719,15 +807,15 @@ export default class FieldAnalysis extends Vue {
                   >
                     {legendData.map((legend, index) => (
                       <div
-                        key={index}
+                        key={`${index}-${legend}`}
                         class='common-legend-item'
                         title={legend.name}
-                        onClick={e => this.handleLegendEvent(e, 'click', legend)}
+                        on-Click={e => this.handleLegendEvent(e, 'click', legend)}
                       >
                         <span
                           style={{ backgroundColor: legend.show ? legend.color : '#ccc' }}
                           class='legend-icon'
-                        ></span>
+                        />
                         <div
                           style={{ color: legend.show ? '#63656e' : '#ccc' }}
                           class='legend-name title-overflow'
@@ -745,15 +833,15 @@ export default class FieldAnalysis extends Vue {
                           'bk-select-angle bk-icon icon-angle-up-fill last-page-up': true,
                           disabled: currentPageNum === 1,
                         }}
-                        onClick={() => (this.currentPageNum = Math.max(1, currentPageNum - 1))}
-                      ></i>
+                        on-Click={() => (this.currentPageNum = Math.max(1, currentPageNum - 1))}
+                      />
                       <i
                         class={{
                           'bk-select-angle bk-icon icon-angle-up-fill': true,
                           disabled: currentPageNum === legendMaxPageNum,
                         }}
-                        onClick={() => (this.currentPageNum = Math.min(legendMaxPageNum, currentPageNum + 1))}
-                      ></i>
+                        on-Click={() => (this.currentPageNum = Math.min(legendMaxPageNum, currentPageNum + 1))}
+                      />
                     </div>
                   )}
                 </div>
@@ -762,13 +850,12 @@ export default class FieldAnalysis extends Vue {
               <div class='distinct-count-num-box'>
                 <div class='count-num'>
                   <span class='count-num-title'>{window.mainComponent.$t('去重后字段统计')}</span>
-                  <span class='distinct-count-num'>{distinctCount}</span>
                 </div>
                 <div class='more-fn'>
                   {!chartLoading && fieldData.distinct_count > 5 && (
                     <span
                       class='more-distinct'
-                      onClick={() => this.showMore(true)}
+                      on-Click={() => this.showMore(true)}
                     >
                       {window.mainComponent.$t('查看全部')}
                     </span>
@@ -776,11 +863,12 @@ export default class FieldAnalysis extends Vue {
                   <span
                     class='fn-btn bk-icon icon-download'
                     v-bk-tooltips={window.mainComponent.$t('下载')}
-                    onClick={this.downloadFieldStatistics}
+                    on-Click={this.downloadFieldStatistics}
                   ></span>
                   {/* <span
-                    class='fn-btn bk-icon icon-apps'
+                    class='bklog-icon bklog-yibiaopan'
                     v-bk-tooltips='查看仪表盘'
+                    style={{ marginLeft: '5px',cursor: 'pointer' }}
                   ></span> */}
                 </div>
               </div>
@@ -794,6 +882,7 @@ export default class FieldAnalysis extends Vue {
                   parent-expand={true}
                   retrieve-params={this.queryParams}
                   statistical-field-data={this.queryParams.statisticalFieldData}
+                  onAddCondition={this.handleAddCondition}
                 />
               )}
             </div>

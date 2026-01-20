@@ -3,7 +3,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -1270,7 +1270,7 @@ export default defineComponent({
               <Input
                 ref={traceIdInput}
                 v-model={traceIDSearchValue.value}
-                placeholder={t('输入 ID 可精准查询')}
+                placeholder={t('搜索 ID')}
                 type='search'
                 clearable
                 show-clear-only-hover

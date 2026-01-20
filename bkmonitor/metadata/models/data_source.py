@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -14,6 +14,7 @@ import logging
 import time
 import traceback
 import uuid
+from typing import Any
 
 import kafka
 from django.conf import settings
@@ -29,6 +30,7 @@ from constants.data_source import DATA_LINK_V3_VERSION_NAME, DATA_LINK_V4_VERSIO
 from core.drf_resource import api
 from core.errors.api import BKAPIError
 from metadata import config
+from metadata.models.data_link.constants import BKBASE_NAMESPACE_BK_LOG, BKBASE_NAMESPACE_BK_MONITOR
 from metadata.models.space.constants import (
     LOG_EVENT_ETL_CONFIGS,
     SPACE_UID_HYPHEN,
@@ -160,8 +162,8 @@ class DataSource(models.Model):
     def mq_cluster(self):
         """返回数据源的消息队列类型"""
         # 这个配置应该是很少变化的，所以考虑增加缓存
-        if getattr(self, "_mq_cluster", None) is None:
-            self._mq_cluster = ClusterInfo.objects.get(cluster_id=self.mq_cluster_id)
+        if self._mq_cluster is None:
+            self._mq_cluster = ClusterInfo.objects.get(bk_tenant_id=self.bk_tenant_id, cluster_id=self.mq_cluster_id)
 
         return self._mq_cluster
 
@@ -187,7 +189,7 @@ class DataSource(models.Model):
     @property
     def mq_config(self):
         """获取data_id对应消息队列的配置信息"""
-        if getattr(self, "_mq_config", None) is None:
+        if self._mq_config is None:
             self._mq_config = KafkaTopicInfo.objects.get(bk_data_id=self.bk_data_id)
 
         return self._mq_config
@@ -218,19 +220,14 @@ class DataSource(models.Model):
 
         return conf_list
 
-    def get_spaces_by_data_id(
-        self, bk_data_id: int, from_authorization: bool | None = False, bk_tenant_id=DEFAULT_TENANT_ID
-    ) -> list | dict:
-        """通过数据源 ID 查询空间为授权的或者为当前空间"""
+    def get_spaces_by_data_id(self, bk_tenant_id: str, bk_data_id: int) -> dict[str, Any]:
+        """通过数据源 ID 查询空间"""
         # 返回来源于授权空间信息,{space_type_id}__{space_id}__{bk_tenant_id}
         space_list = list(
             SpaceDataSource.objects.filter(
-                bk_data_id=bk_data_id, bk_tenant_id=bk_tenant_id, from_authorization=from_authorization
+                bk_data_id=bk_data_id, bk_tenant_id=bk_tenant_id, from_authorization=False
             ).values("space_type_id", "space_id", "bk_tenant_id")
         )
-        # 如果为授权，则直接返回
-        if from_authorization:
-            return space_list
 
         # 否则， 返回归属的空间，也就是第一个
         return space_list[0] if space_list else {}
@@ -253,7 +250,7 @@ class DataSource(models.Model):
         # 添加集群信息
         mq_config.update(self.mq_cluster.consul_config)
         mq_config["cluster_config"].pop("last_modify_time")
-        bk_biz_id, space_uid = get_space_uid_and_bk_biz_id_by_bk_data_id(self.bk_data_id)
+        bk_biz_id, space_uid = get_space_uid_and_bk_biz_id_by_bk_data_id(self.bk_tenant_id, self.bk_data_id)
         result_config = {
             "bk_data_id": self.bk_data_id,
             "data_id": self.bk_data_id,
@@ -292,11 +289,14 @@ class DataSource(models.Model):
 
             real_table_id_list = list(real_table_ids.keys())
 
-            # TODO: 多租户 需要适配多租户查询RTField和Option
             # 批量获取结果表级别选项
-            table_id_option_dict = ResultTableOption.batch_result_table_option(real_table_id_list)
+            table_id_option_dict = ResultTableOption.batch_result_table_option(
+                real_table_id_list, bk_tenant_id=self.bk_tenant_id
+            )
             # 获取字段信息
-            table_field_dict = ResultTableField.batch_get_fields(real_table_id_list, is_consul_config)
+            table_field_dict = ResultTableField.batch_get_fields(
+                real_table_id_list, is_consul_config, bk_tenant_id=self.bk_tenant_id
+            )
             # 判断需要未删除，而且在启用状态的结果表
             for rt, rt_info in real_table_ids.items():
                 result_table_info_list.append(
@@ -346,10 +346,46 @@ class DataSource(models.Model):
         # data list 在consul中的作用被废弃，不再使用
         pass
 
-    # TODO：多租户,需要等待BkBase接口协议,理论上需要补充租户ID,不再有默认接入者概念
+    def register_to_bkbase(self, bk_biz_id: int, namespace: str = "bkmonitor", bkbase_data_name: str = ""):
+        """
+        将当前data_id注册到计算平台
+
+        Args:
+            bk_biz_id: 业务ID
+            namespace: 命名空间
+            bkbase_data_name: 指定计算平台数据源名称，如果为空，则使用数据源名称自动生成
+        """
+
+        from metadata.models.data_link import DataIdConfig, utils
+
+        # 如果未指定计算平台数据源名称，则使用数据源名称自动生成
+        if not bkbase_data_name:
+            bkbase_data_name = utils.compose_bkdata_data_id_name(self.data_name)
+
+        logger.info("register_to_bkbase: bkbase_data_name: %s", bkbase_data_name)
+        data_id_config_ins, _ = DataIdConfig.objects.update_or_create(
+            bk_tenant_id=self.bk_tenant_id,
+            namespace=namespace,
+            name=bkbase_data_name,
+            bk_biz_id=bk_biz_id,
+            defaults={"bk_data_id": self.bk_data_id},
+        )
+        data_id_config = data_id_config_ins.compose_predefined_config(data_source=self)
+        api.bkdata.apply_data_link(config=[data_id_config], bk_tenant_id=self.bk_tenant_id)
+
+        # 更新数据源的创建来源
+        self.created_from = DataIdCreatedFromSystem.BKDATA.value
+        self.save()
+
     @classmethod
     def apply_for_data_id_from_bkdata(
-        cls, data_name: str, bk_biz_id: int, is_base: bool = False, event_type="metric"
+        cls,
+        bk_tenant_id: str,
+        data_name: str,
+        bk_biz_id: int,
+        is_base: bool = False,
+        event_type: str = "metric",
+        prefer_kafka_cluster_name: str | None = None,
     ) -> int:
         """
         从计算平台申请data_id
@@ -357,14 +393,26 @@ class DataSource(models.Model):
         :param bk_biz_id: 业务ID
         :param is_base: 是否是基础数据源
         :param event_type: 数据类型
+        :param prefer_kafka_cluster_name: KafkaChannel 资源名称（bkbase侧），用于 DataId.spec.preferCluster
         :return: data_id
         """
         # 下发配置
         from metadata.models.data_link.constants import DataLinkResourceStatus
         from metadata.models.data_link.service import apply_data_id_v2, get_data_id_v2
 
+        # 根据数据类型确定命名空间
+        namespace = BKBASE_NAMESPACE_BK_LOG if event_type == "log" else BKBASE_NAMESPACE_BK_MONITOR
+
         try:
-            apply_data_id_v2(data_name=data_name, bk_biz_id=bk_biz_id, is_base=is_base, event_type=event_type)
+            apply_data_id_v2(
+                bk_tenant_id=bk_tenant_id,
+                data_name=data_name,
+                bk_biz_id=bk_biz_id,
+                is_base=is_base,
+                event_type=event_type,
+                namespace=namespace,
+                prefer_kafka_cluster_name=prefer_kafka_cluster_name,
+            )
             # 写入记录
         except BKAPIError as e:
             logger.error("apply data id from bkdata error: %s", e)
@@ -374,7 +422,7 @@ class DataSource(models.Model):
             # 等待 3s 后查询一次，减少请求次数
             time.sleep(3)
             try:
-                data = get_data_id_v2(data_name=data_name, is_base=is_base, bk_biz_id=bk_biz_id)
+                data = get_data_id_v2(data_name=data_name, is_base=is_base, bk_biz_id=bk_biz_id, namespace=namespace)
             except BKAPIError as e:
                 logger.error("get data id from bkdata error: %s", e)
                 continue
@@ -540,9 +588,11 @@ class DataSource(models.Model):
         try:
             # 如果集群信息无提供，则使用默认的MQ集群信息
             if mq_cluster is None:
-                mq_cluster = ClusterInfo.objects.get(cluster_type=cls.DEFAULT_MQ_TYPE, is_default_cluster=True)
+                mq_cluster = ClusterInfo.objects.get(
+                    bk_tenant_id=bk_tenant_id, cluster_type=cls.DEFAULT_MQ_TYPE, is_default_cluster=True
+                )
             else:
-                mq_cluster = ClusterInfo.objects.get(cluster_id=mq_cluster)
+                mq_cluster = ClusterInfo.objects.get(bk_tenant_id=bk_tenant_id, cluster_id=mq_cluster)
         except ClusterInfo.DoesNotExist:
             # 此时，用户无提供新的数据源配置的集群信息，而也没有配置默认的集群信息，新的数据源无法配置集群信息
             # 需要抛出异常
@@ -557,10 +607,16 @@ class DataSource(models.Model):
             # 添加过滤条件，只接入单指标单表时序数据到V4链路
             from metadata.models.space.constants import ENABLE_V4_DATALINK_ETL_CONFIGS
 
-            if settings.ENABLE_V2_BKDATA_GSE_RESOURCE and etl_config in ENABLE_V4_DATALINK_ETL_CONFIGS:
+            # 开启V4链路后，特定etl_config的data_id均从计算平台获取
+            if settings.ENABLE_V2_VM_DATA_LINK and etl_config in ENABLE_V4_DATALINK_ETL_CONFIGS:
                 logger.info(f"apply for data id from bkdata,type_label->{type_label},etl_config->{etl_config}")
-                # TODO: 多租户 等待BkBase多租户协议,传递租户ID
                 is_base = False
+
+                # 如果需要走V4链路，则需要确保Kafka集群已经注册到bkbase平台
+                if not mq_cluster.registered_to_bkbase and settings.ENABLE_DATAID_REGISTER_WITH_CLUSTER_NAME:
+                    raise ValueError(
+                        f"kafka cluster {mq_cluster.cluster_name} is not registered to bkbase, please contact administrator to register"
+                    )
 
                 # 根据清洗类型判断是否是系统基础数据
                 if etl_config in SYSTEM_BASE_DATA_ETL_CONFIGS:
@@ -574,7 +630,12 @@ class DataSource(models.Model):
                 # 如果没有指定业务ID，则使用默认业务ID
                 bk_biz_id = get_tenant_datalink_biz_id(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id).label_biz_id
                 bk_data_id = cls.apply_for_data_id_from_bkdata(
-                    data_name=data_name, bk_biz_id=bk_biz_id, is_base=is_base, event_type=event_type
+                    bk_tenant_id=bk_tenant_id,
+                    data_name=data_name,
+                    bk_biz_id=bk_biz_id,
+                    is_base=is_base,
+                    event_type=event_type,
+                    prefer_kafka_cluster_name=mq_cluster.cluster_name,
                 )
                 created_from = DataIdCreatedFromSystem.BKDATA.value
             else:
@@ -669,6 +730,17 @@ class DataSource(models.Model):
                     logger.info(f"data_id->[{data_source.bk_data_id}] now set space uid->[{data_source.space_uid}]")
                 except ValueError:
                     raise ValueError(_("空间唯一标识{}错误").format(space_uid))
+            elif bk_biz_id:
+                # 记录数据源对应的空间信息，便于后续查询
+                if bk_biz_id > 0:
+                    space: Space = Space.objects.get(
+                        bk_tenant_id=bk_tenant_id, space_type_id=SpaceTypes.BKCC.value, space_id=str(bk_biz_id)
+                    )
+                else:
+                    space = Space.objects.get(bk_tenant_id=bk_tenant_id, id=-bk_biz_id)
+
+                data_source.space_uid = space.space_uid
+                data_source.save()
 
             # 创建option配置
             option = {} if option is None else option
@@ -685,9 +757,9 @@ class DataSource(models.Model):
             # 添加时间 option
             cls._add_time_unit_options(operator, data_source.bk_data_id, etl_config)
 
-        # 写入 空间与数据源的关系表，如果 data id 为全局不需要记录
+        # 写入 空间与数据源的关系表
         try:
-            if not is_platform_data_id and space_type_id and space_id:
+            if space_type_id and space_id:
                 cls()._save_space_datasource(
                     creator=operator,
                     space_type_id=space_type_id,
@@ -797,7 +869,7 @@ class DataSource(models.Model):
         # 2.2 mq_cluster_id集群修改
         if mq_cluster_id is not None:
             # 是否存在，集群配置是否合理
-            if not ClusterInfo.objects.filter(cluster_id=mq_cluster_id).exists():
+            if not ClusterInfo.objects.filter(bk_tenant_id=self.bk_tenant_id, cluster_id=mq_cluster_id).exists():
                 logger.error(f"cluster_id->[{mq_cluster_id}] is not exists, nothing will update.")
                 raise ValueError(_("集群配置不存在，请确认"))
 
@@ -827,7 +899,11 @@ class DataSource(models.Model):
             # 更新option配置
             for option_name, option_value in list(option.items()):
                 DataSourceOption.create_or_update(
-                    bk_data_id=self.bk_data_id, name=option_name, value=option_value, creator=operator
+                    bk_data_id=self.bk_data_id,
+                    name=option_name,
+                    value=option_value,
+                    creator=operator,
+                    bk_tenant_id=self.bk_tenant_id,
                 )
                 logger.info(
                     f"bk_data_id->[{self.bk_data_id}] now has option->[{option_name}] with value->[{option_value}]"
@@ -887,7 +963,7 @@ class DataSource(models.Model):
 
         if authorized_spaces is not None:
             # 写入 空间与数据源的关系表
-            space_info = self.get_spaces_by_data_id(self.bk_data_id)
+            space_info = self.get_spaces_by_data_id(bk_tenant_id=self.bk_tenant_id, bk_data_id=self.bk_data_id)
             if space_info:
                 try:
                     self._save_space_datasource(
@@ -1326,7 +1402,7 @@ class DataSourceResultTable(models.Model):
         return f"<{self.bk_data_id},{self.table_id}>"
 
     @classmethod
-    def modify_table_id_datasource(cls, table_id=None, bk_data_id=None, bk_tenant_id=DEFAULT_TENANT_ID):
+    def modify_table_id_datasource(cls, bk_tenant_id: str, table_id=None, bk_data_id=None):
         if cls.objects.filter(bk_data_id=bk_data_id, bk_tenant_id=bk_tenant_id).exists():
             raise ValueError(_("数据源有跟结果表关联"))
 
@@ -1337,11 +1413,14 @@ class DataSourceResultTable(models.Model):
 
         with atomic(config.DATABASE_CONNECTION_NAME):
             # 解除老的关联关系
-            if cls.objects.filter(table_id=table_id, bk_tenant_id=bk_tenant_id).exists():
-                if cls.objects.filter(table_id=table_id, bk_tenant_id=bk_tenant_id).count() != 1:
-                    raise ValueError(_("结果表有多个关联数据源"))
-                target = cls.objects.filter(table_id=table_id, bk_tenant_id=bk_tenant_id).first()
-                logger.info("table_id => [%s] do not relation bk_data_id => [%s]", table_id, target.bk_data_id)
+            try:
+                target = cls.objects.get(table_id=table_id, bk_tenant_id=bk_tenant_id)
+            except cls.MultipleObjectsReturned:
+                raise ValueError(_("结果表有多个关联数据源"))
+            except cls.DoesNotExist:
+                pass
+            else:
+                logger.info("table_id->[%s] do not relation bk_data_id->[%s]", table_id, target.bk_data_id)
                 target.delete()
                 refresh_consul_config_data_ids.append(target.bk_data_id)
 

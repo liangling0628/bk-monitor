@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -277,8 +277,8 @@ export class LineChart
     if (!val) {
       const { startTime, endTime } = handleTimeRange(this.timeRange);
       this.getPanelData(
-        dayjs(startTime * 1000).format('YYYY-MM-DD HH:mm:ss'),
-        dayjs(endTime * 1000).format('YYYY-MM-DD HH:mm:ss')
+        dayjs(startTime * 1000).format('YYYY-MM-DD HH:mm:ssZZ'),
+        dayjs(endTime * 1000).format('YYYY-MM-DD HH:mm:ssZZ')
       );
     } else {
       this.getPanelData(val[0], val[1]);

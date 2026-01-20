@@ -38,7 +38,7 @@
               >
                 <span
                   class="bklog-icon"
-                  :class="getClass(item.search_mode)"
+                  :class="getClass(item.params.search_mode || item.search_mode)"
                 >
                   <!-- {{ getText(item.search_mode) }} -->
                 </span>
@@ -73,7 +73,7 @@
 <script>
   import { ConditionOperator } from '@/store/condition-operator';
   // #if MONITOR_APP !== 'apm' && MONITOR_APP !== 'trace'
-  import BookmarkPop from '../search-bar/bookmark-pop.vue'
+  import BookmarkPop from '../search-bar/components/bookmark-pop.vue'
   // #else
   // #code const BookmarkPop = () => null;
   // #endif
@@ -133,7 +133,7 @@
         return textMap[searchMode] || '';
       },
       getContent(item){
-        return `<div><div>${this.$t('检索时间')}：${dayjs(item.created_at).format('YYYY-MM-DD HH:mm:ss')}</div>
+        return `<div><div>${this.$t('检索时间')}：${dayjs(item.created_at).format('YYYY-MM-DD HH:mm:ssZZ')}</div>
                 <div>${this.$t('语句')}：${item.query_string}</div></div>`
       },
       async handleClickHistoryButton(e) {
@@ -165,8 +165,8 @@
         this.popoverInstance.show();
       },
       handleClickHistory(item) {
-        const { search_mode, params } = item;
-        const { keyword, addition, ip_chooser } = params;
+        const { params } = item;
+        const { keyword, addition, ip_chooser, search_mode = item.search_mode  } = params;
         this.$emit('change', { keyword, addition, ip_chooser, search_mode });
         this.popoverInstance.hide();
       },

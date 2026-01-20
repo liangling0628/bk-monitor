@@ -57,6 +57,15 @@ AI_ASSISTANT = "ai_assistant"
 
 # unify_query_search查询的开关
 UNIFY_QUERY_SEARCH = "unify_query_search"
+UNIFY_QUERY_SEARCH_EXPORT = "unify_query_search_export"
 
 # unify_query_sql 查询的开关
 UNIFY_QUERY_SQL = "unify_query_sql"
+
+# 日志聚类小型化配置
+# {
+#   "predict_cluster": {
+#     "default": "http://log_cluster_server:8080/api"
+#   }
+# }
+MINI_CLUSTERING_CONFIG = "mini_clustering_config"

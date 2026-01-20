@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -547,6 +547,7 @@ export default class FavoriteManageDialog extends tsc<FavoriteManageDialogProps,
                 right-icon='bk-icon icon-search'
                 clearable
                 show-clear-only-hover
+                placeholder={this.$t('搜索')}
                 onInput={this.handleGroupSearch}
                 onRightIconClick={this.handleGroupSearch}
               />
@@ -593,6 +594,7 @@ export default class FavoriteManageDialog extends tsc<FavoriteManageDialogProps,
                 right-icon='bk-icon icon-search'
                 clearable
                 show-clear-only-hover
+                placeholder={this.$t('搜索 收藏名称')}
                 onInput={this.handleFavoriteSearch}
                 onRightIconClick={this.handleFavoriteSearch}
               />
@@ -641,7 +643,7 @@ export default class FavoriteManageDialog extends tsc<FavoriteManageDialogProps,
                   filter-multiple
                 />
                 <bk-table-column
-                  formatter={row => dayjs(row.update_time).format('YYYY-MM-DD HH:mm:ss')}
+                  formatter={row => dayjs(row.update_time).format('YYYY-MM-DD HH:mm:ssZZ')}
                   label={this.$t('变更时间')}
                   prop='update_time'
                   sortable

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -931,7 +931,7 @@ export default class ApmRelationTopo extends tsc<ApmRelationTopoProps, ApmRelati
   /** 下载图片 */
   handleDownloadImage() {
     if (!(this as any).graph) return;
-    const name = `${dayjs.tz().format('YYYY-MM-DD HH:mm:ss')}`;
+    const name = `${dayjs.tz().format('YYYY-MM-DD HH:mm:ssZZ')}`;
     (this as any).graph.downloadFullImage(name, 'image/png', {
       backgroundColor: '#fff',
       padding: 30,

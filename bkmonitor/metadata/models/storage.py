@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -13,10 +13,12 @@ import base64
 import datetime
 import json
 import logging
+import random
 import re
+import string
 import time
 import traceback
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import arrow
 import curator
@@ -79,10 +81,14 @@ from .influxdb_cluster import (
 
 logger = logging.getLogger("metadata")
 
-ResultTableField = None
-ResultTableFieldOption = None
-ResultTable = None
-EventGroup = None
+
+if TYPE_CHECKING:
+    from metadata.models.custom_report import EventGroup
+    from metadata.models.result_table import ResultTable, ResultTableField
+else:
+    ResultTableField = None
+    ResultTable = None
+    EventGroup = None
 
 
 class ClusterInfo(models.Model):
@@ -91,6 +97,9 @@ class ClusterInfo(models.Model):
     此处的集群信息，主要是指对于外部使用监控kafka集群或者influxDB-proxy集群的信息
     如果需要看到influxDB-proxy后面的实际集群信息，请看InfluxDBClusterInfo记录
     """
+
+    # 集群英文名正则表达式，要求符合 [_A-Za-z0-9][_A-Za-z0-9-]* 格式，且长度不超过50，与bkbase的集群名命名规则一致
+    CLUSTER_NAME_REGEX = re.compile(r"^[_A-Za-z0-9][_A-Za-z0-9-]{0,49}$")
 
     CONSUL_PREFIX_PATH = f"{config.CONSUL_PATH}/unify-query/data/storage"
     CONSUL_VERSION_PATH = f"{config.CONSUL_PATH}/unify-query/version/storage"
@@ -120,9 +129,10 @@ class ClusterInfo(models.Model):
     LOG_PLATFORM_REGISTERED_SYSTEM = "log-search-4"
     BKDATA_REGISTERED_SYSTEM = "bkdata"
 
+    bk_tenant_id = models.CharField("租户ID", max_length=64, default=DEFAULT_TENANT_ID)
     cluster_id = models.AutoField("集群ID", primary_key=True)
-    # 集群中文名，便于管理员维护
-    cluster_name = models.CharField("集群名称", max_length=128, unique=True)
+    cluster_name = models.CharField("集群英文名", max_length=128)
+    display_name = models.CharField("集群显示名称", max_length=128, default="", blank=True)
     cluster_type = models.CharField("集群类型", max_length=32, db_index=True)
     domain_name = models.CharField("集群域名", max_length=128)
     port = models.IntegerField("端口")
@@ -155,6 +165,7 @@ class ClusterInfo(models.Model):
 
     # 描述该存储集群被何系统使用
     registered_system = models.CharField("注册来源系统", default=DEFAULT_REGISTERED_SYSTEM, max_length=128)
+    registered_to_bkbase = models.BooleanField("是否已经注册到bkbase平台", default=False)
 
     # GSE注册相关
     # 是否需要往GSE注册
@@ -174,6 +185,7 @@ class ClusterInfo(models.Model):
     class Meta:
         verbose_name = "集群配置信息"
         verbose_name_plural = "集群配置信息"
+        unique_together = (("bk_tenant_id", "cluster_type", "cluster_name"),)
 
     def to_dict(self, fields: list | None = None, exclude: list | None = None) -> dict:
         data = {}
@@ -217,10 +229,13 @@ class ClusterInfo(models.Model):
         for cluster_id, storage_info in list(refresh_dict.items()):
             consul_path = "/".join([cls.CONSUL_PREFIX_PATH, str(cluster_id)])
 
+            # 根据 schema 生成地址，如果 schema 不是 http 或 https，则默认使用 http
+            schema = storage_info.schema if storage_info.schema in ["http", "https"] else "http"
+
             hash_consul.put(
                 key=consul_path,
                 value={
-                    "address": f"http://{storage_info.domain_name}:{storage_info.port}",
+                    "address": f"{schema}://{storage_info.domain_name}:{storage_info.port}",
                     "username": storage_info.username,
                     "password": storage_info.password,
                     "type": storage_info.cluster_type,
@@ -232,7 +247,7 @@ class ClusterInfo(models.Model):
 
         logger.info(f"all es table info is refresh to consul success count->[{total_count}].")
 
-    def base64_with_prefix(self, content: str) -> str:
+    def base64_with_prefix(self, content: str | None) -> str | None:
         """编码，并添加上前缀"""
         # 如果为空，则直接返回
         if not content:
@@ -277,6 +292,7 @@ class ClusterInfo(models.Model):
                 "raw_ssl_certificate_key": self.ssl_certificate_key,
                 "cluster_id": self.cluster_id,
                 "cluster_name": self.cluster_name,
+                "display_name": self.display_name,
                 "version": self.version,
                 "custom_option": self.custom_option,
                 "registered_system": self.registered_system,
@@ -320,7 +336,7 @@ class ClusterInfo(models.Model):
         if self.cluster_type == self.TYPE_ES:
             try:
                 disable_start_with_write = "-write_*"
-                client = es_tools.get_client(self.cluster_id)
+                client = es_tools.get_client(bk_tenant_id=self.bk_tenant_id, cluster_id=self.cluster_id)
                 cluster_settings = client.cluster.get_settings()
                 auto_create_index = (
                     cluster_settings.get("persistent", {}).get("action", {}).get("auto_create_index", "*")
@@ -345,12 +361,14 @@ class ClusterInfo(models.Model):
     @atomic(config.DATABASE_CONNECTION_NAME)
     def create_cluster(
         cls,
-        cluster_name,
+        bk_tenant_id: str,
         cluster_type,
         domain_name,
         port,
         registered_system,
         operator,
+        cluster_name="",
+        display_name="",
         description="",
         username="",
         password="",
@@ -394,10 +412,21 @@ class ClusterInfo(models.Model):
         :param extranet_port: 外网端口
         :return: clusterInfo object
         """
+        from metadata.models.data_link.data_link_configs import ClusterConfig
+
+        # 如果cluster_name为空，则先生成一个cluster_name占位
+        if not cluster_name:
+            # 随机生成一个字符串，长度为10，包含字母和数字
+            cluster_name = "".join(random.choices(string.ascii_letters + string.digits, k=16))
+            cluster_name = f"auto_cluster_name_{cluster_name}"
+
+        # 如果未提供显示名称，则使用集群名作为显示名称
+        if not display_name:
+            display_name = cluster_name
 
         # 1. 判断请求的数据是否有冲突
         # 基本数据校验
-        if cls.objects.filter(cluster_name=cluster_name).exists():
+        if cls.objects.filter(bk_tenant_id=bk_tenant_id, cluster_name=cluster_name).exists():
             logger.error(
                 f"reg_system->[{registered_system}] try to add cluster with name->[{cluster_name}] which is already exists, nothing will do"
             )
@@ -411,7 +440,9 @@ class ClusterInfo(models.Model):
             raise ValueError(_("存储集群【{}】暂不支持，请确认后重试").format(cluster_type))
 
         # 判断集群信息是否有存在冲突的
-        if cls.objects.filter(domain_name=domain_name, port=port, username=username).exists():
+        if cls.objects.filter(
+            bk_tenant_id=bk_tenant_id, domain_name=domain_name, port=port, username=username
+        ).exists():
             logger.error(
                 f"reg_system->[{registered_system}] try to add cluster->[{cluster_type}] with domain->[{domain_name}] port->[{port}] username->[{username}] "
                 f"pass->[{password}] which already has the same cluster config , nothing will do."
@@ -420,7 +451,9 @@ class ClusterInfo(models.Model):
 
         # 2. 创建新的逻辑
         new_cluster = cls.objects.create(
+            bk_tenant_id=bk_tenant_id,
             cluster_name=cluster_name,
+            display_name=display_name,
             cluster_type=cluster_type,
             domain_name=domain_name,
             port=port,
@@ -451,12 +484,17 @@ class ClusterInfo(models.Model):
         )
         new_cluster.cluster_init()
 
+        # 同步集群配置到bkbase
+        if new_cluster.cluster_type == ClusterInfo.TYPE_ES:
+            ClusterConfig.sync_cluster_config(cluster=new_cluster)
+
         return new_cluster
 
     @atomic(config.DATABASE_CONNECTION_NAME)
     def modify(
         self,
         operator,
+        display_name=None,
         description=None,
         username=None,
         password=None,
@@ -473,10 +511,12 @@ class ClusterInfo(models.Model):
         ssl_insecure_skip_verify: bool | None = None,
         extranet_domain_name: str | None = None,
         extranet_port: int | None = None,
+        **kwargs,
     ):
         """
         修改存储集群信息
         :param operator: 操作者
+        :param display_name: 显示名称
         :param description: 描述信息
         :param username: 用户名
         :param password: 密码
@@ -494,7 +534,11 @@ class ClusterInfo(models.Model):
         :param extranet_port: 外网端口
         :return: True | raise Exception
         """
+
+        from metadata.models.data_link.data_link_configs import ClusterConfig
+
         args = {
+            "display_name": display_name,
             "description": description,
             "username": username,
             "password": password,
@@ -525,6 +569,11 @@ class ClusterInfo(models.Model):
 
         self.save()
         logger.info(f"cluster->[{self.cluster_name}] update success.")
+
+        # 同步集群配置到bkbase（目前仅支持ES集群）
+        if self.cluster_type == ClusterInfo.TYPE_ES:
+            ClusterConfig.sync_cluster_config(cluster=self)
+
         return True
 
     @atomic(config.DATABASE_CONNECTION_NAME)
@@ -547,11 +596,13 @@ class ClusterInfo(models.Model):
             )
             raise ValueError(_("存在未关闭的结果表 {}").format(",".join(enable_rts)))
 
-        super().delete(*args, **kwargs)
+        result = super().delete(*args, **kwargs)
 
         logger.info(
             f"cluster->[{self.cluster_name}] cluster_type->[{self.cluster_type}] has deleted by [{self.registered_system}]"
         )
+
+        return result
 
 
 class KafkaTopicInfo(models.Model):
@@ -631,7 +682,7 @@ class StorageResultTable:
         pass
 
     @abc.abstractmethod
-    def get_client(self):
+    def get_client(self) -> Any:
         """获取该结果表的客户端句柄"""
         pass
 
@@ -671,6 +722,7 @@ class StorageResultTable:
                 if last_storage_cluster_id != new_storage_cluster_id:
                     # 更新上一次集群记录，更新停止写入时间
                     record, _ = StorageClusterRecord.objects.update_or_create(
+                        bk_tenant_id=self.bk_tenant_id,
                         table_id=self.table_id,
                         cluster_id=last_storage_cluster_id,
                         defaults={
@@ -686,6 +738,7 @@ class StorageResultTable:
 
                     # 创建新纪录
                     new_record, _ = StorageClusterRecord.objects.update_or_create(
+                        bk_tenant_id=self.bk_tenant_id,
                         table_id=self.table_id,
                         cluster_id=new_storage_cluster_id,
                         enable_time=django_timezone.now(),
@@ -700,7 +753,7 @@ class StorageResultTable:
                     )
 
                 records_queryset = StorageClusterRecord.objects.filter(
-                    table_id=self.table_id, cluster_id=new_storage_cluster_id
+                    bk_tenant_id=self.bk_tenant_id, table_id=self.table_id, cluster_id=new_storage_cluster_id
                 )
 
                 # 若DB中不存在当前集群ID的记录,那么需要额外创建(避免非前端迁移行为导致的路由异常)
@@ -709,13 +762,13 @@ class StorageResultTable:
                         "update_storage: table_id->[%s] update es_storage_cluster_id may be failed, no record found",
                         self.table_id,
                     )
-                    result_table = ResultTable.objects.get(table_id=self.table_id)
+                    result_table = ResultTable.objects.get(bk_tenant_id=self.bk_tenant_id, table_id=self.table_id)
                     # 先将存量记录的is_current更改为False
-                    StorageClusterRecord.objects.filter(table_id=self.table_id, is_current=True).update(
-                        is_current=False, disable_time=result_table.last_modify_time
-                    )
+                    StorageClusterRecord.objects.filter(
+                        bk_tenant_id=self.bk_tenant_id, table_id=self.table_id, is_current=True
+                    ).update(is_current=False, disable_time=result_table.last_modify_time)
 
-                    correct_record, _ = StorageClusterRecord.objects.get_or_create(
+                    StorageClusterRecord.objects.get_or_create(
                         table_id=self.table_id,
                         cluster_id=new_storage_cluster_id,
                         is_current=True,
@@ -724,11 +777,15 @@ class StorageResultTable:
 
                 # 刷新RESULT_TABLE_DETAIL路由,需要先找到该RT关联的虚拟RT
                 virtual_rt_list = list(
-                    ESStorage.objects.filter(origin_table_id=self.table_id).values_list("table_id", flat=True)
+                    ESStorage.objects.filter(bk_tenant_id=self.bk_tenant_id, origin_table_id=self.table_id).values_list(
+                        "table_id", flat=True
+                    )
                 )
                 table_ids = [self.table_id] + virtual_rt_list
                 logger.info("update_storage: table_id->[%s] try to refresh es_table_id_detail", json.dumps(table_ids))
-                space_client.push_es_table_id_detail(table_id_list=table_ids, is_publish=True)
+                space_client.push_es_table_id_detail(
+                    bk_tenant_id=self.bk_tenant_id, table_id_list=table_ids, is_publish=True
+                )
             except Exception as e:  # pylint: disable=broad-except
                 logger.warning(
                     "update_storage: table_id->[%s] update es_storage_cluster_id failed,error->[%s]", self.table_id, e
@@ -768,7 +825,7 @@ class StorageResultTable:
         """返回数据源的消息队列类型"""
         # 这个配置应该是很少变化的，所以考虑增加缓存
         if getattr(self, "_cluster", None) is None:
-            self._cluster = ClusterInfo.objects.get(cluster_id=self.storage_cluster_id)
+            self._cluster = ClusterInfo.objects.get(bk_tenant_id=self.bk_tenant_id, cluster_id=self.storage_cluster_id)
 
         return self._cluster
 
@@ -941,7 +998,9 @@ class InfluxDBStorage(models.Model, StorageResultTable, InfluxDBTool):
         """返回数据源的消息队列类型"""
         # 这个配置应该是很少变化的，所以考虑增加缓存
         if getattr(self, "_cluster", None) is None:
-            self._cluster = ClusterInfo.objects.get(cluster_id=self.influxdb_proxy_storage.proxy_cluster_id)
+            self._cluster = ClusterInfo.objects.get(
+                bk_tenant_id=self.bk_tenant_id, cluster_id=self.influxdb_proxy_storage.proxy_cluster_id
+            )
 
         return self._cluster
 
@@ -1415,6 +1474,8 @@ class InfluxDBStorage(models.Model, StorageResultTable, InfluxDBTool):
         table_id_vm_info = cls._get_table_id_access_vm_data(table_ids)
         # 获取 vm 集群 ID
         vm_cluster_id_name = cls._get_vm_cluster_id_name()
+        # 获取结果表对应的 bcs 集群 ID
+        bcs_cluster_id_info = cls._get_table_id_bcs_cluster_id()
 
         # 标识查询不到结果表的场景
         not_found_table_id = "not_found_table_id"
@@ -1429,7 +1490,7 @@ class InfluxDBStorage(models.Model, StorageResultTable, InfluxDBTool):
                 "data_id": data_id,
                 "measurement_type": table_id_measurement_type_map.get(table_id) or not_found_table_id,
                 "vm_table_id": vm_info.get("vm_table_id") or "",
-                "bcs_cluster_id": vm_info.get("bcs_cluster_id") or "",
+                "bcs_cluster_id": bcs_cluster_id_info.get(table_id, ""),
                 "is_influxdb_disabled": cluster_id in vm_cluster_id_name,
                 "vm_storage_name": vm_cluster_id_name.get(cluster_id, ""),
             }
@@ -1438,6 +1499,30 @@ class InfluxDBStorage(models.Model, StorageResultTable, InfluxDBTool):
             )
         # publish
         RedisTools.publish(constants.INFLUXDB_KEY_PREFIX, [constants.INFLUXDB_ADDITIONAL_INFO_FOR_UNIFY_QUERY])
+
+    @classmethod
+    def _get_table_id_bcs_cluster_id(cls) -> dict:
+        """获取结果表和 BCS 集群的关系"""
+        from metadata.models import BCSClusterInfo
+        from metadata.models.data_source import DataSourceResultTable
+
+        infos = BCSClusterInfo.objects.all().only("cluster_id", "bk_biz_id", "K8sMetricDataID", "CustomMetricDataID")
+        dataids = set()
+        for info in infos:
+            dataids.add(info.K8sMetricDataID)
+            dataids.add(info.CustomMetricDataID)
+        if len(dataids) > 500:
+            dataid_rts = DataSourceResultTable.objects.all().only("table_id", "bk_data_id")
+        else:
+            dataid_rts = DataSourceResultTable.objects.filter(bk_data_id__in=dataids).only("table_id", "bk_data_id")
+        dataid_rt_mapping = {data_rt.bk_data_id: data_rt.table_id for data_rt in dataid_rts}
+        mapping = {}
+        for info in infos:
+            if info.K8sMetricDataID in dataid_rt_mapping:
+                mapping[dataid_rt_mapping[info.K8sMetricDataID]] = info.cluster_id
+            if info.CustomMetricDataID in dataid_rt_mapping:
+                mapping[dataid_rt_mapping[info.CustomMetricDataID]] = info.cluster_id
+        return mapping
 
     @classmethod
     def _get_table_id_access_vm_data(cls, table_ids: list[str]) -> dict:
@@ -1729,13 +1814,13 @@ class KafkaStorage(models.Model, StorageResultTable):
                 storage_cluster_id = settings.DEFAULT_KAFKA_STORAGE_CLUSTER_ID
             else:
                 storage_cluster_id = ClusterInfo.objects.get(
-                    cluster_type=ClusterInfo.TYPE_KAFKA, is_default_cluster=True
+                    bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_KAFKA, is_default_cluster=True
                 ).cluster_id
 
         # 如果有提供集群信息，需要判断
         else:
             if not ClusterInfo.objects.filter(
-                cluster_type=ClusterInfo.TYPE_KAFKA, cluster_id=storage_cluster_id
+                bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_KAFKA, cluster_id=storage_cluster_id
             ).exists():
                 logger.error(
                     f"cluster_id->[{storage_cluster_id}] is not exists or is not redis cluster, something go wrong?"
@@ -1997,15 +2082,22 @@ class ESStorage(models.Model, StorageResultTable):
         :param kwargs: 其他配置参数
         :return:
         """
+
         # 0. 判断是否需要使用默认集群信息
         if cluster_id is None:
-            cluster_id = (
-                ClusterInfo.objects.filter(cluster_type=ClusterInfo.TYPE_ES, is_default_cluster=True).first().cluster_id
-            )
+            try:
+                cluster_id = ClusterInfo.objects.get(
+                    bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_ES, is_default_cluster=True
+                ).cluster_id
+            except ClusterInfo.DoesNotExist:
+                logger.error(f"cluster_id->[{cluster_id}] is not exists or is not redis cluster, something go wrong?")
+                raise ValueError(_("存储集群配置有误，默认es集群不存在，请确认或联系管理员处理"))
 
         # 如果有提供集群信息，需要判断
         else:
-            if not ClusterInfo.objects.filter(cluster_type=ClusterInfo.TYPE_ES, cluster_id=cluster_id).exists():
+            if not ClusterInfo.objects.filter(
+                bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_ES, cluster_id=cluster_id
+            ).exists():
                 logger.error(f"cluster_id->[{cluster_id}] is not exists or is not redis cluster, something go wrong?")
                 raise ValueError(_("存储集群配置有误，请确认或联系管理员处理"))
 
@@ -2064,13 +2156,15 @@ class ESStorage(models.Model, StorageResultTable):
         )
         logger.info(f"result_table->[{table_id}] now has es_storage will try to create index.")
 
+        # 创建集群记录，第一条记录的enable_time需要设置为最小时间
+        # 使用 1970-01-01 而不是 datetime.min，因为 MySQL DATETIME 类型不支持 0001-01-01
         storage_record, tag = StorageClusterRecord.objects.update_or_create(
             table_id=table_id,
             cluster_id=cluster_id,
-            enable_time=django_timezone.now(),
             bk_tenant_id=bk_tenant_id,
             defaults={
                 "is_current": True,
+                "enable_time": datetime.datetime(1970, 1, 1),
             },
         )
         logger.info(
@@ -2078,10 +2172,23 @@ class ESStorage(models.Model, StorageResultTable):
             table_id,
             storage_record.cluster_id,
         )
-
-        # 判断是否启用创建索引，默认是启用
-        if enable_create_index:
-            new_record.create_es_index(is_sync_db)
+        if new_record.need_create_index:  # 如果需要,则创建索引
+            logger.info(
+                "create_table: table_id->[%s] under bk_tenant_id->[%s] need_create_index,is_sync_db->[%s]",
+                table_id,
+                bk_tenant_id,
+                is_sync_db,
+            )
+            try:
+                new_record.create_es_index(is_sync_db)
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error(
+                    "create_table: table_id->[%s] under bk_tenant_id->[%s] create_es_index failed,error->[%s]",
+                    table_id,
+                    bk_tenant_id,
+                    e,
+                )
+                raise e
 
         # 针对单个结果表推送数据很快，不用异步处理
         try:
@@ -2097,13 +2204,23 @@ class ESStorage(models.Model, StorageResultTable):
             logger.error("table_id: %s push detail failed, error: %s", table_id, e)
         return new_record
 
+    def get_raw_data(self, index_name: str, time_field: str = "dtEventTimeStamp"):
+        """查询原始数据，最新数据"""
+        return self.es_client.search(
+            index=index_name,
+            body={
+                "query": {"match_all": {}},
+                "sort": [{time_field: {"order": "desc"}}],
+            },
+        )
+
     @property
     def index_body(self):
         """
         ES创建索引的配置内容
         :return: dict, 可以直接
         """
-        from metadata.models import ESFieldQueryAliasOption, ResultTableField
+        from metadata.models import ResultTableField, ResultTableFieldOption
 
         logger.info("index_body: try to compose index_body for table_id->[%s]", self.table_id)
         body = {"settings": json.loads(self.index_settings), "mappings": json.loads(self.mapping_settings)}
@@ -2124,85 +2241,11 @@ class ESStorage(models.Model, StorageResultTable):
                     e,
                 )
 
-        try:
-            logger.info("index_body: try to add alias_config for table_id->[%s]", self.table_id)
-            # 别名-原字段配置
-            alias_config = ESFieldQueryAliasOption.generate_query_alias_settings(
-                self.table_id, bk_tenant_id=self.bk_tenant_id
-            )
-            logger.info("index_body: table_id->[%s] got alias_config->[%s]", self.table_id, alias_config)
-            # 别名原字段-字段类型配置
-            alias_path_type_config = ESFieldQueryAliasOption.generate_alias_path_type_settings(
-                table_id=self.table_id, bk_tenant_id=self.bk_tenant_id
-            )
-            logger.info(
-                "index_body: table_id->[%s] got alias_path_type_config->[%s]", self.table_id, alias_path_type_config
-            )
-            properties.update(alias_config)
-            properties.update(alias_path_type_config)
-        except Exception as e:
-            logger.warning("index_body: add alias_config failed,table_id->[%s],error->[%s]", self.table_id, e)
-
         # 按ES版本返回构建body内容
         if self.es_version < self.ES_REMOVE_TYPE_VERSION:
             body["mappings"] = {self.table_id: body["mappings"]}
         logger.info("index_body: compose index_body for->[%s] success,body->[%s]", self.table_id, body)
         return body
-
-    def compose_field_alias_settings(self):
-        """
-        组装采集项的别名配置
-        :return: dict {"properties":{"alias":"type":"alias","path":"xxx"}}
-        """
-        from metadata.models import ESFieldQueryAliasOption
-
-        logger.info("compose_field_alias_settings: try to compose field alias mapping for->[%s]", self.table_id)
-        properties = ESFieldQueryAliasOption.generate_query_alias_settings(
-            table_id=self.table_id, bk_tenant_id=self.bk_tenant_id
-        )
-        logger.info(
-            "compose_field_alias_settings: compose alias mapping for->[%s] of bk_tenant_id->[%s] success,"
-            "alias_settings->[%s]",
-            self.table_id,
-            self.bk_tenant_id,
-            properties,
-        )
-        return {"properties": properties}
-
-    def put_field_alias_mapping_to_es(self):
-        """
-        推送别名配置至ES
-        """
-        # 组装字段别名配置
-        properties = self.compose_field_alias_settings()
-        # 获取使用中的索引列表
-        activate_index_list = self.get_activate_index_list()
-        if not activate_index_list:
-            logger.info("put_field_alias_mapping_to_es: table_id->[%s],got no activate index,return", self.table_id)
-            return
-        logger.info("put_field_alias_mapping_to_es: try to put->[%s] for->[%s]", properties, activate_index_list)
-
-        # 循环遍历激活的索引列表，推送别名配置
-        for index in activate_index_list:
-            logger.info("put_field_alias_mapping_to_es: try to put alias->[%s] for index->[%s]", properties, index)
-            try:
-                response = self.es_client.indices.put_mapping(body=properties, index=index)
-                logger.info(
-                    "put_field_alias_mapping_to_es: put alias for index->[%s] success,response->[%s]", index, response
-                )
-            except Exception as e:  # pylint: disable=broad-except
-                logger.error(
-                    "put_field_alias_mapping_to_es: failed to put alias->[%s] for index->[%s],error->[%s]",
-                    properties,
-                    index,
-                    e,
-                )
-                continue
-        logger.info(
-            "put_field_alias_mapping_to_es: put alias->[%s] for index_list->[%s] successfully",
-            properties,
-            activate_index_list,
-        )
 
     @property
     def index_re_v1(self):
@@ -2250,7 +2293,7 @@ class ESStorage(models.Model, StorageResultTable):
         """
         获取ES版本号
         """
-        cluster_info = ClusterInfo.objects.get(cluster_id=self.storage_cluster_id)
+        cluster_info = ClusterInfo.objects.get(bk_tenant_id=self.bk_tenant_id, cluster_id=self.storage_cluster_id)
         try:
             cluster_version = int(cluster_info.version.split(".")[0])
         except Exception:
@@ -2419,7 +2462,7 @@ class ESStorage(models.Model, StorageResultTable):
         """
         return self._get_index_infos(ESNamespacedClientType.INDICES.value)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
     def current_index_info(self):
         """
         返回当前使用的最新index相关的信息
@@ -2433,7 +2476,7 @@ class ESStorage(models.Model, StorageResultTable):
         # 如果index_re为空，说明没找到任何可用的index
         if index_version == "":
             logger.info("index->[%s] has no index now, will raise a fake not found error", self.index_name)
-            raise elasticsearch5.NotFoundError(self.index_name)
+            raise elasticsearch5.NotFoundError(404, f"index {self.index_name} not found", None)
 
         if index_version == "v2":
             index_re = self.index_re_v2
@@ -2512,7 +2555,7 @@ class ESStorage(models.Model, StorageResultTable):
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def get_client(self):
         """获取该结果表的客户端句柄"""
-        return es_tools.get_client(self.storage_cluster_id)
+        return es_tools.get_client(bk_tenant_id=self.bk_tenant_id, cluster_id=self.storage_cluster_id)
 
     es_client = cached_property(get_client, name="es_client")
 
@@ -2908,14 +2951,7 @@ class ESStorage(models.Model, StorageResultTable):
             self.table_id,
             is_moving_cluster,
         )
-        try:
-            # 0. 更新mapping配置
-            self.put_field_alias_mapping_to_es()
-            logger.info("update_index_and_aliases:put alias to es for table_id->[%s] success", self.table_id)
-        except Exception as e:
-            logger.error(
-                "update_index_and_aliases:failed to put field alias for table_id->[%s],error->[%s]", self.table_id, e
-            )
+
         # 1. 更新索引
         self.update_index_v2()
         # 2. 更新对应的别名<->索引绑定关系
@@ -3293,7 +3329,7 @@ class ESStorage(models.Model, StorageResultTable):
                 actions,
                 new_index_name,
             )
-            raise elasticsearch5.NotFoundError(new_index_name)
+            raise elasticsearch5.NotFoundError(404, f"index {new_index_name} not found", None)
 
         try:
             response = self.es_client.indices.update_aliases(
@@ -3465,6 +3501,14 @@ class ESStorage(models.Model, StorageResultTable):
             filter_result,
         )
 
+        check_index_names = list(filter_result.keys())
+        # 存在快照记录的索引
+        snapshot_index_records = list(
+            EsSnapshotIndice.objects.filter(
+                table_id=self.table_id, index_name__in=check_index_names, bk_tenant_id=self.bk_tenant_id
+            ).values_list("index_name", flat=True)
+        )
+
         for index_name, alias_info in filter_result.items():
             # 回溯的索引不经过正常删除的逻辑删除
             if index_name.startswith(self.restore_index_prefix):
@@ -3514,6 +3558,14 @@ class ESStorage(models.Model, StorageResultTable):
                 self.table_id,
                 index_name,
             )
+            # 如果配置了快照，但是索引没有在快照记录中，跳过索引删除，等待第二天执行快照后再删除
+            if self.have_snapshot_conf and index_name not in snapshot_index_records:
+                logger.info(
+                    "table_id->[%s], index->[%s] not snapshot, skip delete ",
+                    self.table_id,
+                    index_name,
+                )
+                continue
             try:
                 self.es_client.indices.delete(index=index_name)
                 logger.info("clean_index_v2:table_id->[%s] index->[%s] is deleted.", self.table_id, index_name)
@@ -3591,7 +3643,7 @@ class ESStorage(models.Model, StorageResultTable):
             )
             # 初始化对应存储集群的 ES 客户端
             try:
-                es_client = es_tools.get_client(cluster_id)
+                es_client = es_tools.get_client(bk_tenant_id=self.bk_tenant_id, cluster_id=cluster_id)
             except Exception as e:  # pylint: disable=broad-except
                 logger.error(
                     "clean_history_es_index:table_id->[%s] failed to get ES client for cluster_id->[%s]: %s",
@@ -4226,6 +4278,10 @@ class ESStorage(models.Model, StorageResultTable):
         return "SUCCESS"
 
     @property
+    def snapshot_in_progress_state(self):
+        return "IN_PROGRESS"
+
+    @property
     def restore_index_prefix(self):
         return "restore_"
 
@@ -4296,13 +4352,7 @@ class ESStorage(models.Model, StorageResultTable):
         logger.info("get_activated_index_list: table_id->[%s],got activate index list->[%s]", self.table_id, index_list)
         return index_list
 
-    def current_snapshot_info(self):
-        try:
-            snapshots = self.es_client.snapshot.get(
-                self.snapshot_obj.target_snapshot_repository_name, self.search_snapshot
-            ).get("snapshots", [])
-        except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
-            snapshots = []
+    def get_max_snapshot(self, snapshots: list):
         snapshot_re = self.snapshot_re
         max_datetime = None
         max_snapshot = {}
@@ -4325,9 +4375,22 @@ class ESStorage(models.Model, StorageResultTable):
                 max_datetime = current_datetime
                 max_snapshot = snapshot
 
+        return max_datetime, max_snapshot
+
+    def current_snapshot_info(self):
+        try:
+            snapshots = self.es_client.snapshot.get(
+                self.snapshot_obj.target_snapshot_repository_name, self.search_snapshot
+            ).get("snapshots", [])
+        except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
+            snapshots = []
+
+        max_datetime, max_snapshot = self.get_max_snapshot(snapshots)
+
         return {
             "datetime": max_datetime,
             "snapshot": max_snapshot.get("snapshot"),
+            "indices": max_snapshot.get("indices", []),
             "is_success": max_snapshot.get("state") == self.snapshot_complete_state,
         }
 
@@ -4340,16 +4403,27 @@ class ESStorage(models.Model, StorageResultTable):
             return
 
         current_snapshot_info = self.current_snapshot_info()
+        current_snapshot_name = current_snapshot_info["snapshot"]
         now = self.now
+        local_create = False
 
         # 如果最新快照不存在 直接创建
         if current_snapshot_info["datetime"]:
-            # 当天快照已经创建不再创建
-            if current_snapshot_info["datetime"].day == now.day:
+            local_snapshot_exists = EsSnapshotIndice.objects.filter(
+                table_id=self.table_id,
+                snapshot_name=current_snapshot_name,
+                bk_tenant_id=self.bk_tenant_id,
+            ).exists()
+            es_snapshot_exists = current_snapshot_info["datetime"].day == now.day
+            current_snapshot_is_success = current_snapshot_info["is_success"]
+
+            # 当天快照已经创建或快照未完成，不创建新的快照
+            skip_create = es_snapshot_exists or not current_snapshot_is_success
+            # 本地存在快照，且无需创建新的快照，跳过
+            if local_snapshot_exists and skip_create:
                 return
-            # 快照未完成 不创建新的快照
-            if not current_snapshot_info["is_success"]:
-                return
+            # 无需创建新的快照，但需要补偿创建本地记录
+            local_create = not local_snapshot_exists
 
         new_snapshot_name = self.make_snapshot_name(now, self.index_name)
         expired_index = self.expired_index()
@@ -4357,6 +4431,32 @@ class ESStorage(models.Model, StorageResultTable):
         # 如果当天没有需要删除的索引 不进行快照
         if not expired_index:
             return
+
+        # 补偿创建本地记录
+        if local_create:
+            try:
+                es_snapshot_indices = current_snapshot_info["indices"]
+                # 获取当前过期索引及ES中最近一次快照的物理索引列表交集
+                expired_index = list(set(expired_index) & set(es_snapshot_indices))
+                EsSnapshotIndice.objects.bulk_create(
+                    [
+                        self.create_target_index_meta_info(_expired_index, current_snapshot_name)
+                        for _expired_index in expired_index
+                    ]
+                )
+                logger.info(
+                    "table_id->[%s] has compensated local snapshot ->[%s]", self.table_id, current_snapshot_name
+                )
+            except Exception as e:
+                logger.exception(
+                    "table_id->[%s] has compensated local snapshot ->[%s] failed e -> [%s]",
+                    self.table_id,
+                    current_snapshot_name,
+                    e,
+                )
+            finally:
+                return
+
         try:
             with atomic(config.DATABASE_CONNECTION_NAME):
                 EsSnapshotIndice.objects.bulk_create(
@@ -4419,21 +4519,12 @@ class ESStorage(models.Model, StorageResultTable):
         expired_datetime_point = snapshot_datetime + datetime.timedelta(days=self.snapshot_obj.snapshot_days)
         return expired_datetime_point.timestamp()
 
-    def get_expired_snapshot(self, expired_days: int):
-        logger.info("table_id -> [%s] filter expired snapshot before %s days", self.table_id, expired_days)
-        expired_datetime_point = self.now - datetime.timedelta(days=expired_days)
-
-        try:
-            snapshots = self.es_client.snapshot.get(
-                self.snapshot_obj.target_snapshot_repository_name, self.search_snapshot
-            ).get("snapshots", [])
-        except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
-            snapshots = []
+    def match_expired_snapshot(self, snapshots: list, expired_datetime_point, snapshot_name_key="snapshot") -> list:
         snapshot_re = self.snapshot_re
         expired_snapshots = []
 
         for snapshot in snapshots:
-            snapshot_name = snapshot.get("snapshot")
+            snapshot_name = snapshot.get(snapshot_name_key)
             re_result = snapshot_re.match(snapshot_name)
 
             if re_result:
@@ -4442,18 +4533,51 @@ class ESStorage(models.Model, StorageResultTable):
                     snapshot_datetime_str, self.snapshot_date_format, self.time_zone
                 )
                 if snapshot_datetime < expired_datetime_point:
-                    expired_snapshots.append(snapshot)
+                    expired_snapshots.append(snapshot_name)
         return expired_snapshots
+
+    def get_expired_snapshot(self, expired_days: int):
+        logger.info("table_id -> [%s] filter expired snapshot before %s days", self.table_id, expired_days)
+        expired_datetime_point = self.now - datetime.timedelta(days=expired_days)
+
+        # 获取实际存在ES中的过期快照
+        try:
+            snapshots = self.es_client.snapshot.get(
+                self.snapshot_obj.target_snapshot_repository_name, self.search_snapshot
+            ).get("snapshots", [])
+        except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
+            snapshots = []
+        expired_snapshots = self.match_expired_snapshot(snapshots, expired_datetime_point)
+
+        # 获取本地残留的过期快照
+        all_snapshots = list(
+            EsSnapshotIndice.objects.filter(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id).values(
+                "snapshot_name"
+            )
+        )
+        local_expired_snapshots = self.match_expired_snapshot(
+            all_snapshots, expired_datetime_point, snapshot_name_key="snapshot_name"
+        )
+        residual_expired_snapshots = list(set(local_expired_snapshots) - set(expired_snapshots))
+
+        return expired_snapshots, residual_expired_snapshots
 
     def clean_snapshot(self):
         if not self.can_delete_snapshot:
             return
 
-        expired_snapshots = self.get_expired_snapshot(self.snapshot_obj.snapshot_days)
         logger.debug("table_id->[%s] need delete snapshot ", self.table_id)
 
-        for expired_snapshot in expired_snapshots:
-            snapshot_name = expired_snapshot.get("snapshot")
+        expired_snapshots, residual_expired_snapshots = self.get_expired_snapshot(self.snapshot_obj.snapshot_days)
+        if residual_expired_snapshots:
+            EsSnapshotIndice.objects.filter(
+                table_id=self.table_id,
+                snapshot_name__in=residual_expired_snapshots,
+                bk_tenant_id=self.bk_tenant_id,
+            ).delete()
+            logger.info("table_id->[%s] has clean residual snapshot %s", self.table_id, residual_expired_snapshots)
+
+        for snapshot_name in expired_snapshots:
             try:
                 self.delete_snapshot(snapshot_name, self.snapshot_obj.target_snapshot_repository_name)
             except Exception as e:  # pylint: disable=broad-except
@@ -4471,16 +4595,59 @@ class ESStorage(models.Model, StorageResultTable):
 
     def delete_all_snapshot(self, target_snapshot_repository_name):
         logger.info("table_id -> [%s] will delete all snapshot", self.table_id)
-        all_snapshots = self.es_client.snapshot.get(target_snapshot_repository_name, self.search_snapshot).get(
-            "snapshots", []
-        )
+        try:
+            all_snapshots = self.es_client.snapshot.get(target_snapshot_repository_name, self.search_snapshot).get(
+                "snapshots", []
+            )
+        except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
+            all_snapshots = []
+
+        delete_exception_snapshots = []
         for snapshot in all_snapshots:
             snapshot_name = snapshot.get("snapshot")
             try:
                 self.delete_snapshot(snapshot_name, target_snapshot_repository_name)
             except Exception as e:  # pylint: disable=broad-except
+                delete_exception_snapshots.append(snapshot_name)
                 logger.exception("delete snapshot [%s] failed => %s", snapshot_name, e)
+
+        # 若有快照删除异常，则抛出异常
+        if delete_exception_snapshots:
+            raise ValueError(_("delete all snapshot has failed %s") % delete_exception_snapshots)
+
+        # 删除残留的快照物理索引记录
+        EsSnapshotIndice.objects.filter(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id).delete()
         logger.info("table_id -> [%s] has delete all snapshot", self.table_id)
+
+    @atomic(config.DATABASE_CONNECTION_NAME)
+    def retry_snapshot(self, target_snapshot_repository_name):
+        if not self.can_snapshot:
+            return
+
+        # 如果是停用状态，则不能重试快照
+        if self.is_snapshot_stopped:
+            return
+
+        # 检查快照是否可重试
+        try:
+            snapshots = self.es_client.snapshot.get(
+                self.snapshot_obj.target_snapshot_repository_name, self.search_snapshot
+            ).get("snapshots", [])
+        except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
+            snapshots = []
+
+        max_datetime, max_snapshot = self.get_max_snapshot(snapshots)
+        if max_datetime is None:
+            raise ValueError(_("table_id -> [%s] current snapshot is not exist") % self.table_id)
+        # 成功(SUCCESS)或归档中(IN_PROGRESS)，不可重试状态
+        if max_snapshot.get("state") in [self.snapshot_complete_state, self.snapshot_in_progress_state]:
+            raise ValueError(
+                _("table_id -> [%s] current snapshot is success or in progress, can not retry") % self.table_id
+            )
+
+        snapshot_name = max_snapshot.get("snapshot")
+        # 删除异常快照
+        self.delete_snapshot(snapshot_name, target_snapshot_repository_name)
 
 
 class DataBusStatus:
@@ -4556,7 +4723,13 @@ class BkDataStorage(models.Model, StorageResultTable):
         else:
             from metadata.task import tasks
 
-            tasks.access_to_bk_data_task.apply_async(args=(self.table_id,), countdown=60)
+            tasks.access_to_bk_data_task.apply_async(
+                args=(
+                    self.bk_tenant_id,
+                    self.table_id,
+                ),
+                countdown=60,
+            )
 
     def create_databus_clean(self, result_table):
         kafka_storage = KafkaStorage.objects.filter(
@@ -5181,69 +5354,6 @@ class SpaceRelatedStorageInfo(models.Model):
     create_time = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
-    @classmethod
-    def create_space_related_storage_record(
-        cls, space_type_id, space_id, storage_type, cluster_id=None, bk_tenant_id=DEFAULT_TENANT_ID
-    ):
-        """
-        创建空间<->存储集群映射记录
-        @param space_type_id: 空间类型ID
-        @param space_id: 空间ID
-        @param storage_type: 存储类型
-        @param cluster_id: 存储集群ID
-        @param bk_tenant_id: 租户ID
-        """
-        from django.db import transaction
-
-        logger.info(
-            "create_space_related_storage_record: try to create space related storage record, "
-            "space_type_id->[%s], space_id->[%s], storage_type->[%s], cluster_id->[%s] bk_tenant_id->[%s]",
-            space_type_id,
-            space_id,
-            storage_type,
-            cluster_id,
-            bk_tenant_id,
-        )
-
-        if not cluster_id:
-            logger.info(
-                "create_space_related_storage_record: cluster_id is None, try to get default cluster,"
-                "space_type->[%s],space_id->[%s]",
-                space_type_id,
-                space_id,
-            )
-
-            cluster_id = (
-                ClusterInfo.objects.filter(cluster_type=storage_type, is_default_cluster=True).first().cluster_id
-            )
-        try:
-            with transaction.atomic():
-                # 创建空间<->存储集群映射记录
-                space_related_storage_info = cls.objects.create(
-                    space_type_id=space_type_id,
-                    space_id=space_id,
-                    storage_type=storage_type,
-                    cluster_id=cluster_id,
-                    bk_tenant_id=bk_tenant_id,
-                )
-                logger.info(
-                    "create_space_related_storage_record: create space related storage record, "
-                    "space_type_id->[%s], space_id->[%s], storage_type->[%s], cluster_id->[%s],successfully",
-                    space_type_id,
-                    space_id,
-                    storage_type,
-                    space_related_storage_info.cluster_id,
-                )
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error(
-                "create_space_related_storage_record: create space related storage record failed,space_type->[%s],"
-                "space_id->[%s],cluster_id->[%s],error->[%s]",
-                space_type_id,
-                space_id,
-                cluster_id,
-                e,
-            )
-
 
 class DorisStorage(models.Model, StorageResultTable):
     """
@@ -5307,15 +5417,13 @@ class DorisStorage(models.Model, StorageResultTable):
         """
         # 0. 判断是否需要使用默认集群信息
         if storage_cluster_id is None:
-            storage_cluster_id = (
-                ClusterInfo.objects.filter(cluster_type=ClusterInfo.TYPE_DORIS, is_default_cluster=True)
-                .first()
-                .cluster_id
-            )
+            storage_cluster_id = ClusterInfo.objects.get(
+                bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_DORIS, is_default_cluster=True
+            ).cluster_id
             logger.info("CreateDorisStorage: use default Doris storage cluster->[%s]", storage_cluster_id)
         else:
             if not ClusterInfo.objects.filter(
-                cluster_type=ClusterInfo.TYPE_DORIS, cluster_id=storage_cluster_id
+                bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_DORIS, cluster_id=storage_cluster_id
             ).exists():
                 logger.error("CreateDorisStorage: storage cluster[%s] not exist", storage_cluster_id)
                 raise ValueError(_("Doris存储集群配置有误，请确认或联系管理员处理"))
@@ -5341,11 +5449,14 @@ class DorisStorage(models.Model, StorageResultTable):
                     expire_days=expire_days,
                     storage_cluster_id=storage_cluster_id,
                 )
-                storage_record, tag = StorageClusterRecord.objects.update_or_create(
+                # 创建集群记录，第一条记录的enable_time需要设置为最小时间
+                # 使用 1970-01-01 而不是 datetime.min，因为 MySQL DATETIME 类型不支持 0001-01-01
+                StorageClusterRecord.objects.update_or_create(
+                    bk_tenant_id=bk_tenant_id,
                     table_id=table_id,
                     cluster_id=storage_cluster_id,
-                    enable_time=django_timezone.now(),
                     defaults={
+                        "enable_time": datetime.datetime(1970, 1, 1),
                         "is_current": True,
                     },
                 )

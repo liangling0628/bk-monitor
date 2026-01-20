@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -88,6 +88,7 @@ export default {
 
   轮值: 'Rotation',
   内部通知对象: 'notify object',
+  默认通知渠道: 'Default Notification Channel',
   群机器人: 'Group robots',
   同比策略: 'YoY Strategy',
   环比策略: 'MoM Strategy',
@@ -135,6 +136,8 @@ export default {
   '故障通知已发送（接收人：{receivers}）': 'Incident notification sent (recipients: {receivers})',
   故障已恢复: 'Incident restored',
   '故障{merged_incident_name}被合并入当前故障': 'Incident {merged_incident_name} merged into the current incident',
+  '故障【{link_incident_name}】合并入当前故障': 'Incident [{link_incident_name}] merged into the current incident',
+  '当前故障合并到【{link_incident_name}】': 'Current incident merged into [{link_incident_name}]',
   '{operator}故障属性{incident_key_alias}: 从{from_value}被修改为{to_value}':
     '{operator} incident attribute {incident_key_alias}: changed from {from_value} to {to_value}',
   '检测到新告警（{alert_name}）': 'New alarm detected ({alert_name})',
@@ -168,10 +171,36 @@ export default {
   请求量少: 'Fewer requests',
   请求量多: 'More requests',
   可疑程度: 'Suspicious degree',
+  '异常程度 {0}': 'Abnormal degree {0}',
   诊断分析: 'Diagnosis analysis',
   故障总结: 'Incident summary',
   告警异常维度分析: 'Alarm abnormal dimension analysis',
+  '异常维度（组合）': 'Abnormal dimension (combination)',
   '故障关联的告警，统计出最异常的维度（组合）：':
     'Alarms related to the fault, statistics are the most abnormal dimension (combination):',
   '来源于以下 {0} 个策略': 'From the following  {0} strategies',
+  全业务可见: 'Visible to all businesses',
+  '包含 {0} 个告警，来源于以下 {1} 个策略：': 'Contains {0} alarms, from the following {1} strategies:',
+  事件分析: 'Event analysis',
+  '事件分析总结：': 'Event analysis summary:',
+  日志分析: 'Log analysis',
+  '日志分析总结：': 'Log analysis summary:',
+  示例事件: 'Example event',
+  告警类别: 'Alarm category',
+  事件类别: 'Event category',
+  '（共 {0} 个{1}）': ' (total {0} {1})',
+  '（共 {0} 个{1}，展示 {2} 如下）': ' (total {0} {1}, show {2} below)',
+  '示例日志：': 'Example log:',
+  '（共 {0} 条日志）': ' (total {0} logs)',
+  独立查看: 'View independently',
+  'Trace 分析': 'Trace analysis',
+  'Trace 分析总结：': 'Trace analysis summary:',
+  分析结果: 'Analysis result',
+  '示例 span：': 'Example span:',
+  '（共 {0} 条异常信息）': ' (total {0} abnormal messages)',
+  '在{0}个周期内累计满足{1}次检测算法': 'In {0} cycles, the detection algorithm is met {1} times',
+  '较{0}对比': 'Compare with {0}',
+  '上升{0}%时触发告警': 'Trigger an alarm when rising {0}%',
+  '下降{0}%时触发告警': 'Trigger an alarm when falling {0}%',
+  '{0}上升{1}%或下降{2}%': '{0} rises {1}% or falls {2}%',
 };

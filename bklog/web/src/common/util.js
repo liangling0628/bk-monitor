@@ -31,6 +31,7 @@
 
 import { set } from 'vue';
 
+import { BK_LOG_STORAGE } from '@/store/store.type';
 import dayjs from 'dayjs';
 import DOMPurify from 'dompurify';
 import JSONBigNumber from 'json-bignumber';
@@ -107,9 +108,9 @@ export function randomColor(baseColor, count) {
   for (let i = 0; i < count; i++) {
     ret[i] = `#${Math.floor(segments[0] + (Math.random() < 0.5 ? -1 : 1) * Math.random() * 20).toString(
       16,
-    )}${Math.floor(segments[1] + (Math.random() < 0.5 ? -1 : 1) * Math.random() * 20).toString(
-      16,
-    )}${Math.floor(segments[2] + (Math.random() < 0.5 ? -1 : 1) * Math.random() * 20).toString(16)}`;
+    )}${Math.floor(segments[1] + (Math.random() < 0.5 ? -1 : 1) * Math.random() * 20).toString(16)}${Math.floor(
+      segments[2] + (Math.random() < 0.5 ? -1 : 1) * Math.random() * 20,
+    ).toString(16)}`;
   }
   return ret;
 }
@@ -203,19 +204,18 @@ export function json2Query(param, key) {
   let paramStr = '';
 
   if (
-    param instanceof String ||
-    typeof param === 'string' ||
-    param instanceof Number ||
-    typeof param === 'number' ||
-    param instanceof Boolean ||
-    typeof param === 'boolean'
+    param instanceof String
+    || typeof param === 'string'
+    || param instanceof Number
+    || typeof param === 'number'
+    || param instanceof Boolean
+    || typeof param === 'boolean'
   ) {
     paramStr += separator + key + mappingOperator + encodeURIComponent(param);
   } else {
-    Object.keys(param).forEach(p => {
+    Object.keys(param).forEach((p) => {
       const value = param[p];
-      const k =
-        key === null || key === '' || key === undefined ? p : key + (param instanceof Array ? `[${p}]` : `.${p}`);
+      const k = key === null || key === '' || key === undefined ? p : key + (param instanceof Array ? `[${p}]` : `.${p}`);
       paramStr += separator + json2Query(value, k);
     });
   }
@@ -347,8 +347,7 @@ export function getScrollTop() {
  * @return {number} 浏览器视口的高度
  */
 export function getWindowHeight() {
-  const windowHeight =
-    document.compatMode === 'CSS1Compat' ? document.documentElement.clientHeight : document.body.clientHeight;
+  const windowHeight = document.compatMode === 'CSS1Compat' ? document.documentElement.clientHeight : document.body.clientHeight;
 
   return windowHeight;
 }
@@ -356,9 +355,9 @@ export function getWindowHeight() {
 export function projectManage(menuProject, projectName, childName) {
   let project = '';
   try {
-    menuProject.forEach(res => {
+    menuProject.forEach((res) => {
       if (res.id === projectName && res.children) {
-        res.children.forEach(item => {
+        res.children.forEach((item) => {
           if (item.id === childName) {
             project = item.project_manage;
           }
@@ -401,7 +400,7 @@ export function setFieldsWidth(visibleFieldsList, fieldsWidthInfo, minWidth = 10
   // })
   const rowObj = {};
   const rowWidth = [];
-  visibleFieldsList.forEach(item => {
+  visibleFieldsList.forEach((item) => {
     const key = item.field_name;
 
     const mlength = fieldsWidthInfo[key]?.max_length || 0;
@@ -415,7 +414,7 @@ export function setFieldsWidth(visibleFieldsList, fieldsWidthInfo, minWidth = 10
   const rowNum = rowWidth.length;
   const allWidth = rowWidth.reduce((accumulator, currentValue) => accumulator + currentValue, 0);
   if (Math.ceil(allWidth * 6.5) <= minWidth - rowNum * 20) {
-    visibleFieldsList.forEach(fieldInfo => {
+    visibleFieldsList.forEach((fieldInfo) => {
       const key = fieldInfo.field_name;
       rowObj[key] = rowObj[key] < 9 ? 9 : rowObj[key];
       rowObj[key] = rowObj[key] > 30 ? rowObj[key] / 1.5 : rowObj[key];
@@ -446,7 +445,7 @@ export function setFieldsWidth(visibleFieldsList, fieldsWidthInfo, minWidth = 10
  * @param {Number | String | Date} val
  * @return {String}
  */
-export function formatDate(val, isTimzone = true, formatMilliseconds = false) {
+export function formatDate(val, isTimzone = false, formatMilliseconds = false) {
   try {
     const date = new Date(val);
     if (isNaN(date.getTime())) {
@@ -475,7 +474,10 @@ export function formatDate(val, isTimzone = true, formatMilliseconds = false) {
       const date = dayjs.tz(timestamp);
 
       // 如果毫秒部分不为 000，展示毫秒精度的时间
-      const formatStr = formatMilliseconds && milliseconds !== 0 ? 'YYYY-MM-DD HH:mm:ss.SSS' : 'YYYY-MM-DD HH:mm:ss';
+      const formatStr = formatMilliseconds && milliseconds !== 0
+        ? 'YYYY-MM-DD HH:mm:ss.SSSZZ'
+        : 'YYYY-MM-DD HH:mm:ssZZ';
+
       return date.format(formatStr);
     }
 
@@ -493,19 +495,40 @@ export function formatDate(val, isTimzone = true, formatMilliseconds = false) {
 /**
  * 将ISO 8601格式 2024-04-09T13:02:11.502064896Z 转换成 普通日期格式 2024-04-09 13:02:11.502064896
  */
-export function formatDateNanos(val) {
-  if (/^\d+$/.test(`${val}`)) {
-    return formatDate(Number(val), true, `${val}`.length > 10);
+export function formatDateNanos(val, isTimzone = true) {
+  const strVal = `${val}`;
+  if (/^\d+$/.test(strVal)) {
+    return formatDate(Number(val), isTimzone, `${val}`.length > 10);
+  }
+
+  if (/null|undefined/.test(strVal) || strVal === '') {
+    return '--';
   }
 
   // dayjs不支持纳秒 从符串中提取毫秒之后的纳秒部分
-  const nanoseconds = `${val}`.slice(23, -1);
+  // 查找小数点位置，提取小数点后的所有数字
+  const dotIndex = strVal.indexOf('.');
+  let nanoseconds = '';
+
+  if (dotIndex !== -1) {
+    // 提取小数点后的部分
+    const afterDot = strVal.slice(dotIndex + 1);
+    // 移除时区标识符Z和非数字字符（如果存在），只保留数字
+    const digitsOnly = afterDot.replace(/[^0-9]/g, '');
+    // 提取毫秒（前3位）之后的部分作为纳秒
+    nanoseconds = digitsOnly.length > 3 ? digitsOnly.slice(3) : '';
+  }
 
   // 使用dayjs解析字符串到毫秒 包含时区处理
-  const dateTimeToMilliseconds = dayjs(val).tz(window.timezone).format('YYYY-MM-DD HH:mm:ss.SSS');
+  const dateTimeToMilliseconds = dayjs(val).tz(window.timezone)
+    .format('YYYY-MM-DD HH:mm:ss.SSS');
   // 获取微秒并且判断是否是000，也就是纳秒部分的最后三位
-  const microseconds = nanoseconds % 1000;
-  const newNanoseconds = microseconds !== 0 ? nanoseconds : nanoseconds.slice(0, 3);
+  const nanosecondsNum = nanoseconds ? parseInt(nanoseconds, 10) : 0;
+  const microseconds = nanosecondsNum % 1000;
+  // 如果纳秒部分的最后三位（微秒部分）是000，只保留前3位；否则保留全部
+  const newNanoseconds = microseconds !== 0
+    ? nanoseconds
+    : (nanoseconds.length > 3 ? nanoseconds.slice(0, 3) : nanoseconds);
 
   // 组合dayjs格式化的日期时间到毫秒和独立处理的纳秒部分
   const formattedDateTimeWithNanoseconds = `${dateTimeToMilliseconds}${newNanoseconds}`;
@@ -544,11 +567,11 @@ export function formatFileSize(size, dropFractionIfInteger = false) {
 export function readBlobResponse(response) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = function () {
+    reader.onload = () => {
       resolve(reader.result);
     };
 
-    reader.onerror = function () {
+    reader.onerror = () => {
       reject(reader.error);
     };
 
@@ -564,7 +587,6 @@ export function readBlobRespToJson(resp) {
   return readBlobResponse(resp).then(resText => Promise.resolve(JSONBigNumber.parse(resText)));
 }
 export function bigNumberToString(value) {
-  // eslint-disable-next-line @typescript-eslint/prefer-optional-chain
   return (value || {})._isBigNumber ? (value.toString().length < 16 ? Number(value) : value.toString()) : value;
 }
 
@@ -574,11 +596,10 @@ export function formatBigNumListValue(value) {
     if (value instanceof Array) {
       return (obj[value] = parseBigNumberList(value));
     }
-    Object.keys(value).forEach(opt => {
-      obj[opt] =
-        Object.prototype.toString.call(obj[opt]) === '[object Object]' && obj[opt] !== null && !obj[opt]._isBigNumber
-          ? formatBigNumListValue(obj[opt])
-          : bigNumberToString(value[opt] ?? '');
+    Object.keys(value).forEach((opt) => {
+      obj[opt] = Object.prototype.toString.call(obj[opt]) === '[object Object]' && obj[opt] !== null && !obj[opt]._isBigNumber
+        ? formatBigNumListValue(obj[opt])
+        : bigNumberToString(value[opt] ?? '');
     });
     return obj;
   }
@@ -586,13 +607,12 @@ export function formatBigNumListValue(value) {
 }
 
 export function parseBigNumberList(lsit) {
-  return (lsit || []).map(item =>
-    Object.keys(item || {}).reduce((output, key) => {
-      return {
-        ...output,
-        [key]: formatBigNumListValue(item[key]),
-      };
-    }, {}),
+  return (lsit || []).map(item => Object.keys(item || {}).reduce((output, key) => {
+    return {
+      ...output,
+      [key]: formatBigNumListValue(item[key]),
+    };
+  }, {}),
   );
 }
 
@@ -601,7 +621,7 @@ export function parseBigNumberList(lsit) {
  * @param {Number} n
  * @param str,默认26位字母及数字
  */
-export const random = (n, str = 'abcdefghijklmnopqrstuvwxyz0123456789') => {
+export const random = (n = 8, str = 'abcdefghijklmnopqrstuvwxyz0123456789') => {
   // 生成n位长度的字符串
   // const str = 'abcdefghijklmnopqrstuvwxyz0123456789' // 可以作为常量放到random外面
   let result = '';
@@ -636,7 +656,7 @@ export const copyMessage = (val, alertMsg = undefined) => {
  * @desc: 字符串转base64
  * @param { String } str
  */
-export const base64Encode = str => {
+export const base64Encode = (str) => {
   return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (match, p1) => String.fromCharCode(`0x${p1}`)));
 };
 
@@ -644,7 +664,7 @@ export const base64Encode = str => {
  * @desc: base64转字符串
  * @param { String } str
  */
-export const base64Decode = str => {
+export const base64Decode = (str) => {
   return decodeURIComponent(
     atob(str)
       .split('')
@@ -660,8 +680,8 @@ export const makeMessage = (message, traceId) => {
     ${id || '--'} ：
     ${message}
   `;
-  message &&
-    console.log(`
+  message
+    && console.log(`
   ------------------【日志】------------------
   【TraceID】：${id}
   【Message】：${message}
@@ -712,14 +732,13 @@ export const deepClone = (obj, hash = new WeakMap()) => {
   if (Object(obj) !== obj) return obj;
   if (obj instanceof Set) return new Set(obj);
   if (hash.has(obj)) return hash.get(obj);
-  const result =
-    obj instanceof Date
-      ? new Date(obj)
-      : obj instanceof RegExp
-        ? new RegExp(obj.source, obj.flags)
-        : obj.constructor
-          ? new obj.constructor()
-          : Object.create(null);
+  const result = obj instanceof Date
+    ? new Date(obj)
+    : obj instanceof RegExp
+      ? new RegExp(obj.source, obj.flags)
+      : obj.constructor
+        ? new obj.constructor()
+        : Object.create(null);
   hash.set(obj, result);
   if (obj instanceof Map) {
     Array.from(obj, ([key, val]) => result.set(key, deepClone(val, hash)));
@@ -731,7 +750,7 @@ export const deepClone = (obj, hash = new WeakMap()) => {
  * @desc: 清空bk-table表头的过滤条件
  * @param {HTMLElement} refInstance ref实例
  */
-export const clearTableFilter = refInstance => {
+export const clearTableFilter = (refInstance) => {
   if (refInstance.$refs.tableHeader.filterPanels) {
     const { filterPanels } = refInstance.$refs.tableHeader;
     for (const key in filterPanels) {
@@ -813,25 +832,23 @@ export const setDefaultSettingSelectFiled = (key, filed) => {
  * 防抖装饰器
  * @param delay
  */
-export const Debounce =
-  (delay = 200) =>
-  (target, key, descriptor) => {
-    const originFunction = descriptor.value;
-    const getNewFunction = () => {
-      let timer;
-      const newFunction = function (...args) {
-        if (timer) window.clearTimeout(timer);
-        timer = setTimeout(() => {
-          originFunction.call(this, ...args);
-        }, delay);
-      };
-      return newFunction;
+export const Debounce = (delay = 200) => (target, key, descriptor) => {
+  const originFunction = descriptor.value;
+  const getNewFunction = () => {
+    let timer;
+    const newFunction = function (...args) {
+      if (timer) window.clearTimeout(timer);
+      timer = setTimeout(() => {
+        originFunction.call(this, ...args);
+      }, delay);
     };
-    descriptor.value = getNewFunction();
-    return descriptor;
+    return newFunction;
   };
+  descriptor.value = getNewFunction();
+  return descriptor;
+};
 
-export const formatDateTimeField = (data, fieldType) => {
+export const formatDateTimeField = (data, fieldType, emptyCharacter = '--') => {
   if (fieldType === 'date') {
     return formatDate(Number(data)) || data || emptyCharacter;
   }
@@ -883,8 +900,7 @@ export const parseTableRowData = (
         // 这里用于处理nested field
         if (Array.isArray(data)) {
           data = data
-            .map(item =>
-              parseTableRowData(item, keyArr.slice(index).join('.'), fieldType, isFormatDate, emptyCharacter),
+            .map(item => parseTableRowData(item, keyArr.slice(index).join('.'), fieldType, isFormatDate, emptyCharacter),
             )
             .filter(item => item !== emptyCharacter);
           break;
@@ -916,12 +932,12 @@ export const parseTableRowData = (
     }
 
     if (fieldType === 'date' && /^\d+$/.test(formatData)) {
-      formatValue = formatDate(Number(formatData)) || data || emptyCharacter;
+      formatValue = formatDate(Number(formatData), false) || data || emptyCharacter;
     }
 
     // 处理纳秒精度的UTC时间格式
     if (fieldType === 'date_nanos') {
-      formatValue = formatDateNanos(formatData) || emptyCharacter;
+      formatValue = formatDateNanos(formatData, false) || emptyCharacter;
     }
 
     if (isMark) {
@@ -940,6 +956,26 @@ export const parseTableRowData = (
   }
 
   return data === null || data === undefined || data === '' ? emptyCharacter : data;
+};
+
+/**
+ * 获取行数据中的字段值
+ * @param {Object} row 行数据
+ * @param {Object} field 字段信息
+ * @returns {String} 字段值
+ */
+export const getRowFieldValue = (row, field) => {
+  if (field.is_virtual_alias_field) {
+    const fieldList = [field.field_name, ...field.source_field_names];
+    for (const fieldName of fieldList) {
+      const value = parseTableRowData(row, fieldName, field.field_type, false, null);
+      if (value !== undefined && value !== null && value !== '') {
+        return value ?? '--';
+      }
+    }
+  }
+
+  return parseTableRowData(row, field.field_name, field.field_type, false);
 };
 
 /** 表格内字体样式 */
@@ -981,8 +1017,8 @@ export const calculateTableColsWidth = (field, list) => {
   // 通过排序获取最大的字段值
   firstLoadList.sort((a, b) => {
     return (
-      parseTableRowData(b, field.field_name, field.field_type).length -
-      parseTableRowData(a, field.field_name, field.field_type).length
+      (parseTableRowData(b, field.field_name, field.field_type)?.length ?? 0)
+      - (parseTableRowData(a, field.field_name, field.field_type)?.length ?? 0)
     );
   });
 
@@ -993,6 +1029,8 @@ export const calculateTableColsWidth = (field, list) => {
     if (['ip', 'serverIp'].includes(field.field_name)) return [124, minWidth];
     if (field.field_name === 'dtEventTimeStamp') return [256, minWidth];
     if (/time/i.test(field.field_name)) return [256, minWidth];
+    if ('date' === field.field_type) return [256, minWidth];
+
     // 去掉高亮标签 保证不影响实际展示长度计算
     const fieldValue = String(parseTableRowData(firstLoadList[0], field.field_name, field.field_type))
       .replace(/<mark>/g, '')
@@ -1078,7 +1116,13 @@ export const flatObjTypeFiledKeys = (currentObject = {}, newFlatObj, previousKey
 
 export const TABLE_LOG_FIELDS_SORT_REGULAR = /^[_]{1,2}|[_]{1,2}/g;
 
-export const utcFormatDate = val => {
+/**
+ * 格式化时间戳为日期时间格式
+ * @param {Number} val 时间戳
+ * @param {Boolean} formatTimezone 是否格式化时区
+ * @returns {String} 日期时间格式
+ */
+export const utcFormatDate = (val, formatTimezone = false) => {
   const date = new Date(val);
 
   if (isNaN(date.getTime())) {
@@ -1086,38 +1130,52 @@ export const utcFormatDate = val => {
     return val;
   }
 
-  return formatDate(date.getTime());
+  return formatDate(date.getTime(), formatTimezone);
 };
 
 // 首次加载设置表格默认宽度自适应
 export const setDefaultTableWidth = (visibleFields, tableData, catchFieldsWidthObj = null, staticWidth = 50) => {
   try {
     if (tableData.length && visibleFields.length) {
-      visibleFields.forEach(field => {
-        const [fieldWidth, minWidth] = calculateTableColsWidth(field, tableData);
-        let width = fieldWidth < minWidth ? minWidth : fieldWidth;
-        if (catchFieldsWidthObj) {
-          const catchWidth = catchFieldsWidthObj[field.field_name];
-          width = catchWidth ?? fieldWidth;
+      visibleFields.forEach((field) => {
+        const targetList = [field];
+        if (field.alias_mapping_field && !targetList.includes(field.alias_mapping_field)) {
+          targetList.push(field.alias_mapping_field);
         }
 
-        set(field, 'width', width);
-        set(field, 'minWidth', minWidth);
+        targetList.forEach((item) => {
+          const [fieldWidth, minWidth] = calculateTableColsWidth(item, tableData);
+          let width = fieldWidth < minWidth ? minWidth : fieldWidth;
+          if (catchFieldsWidthObj) {
+            const catchWidth = catchFieldsWidthObj[item.field_name];
+            width = catchWidth ?? fieldWidth;
+          }
+
+          set(item, 'width', width);
+          set(item, 'minWidth', minWidth);
+        });
       });
+
+
       const columnsWidth = visibleFields.reduce((prev, next) => prev + next.width, 0);
       const tableElem = document.querySelector('.original-log-panel');
+
+      if (!tableElem) {
+        return true;
+      }
+
       // 如果当前表格所有列总和小于表格实际宽度 则对小于800（最大宽度）的列赋值 defalut 使其自适应
       const availableWidth = tableElem.clientWidth - staticWidth;
       if (tableElem && columnsWidth && columnsWidth < availableWidth) {
         const longFiels = visibleFields.filter(item => item.width >= 800);
         if (longFiels.length) {
           const addWidth = (availableWidth - columnsWidth) / longFiels.length;
-          longFiels.forEach(item => {
+          longFiels.forEach((item) => {
             set(item, 'width', item.width + Math.ceil(addWidth));
           });
         } else {
           const addWidth = (availableWidth - columnsWidth) / visibleFields.length;
-          visibleFields.forEach(field => {
+          visibleFields.forEach((field) => {
             set(field, 'width', field.width + Math.ceil(addWidth));
           });
         }
@@ -1126,6 +1184,7 @@ export const setDefaultTableWidth = (visibleFields, tableData, catchFieldsWidthO
 
     return true;
   } catch (error) {
+    console.error(error);
     return false;
   }
 };
@@ -1148,37 +1207,44 @@ export const blobDownload = (data, fileName = 'default', type = 'text/plain') =>
   window.URL.revokeObjectURL(href); // 释放掉blob对象
 };
 
-export const xssFilter = str => {
+export const xssFilter = (str) => {
   return DOMPurify.sanitize(str);
 };
 /** 数字千分位处理 */
-export const formatNumberWithRegex = number => {
-  var parts = number.toString().split('.');
+export const formatNumberWithRegex = (number) => {
+  const parts = number.toString().split('.');
   parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return parts.join('.');
 };
 /** 上下文，实时日志高亮颜色 */
-// eslint-disable-next-line @typescript-eslint/naming-convention
 export const contextHighlightColor = [
   {
-    dark: '#FFB401',
-    light: '#FFF6E1',
+    dark: 'rgb(255, 209, 138)',
+    light: 'rgb(255, 235, 204)',
   },
   {
-    dark: '#1CAB88',
-    light: '#E8FFF5',
+    dark: 'rgb(164, 235, 202)',
+    light: 'rgb(206, 235, 222)',
   },
   {
-    dark: '#3A84FF',
-    light: '#F0F5FF',
+    dark: 'rgb(171, 221, 245)',
+    light: 'rgb(215, 235, 245)',
   },
   {
-    dark: '#FF5656',
-    light: '#FFEEEE',
+    dark: 'rgb(179, 190, 255)',
+    light: 'rgb(224, 229, 255)',
   },
   {
-    dark: '#00CBCB',
-    light: '#E1FCFD',
+    dark: 'rgb(243, 179, 255)',
+    light: 'rgb(249, 219, 255)',
+  },
+  {
+    dark: 'rgb(255, 179, 191)',
+    light: 'rgb(255, 224, 230)',
+  },
+  {
+    dark: 'rgb(199, 240, 153)',
+    light: 'rgb(226, 240, 211)',
   },
 ];
 
@@ -1189,7 +1255,7 @@ export const getOperatorKey = operator => `operator:${operator}`;
  * @param str 需要计算长度的字符
  * @returns 字符长度
  */
-export const getCharLength = str => {
+export const getCharLength = (str) => {
   const len = str.length;
   let bitLen = 0;
 
@@ -1208,7 +1274,7 @@ export const getRegExp = (searchValue, flags = 'ig') => {
 };
 
 /** url中没有索引集indexID时候，拿浏览器存储的最后一次选中的索引集进行初始化 */
-export const getStorageIndexItem = indexList => {
+export const getStorageIndexItem = (indexList) => {
   const catchIndexSetStr = localStorage.getItem('CATCH_INDEX_SET_ID_LIST');
   if (catchIndexSetStr) {
     const catchIndexSetList = JSON.parse(catchIndexSetStr);
@@ -1221,7 +1287,7 @@ export const getStorageIndexItem = indexList => {
 };
 
 /** 获取非无数据的索引集 */
-export const getHaveValueIndexItem = indexList => {
+export const getHaveValueIndexItem = (indexList) => {
   return (
     indexList.find(item => !item.tags.map(item => item.tag_id).includes(4))?.index_set_id || indexList[0].index_set_id
   );
@@ -1294,4 +1360,17 @@ export const getOs = () => {
  */
 export const getOsCommandLabel = () => {
   return getOs() === 'macos' ? 'Cmd' : 'Ctrl';
+};
+
+/**
+ * 更新最后选择索引ID
+ */
+export const updateLastSelectedIndexId = (spaceUid, indexSetId) => {
+  const storage = {
+    [BK_LOG_STORAGE.LAST_INDEX_SET_ID]: {
+      ...(store.state.storage[BK_LOG_STORAGE.LAST_INDEX_SET_ID] ?? {}),
+      [spaceUid]: [String(indexSetId)],
+    },
+  };
+  store.commit('updateStorage', storage);
 };

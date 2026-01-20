@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -377,7 +377,7 @@ export default class CompareTopoGraph extends tsc<CompareTopoGraphProps, Compare
    * @param  {G.Group} group 图形分组，边中的图形对象的容器
    * @return {G.Shape} 绘制的图形，通过 node.get('keyShape') 可以获取到
    */
-  drawLine(cfg, group: IGroup) {
+  drawLine(_cfg, group: IGroup) {
     const endArrow = {
       path: G6.Arrow.triangle(10, 10, -10), // 路径
       fill: '#C4C6CC', // 填充颜色
@@ -529,7 +529,7 @@ export default class CompareTopoGraph extends tsc<CompareTopoGraphProps, Compare
 
   handleDownloadImage() {
     if (!this.graph) return;
-    const name = `${dayjs.tz().format('YYYY-MM-DD HH:mm:ss')}`;
+    const name = `${dayjs.tz().format('YYYY-MM-DD HH:mm:ssZZ')}`;
     this.graph.downloadFullImage(name, 'image/png', {
       backgroundColor: '#fff',
       padding: 30,

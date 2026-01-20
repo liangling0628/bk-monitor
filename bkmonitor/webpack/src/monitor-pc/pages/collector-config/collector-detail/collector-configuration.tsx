@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -27,6 +27,7 @@ import { Component, Emit, Inject, Prop, Watch } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
 
 import { renameCollectConfig } from 'monitor-api/modules/collecting';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { copyText } from 'monitor-common/utils/utils.js';
 
 import HistoryDialog from '../../../components/history-dialog/history-dialog';
@@ -111,9 +112,9 @@ export default class CollectorConfiguration extends tsc<IProps> {
   get historyList() {
     return [
       { label: this.$t('创建人'), value: this.basicInfo?.create_user || '--' },
-      { label: this.$t('创建时间'), value: this.basicInfo?.create_time || '--' },
+      { label: this.$t('创建时间'), value: formatWithTimezone(this.basicInfo?.create_time) || '--' },
       { label: this.$t('最近更新人'), value: this.basicInfo?.update_user || '--' },
-      { label: this.$t('修改时间'), value: this.basicInfo?.update_time || '--' },
+      { label: this.$t('修改时间'), value: formatWithTimezone(this.basicInfo?.update_time) || '--' },
     ];
   }
 
@@ -455,7 +456,9 @@ export default class CollectorConfiguration extends tsc<IProps> {
                       </span>
                     );
                   }
-                  return this.basicInfo?.[key];
+                  return key === 'update_time'
+                    ? formatWithTimezone(this.basicInfo?.[key])
+                    : this.basicInfo?.[key] || '--';
                 })()
               )
             )}

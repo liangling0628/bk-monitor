@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -329,8 +329,8 @@ export default class DetectionRulesDisplay extends tsc<IProps, IEvents> {
     return (
       <IntelligentDetect
         data={this.value}
-        interval={this.metricData[0].agg_interval}
-        resultTableId={this.metricData[0]?.intelligent_detect?.result_table_id}
+        interval={this.metricData?.[0]?.agg_interval}
+        resultTableId={this.metricData?.[0]?.intelligent_detect?.result_table_id}
         readonly
         onChartTypeChange={this.handleAiopsChartTypeChange}
         onModelChange={this.handleModelChange}

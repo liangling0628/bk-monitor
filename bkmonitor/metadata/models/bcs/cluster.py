@@ -9,7 +9,6 @@ from django.utils.translation import gettext as _
 from kubernetes import client as k8s_client
 
 from bkmonitor.utils.db import JsonField
-from constants.common import DEFAULT_TENANT_ID
 from metadata import config
 from metadata.models import common
 from metadata.models.custom_report import EventGroup, TimeSeriesGroup
@@ -31,6 +30,7 @@ class BCSClusterInfo(models.Model):
 
     CLUSTER_STATUS_RUNNING = "running"
     CLUSTER_STATUS_DELETED = "deleted"
+    CLUSTER_STATUS_INIT_FAILED = "init_failed"
     CLUSTER_RAW_STATUS_RUNNING = "RUNNING"
     CLUSTER_RAW_STATUS_DELETED = "DELETED"
 
@@ -157,6 +157,7 @@ class BCSClusterInfo(models.Model):
         cluster_id: str,
         project_id: str,
         creator: str,
+        bk_tenant_id: str,
         domain_name: str = settings.BCS_API_GATEWAY_HOST,
         port: int = settings.BCS_API_GATEWAY_PORT,
         api_key_type: str = "authorization",
@@ -164,7 +165,6 @@ class BCSClusterInfo(models.Model):
         is_skip_ssl_verify: bool = True,
         transfer_cluster_id: str = None,
         bk_env: str = settings.BCS_CLUSTER_BK_ENV_LABEL,
-        bk_tenant_id: str = DEFAULT_TENANT_ID,
         is_fed_cluster: bool | None = False,
     ) -> "BCSClusterInfo":
         """
@@ -253,6 +253,10 @@ class BCSClusterInfo(models.Model):
             else:
                 default_storage_config = {"cluster_id": settings.BCS_CUSTOM_EVENT_STORAGE_CLUSTER_ID}
                 additional_options = copy.deepcopy(EventGroup.DEFAULT_RESULT_TABLE_OPTIONS)
+                field_names = [field["field_name"] for field in EventGroup.STORAGE_FIELD_LIST]
+                field_names.append("time")
+                additional_options[ResultTableOption.OPTION_ES_DOCUMENT_ID] = field_names
+                additional_options[ResultTableOption.OPTION_ENABLE_V4_EVENT_GROUP_DATA_LINK] = True
 
             report_group = report_class.create_custom_group(
                 bk_data_id=data_source.bk_data_id,
@@ -434,7 +438,7 @@ class BCSClusterInfo(models.Model):
         operator: str,
         transfer_cluster_id: str,
         mq_cluster_id: str,
-        bk_tenant_id: str = DEFAULT_TENANT_ID,
+        bk_tenant_id: str,
     ) -> DataSource:
         """
         创建数据源
@@ -499,6 +503,20 @@ class BCSClusterInfo(models.Model):
             "is_skip_ssl_verify": self.is_skip_ssl_verify,
             "cert_content": self.cert_content,
             "k8s_event_data_id": self.K8sEventDataID,
+        }
+
+    def to_json_for_user(self):
+        """
+        返回必要信息
+        """
+        return {
+            "cluster_id": self.cluster_id,
+            "bk_tenant_id": self.bk_tenant_id,
+            "bk_biz_id": self.bk_biz_id,
+            "status": self.status,
+            "K8sMetricDataID": self.K8sMetricDataID,
+            "CustomMetricDataID": self.CustomMetricDataID,
+            "K8sEventDataID": self.K8sEventDataID,
         }
 
 

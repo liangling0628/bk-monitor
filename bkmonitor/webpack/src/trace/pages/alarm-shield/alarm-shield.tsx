@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -23,7 +23,7 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-import { ref as deepRef, defineComponent, provide, reactive, shallowRef } from 'vue';
+import { computed, ref as deepRef, defineComponent, provide, reactive, shallowRef } from 'vue';
 
 import {
   type FilterValue,
@@ -36,6 +36,7 @@ import {
 import { Button, DatePicker, InfoBox, Message, Pagination, SearchSelect } from 'bkui-vue';
 import { disableShield, frontendShieldList } from 'monitor-api/modules/shield';
 import { commonPageSizeGet, commonPageSizeSet } from 'monitor-common/utils';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
 
@@ -125,17 +126,17 @@ export default defineComponent({
       {
         id: EColumn.beginTime,
         name: t('开始时间'),
-        width: 200,
+        width: 150,
         disabled: false,
         sortable: true,
       },
-      // {
-      //   id: EColumn.failureTime,
-      //   name: t('失效时间'),
-      //   width: 150,
-      //   disabled: false,
-      //   sortable: true,
-      // },
+      {
+        id: EColumn.failureTime,
+        name: t('屏蔽失效时间'),
+        width: 180,
+        disabled: false,
+        sortable: false,
+      },
       // {
       //   id: EColumn.cycleDuration,
       //   name: t('持续周期及时长'),
@@ -145,7 +146,7 @@ export default defineComponent({
       {
         id: EColumn.endTime,
         name: t('结束时间'),
-        width: 200,
+        width: 180,
         disabled: false,
       },
       {
@@ -185,6 +186,13 @@ export default defineComponent({
         disabled: true,
       },
     ]);
+    const columnComputed = computed(() => {
+      // 失效时间只在屏蔽失效tab展示
+      if (!shieldStatus.value) {
+        return columns.value.filter(item => item.id !== EColumn.failureTime);
+      }
+      return columns.value;
+    });
     const tableLoading = deepRef(false);
 
     const pagination = reactive({
@@ -205,6 +213,7 @@ export default defineComponent({
     const detailData = reactive({
       show: false,
       id: '',
+      failureTime: '', // 屏蔽失效时间
     });
 
     provide('authority', authority);
@@ -398,6 +407,7 @@ export default defineComponent({
      */
     function handleToDetail(row) {
       detailData.id = row.id;
+      detailData.failureTime = shieldStatus.value ? row.failure_time : '';
       handleDetailShowChange(true);
     }
     function handleDetailShowChange(v: boolean) {
@@ -549,16 +559,16 @@ export default defineComponent({
           return <span>{row.content}</span>;
         }
         case EColumn.beginTime: {
-          return <span>{row.begin_time}</span>;
+          return <span>{formatWithTimezone(row.begin_time)}</span>;
         }
-        // case EColumn.failureTime: {
-        //   return <span>{row.failure_time}</span>;
-        // }
+        case EColumn.failureTime: {
+          return <span>{formatWithTimezone(row.failure_time)}</span>;
+        }
         // case EColumn.cycleDuration: {
         //   return <span>{row.cycle_duration}</span>;
         // }
         case EColumn.endTime: {
-          return <span>{row.end_time}</span>;
+          return <span>{formatWithTimezone(row.end_time)}</span>;
         }
         case EColumn.shieldCycle: {
           return <span>{row.shield_cycle}</span>;
@@ -638,6 +648,7 @@ export default defineComponent({
 
     return {
       columns,
+      columnComputed,
       sort,
       tableLoading,
       tableList,
@@ -717,7 +728,7 @@ export default defineComponent({
                 class='shield-search'
                 data={this.searchData}
                 modelValue={this.searchValues}
-                placeholder={this.t('输入屏蔽内容、ID、策略ID')}
+                placeholder={this.t('搜索 屏蔽ID、策略ID')}
                 onUpdate:modelValue={v => this.handleSearchCondition(v)}
               />
             </div>
@@ -735,9 +746,9 @@ export default defineComponent({
                   ),
                 }}
                 bkUiSettings={{
-                  checked: this.columns.map(item => item.id),
+                  checked: this.columnComputed.map(item => item.id),
                 }}
-                columns={this.columns.map(item => ({
+                columns={this.columnComputed.map(item => ({
                   title: item.name,
                   minWidth: item.minWidth || item.width,
                   resizable: true,
@@ -766,6 +777,7 @@ export default defineComponent({
                 }}
                 data={this.tableList}
                 filterValue={this.filterValue}
+                hover={true}
                 rowKey='id'
                 showSortColumnBgColor={true}
                 sort={this.sort}
@@ -794,6 +806,7 @@ export default defineComponent({
         </div>
         <AlarmShieldDetail
           id={this.detailData.id}
+          failureTime={this.detailData.failureTime}
           show={this.detailData.show}
           onShowChange={this.handleDetailShowChange}
         />

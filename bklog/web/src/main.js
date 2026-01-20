@@ -30,33 +30,39 @@ import Vue from 'vue';
 import VueVirtualScroller from 'vue-virtual-scroller';
 
 import LogButton from '@/components/log-button';
+import LogIcon from '@/components/log-icon';
 import i18n from '@/language/i18n';
 import docsLinkMixin from '@/mixins/docs-link-mixin';
-import { debounce } from 'lodash';
+import { debounce } from 'lodash-es';
 
-import App from './App';
 import http from './api';
+import App from './app.tsx';
 import { bus } from './common/bus';
+import './common/preload-import.ts';
 import { renderHeader, xssFilter } from './common/util';
 import './directives/index';
 import JsonFormatWrapper from './global/json-format-wrapper.vue';
 import methods from './plugins/methods';
-import preload, { getExternalMenuListBySpace } from './preload';
+import preload, { getAllSpaceList, getExternalMenuListBySpace } from './preload';
 import getRouter from './router';
 import store from './store';
-import { BK_LOG_STORAGE } from './store/store.type';
 
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 import './scss/theme/theme-dark.scss';
 import './scss/theme/theme-light.scss';
 import './static/font-face/index.css';
 import './static/style.css';
-import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
+import '@blueking/bk-user-selector/vue2/vue2.css';
+import { BK_LOG_STORAGE } from './store/store.type.ts';
+import { urlArgs } from './store/default-values.ts';
+
+// import { localSettings } from './local.po';
 
 Vue.prototype.$renderHeader = renderHeader;
 Vue.prototype.$xss = xssFilter;
 
-const setRouterErrorHandle = router => {
-  router.onError(err => {
+const setRouterErrorHandle = (router) => {
+  router.onError((err) => {
     const pattern = /Loading (CSS chunk|chunk) (\d)+ failed/g;
     const isChunkLoadFailed = err.message.match(pattern);
     const targetPath = router.history?.pending?.fullPath;
@@ -68,60 +74,138 @@ const setRouterErrorHandle = router => {
 
 Vue.component('JsonFormatWrapper', JsonFormatWrapper);
 Vue.component('LogButton', LogButton);
+Vue.component('LogIcon', LogIcon);
 Vue.mixin(docsLinkMixin);
 Vue.use(methods);
 Vue.use(VueVirtualScroller);
 
+window.bus = bus;
+
 const mountedVueInstance = () => {
+  // Object.assign(window, localSettings);
+
   window.mainComponent = {
-    $t: function (key, params) {
+    $t(key, params) {
       return i18n.t(key, params);
     },
   };
-  preload({ http, store }).then(([space]) => {
-    const spaceUid = store.state.storage[BK_LOG_STORAGE.BK_SPACE_UID];
-    const bkBizId = store.state.storage[BK_LOG_STORAGE.BK_BIZ_ID];
+
+  preload({ http, store }).then(([spaceRequest]) => {
+    const { space, spaceUid, bkBizId } = spaceRequest.value ?? {};
 
     let externalMenu = [];
     if (window.IS_EXTERNAL && space) {
       externalMenu = getExternalMenuListBySpace(space) ?? [];
-      store.commit('updateExternalMenu', externalMenu);
+      store.commit('updateState', { externalMenu });
     }
 
-    store.dispatch('requestMenuList', spaceUid);
     const router = getRouter(spaceUid, bkBizId, externalMenu);
     setRouterErrorHandle(router);
 
-    window.mainComponent = new Vue({
-      el: '#app',
-      router,
-      store,
-      i18n,
-      components: {
-        App,
-      },
-      mounted() {
-        // 对于手动输入URL，直接刷新页面重置所有参数和状态
-        window.addEventListener('hashchange', this.reset);
-      },
-      beforeUnmount() {
-        window.removeEventListener('hashchange', this.reset);
-      },
-      methods: {
-        reset() {
-          window.location.reload();
-        },
-      },
-      template: '<App/>',
-    });
+    store
+      .dispatch('requestMenuList', spaceUid)
+      .catch((e) => {
+        console.error('获取菜单列表失败', e);
+      })
+      .finally(() => {
+        const menuList = store.state.topMenu ?? [];
+        menuList
+          .find(item => item.id === 'manage')
+          ?.children?.forEach((group) => {
+            group?.children?.forEach((nav) => {
+              if (nav.id === 'log-collection') {
+                Object.assign(nav, {
+                  children: [
+                    {
+                      id: 'collection-item',
+                      name: i18n.t('采集项'),
+                      project_manage: nav.project_manage,
+                    },
+                    {
+                      id: 'log-index-set',
+                      name: i18n.t('索引集'),
+                      project_manage: nav.project_manage,
+                    },
+                  ],
+                });
+              }
+            });
+          });
+
+        const copyMenu = structuredClone(menuList);
+        store.commit('updateState', { topMenu: copyMenu });
+
+        window.mainComponent = new Vue({
+          el: '#app',
+          router,
+          store,
+          i18n,
+          components: {
+            App,
+          },
+          created() {
+            if (!space && this.$route.name !== 'share') {
+              this.$router.push({
+                path: '/un-authorized',
+                query: {
+                  type: 'space',
+                  spaceUid: spaceUid ?? store.state.storage[BK_LOG_STORAGE.BK_SPACE_UID],
+                  bkBizId: bkBizId ?? store.state.storage[BK_LOG_STORAGE.BK_BIZ_ID],
+                  indexId: urlArgs.index_id,
+                  from: urlArgs.from,
+                },
+              });
+
+              return;
+            }
+
+            // if (
+            //   ['/retrieve', '/'].includes(this.$route.path)
+            //   && (this.$route.query.spaceUid !== spaceUid || this.$route.query.bizId !== bkBizId)
+            // ) {
+            //   this.$router.push({
+            //     name: 'retrieve',
+            //     params: {
+            //       indexId: urlArgs.index_id,
+            //     },
+            //     query: {
+            //       ...(this.$route.query ?? {}),
+            //       spaceUid: spaceUid ?? store.state.storage[BK_LOG_STORAGE.BK_SPACE_UID],
+            //       bizId: bkBizId ?? store.state.storage[BK_LOG_STORAGE.BK_BIZ_ID],
+            //       start_time: urlArgs.start_time ?? this.$store.state.indexItem.start_time,
+            //       end_time: urlArgs.end_time ?? this.$store.state.indexItem.end_time,
+            //       timezone: urlArgs.timezone ?? this.$store.state.indexItem.time_zone,
+            //       format: urlArgs.format ?? this.$store.state.indexItem.format,
+            //       interval: urlArgs.interval ?? this.$store.state.indexItem.interval,
+            //       search_mode: urlArgs.search_mode ?? this.$store.state.indexItem.search_mode,
+            //       from: urlArgs.from,
+            //     },
+            //   });
+            // }
+          },
+          mounted() {
+            // 对于手动输入URL，直接刷新页面重置所有参数和状态
+            window.addEventListener('hashchange', this.reset);
+            getAllSpaceList(http, store);
+          },
+          beforeUnmount() {
+            window.removeEventListener('hashchange', this.reset);
+          },
+          methods: {
+            reset() {
+              window.location.reload();
+            },
+          },
+          template: '<App/>',
+        });
+      });
   });
 };
-window.bus = bus;
 
 if (process.env.NODE_ENV === 'development') {
-  http.request('meta/getEnvConstant').then(res => {
+  http.request('meta/getEnvConstant').then((res) => {
     const { data } = res;
-    Object.keys(data).forEach(key => {
+    Object.keys(data).forEach((key) => {
       window[key] = data[key];
     });
     window.FEATURE_TOGGLE = JSON.parse(data.FEATURE_TOGGLE);
@@ -136,8 +220,8 @@ if (process.env.NODE_ENV === 'development') {
   Vue.config.devtools = true;
 }
 
-const _ResizeObserver = window.ResizeObserver;
-window.ResizeObserver = class ResizeObserver extends _ResizeObserver {
+const BaseResizeObserver = window.ResizeObserver;
+window.ResizeObserver = class ResizeObserver extends BaseResizeObserver {
   constructor(callback) {
     callback = debounce(callback);
     super(callback);

@@ -1,5 +1,8 @@
 import { request } from '../base';
 
+export const incidentMetricsSearch = request('POST', 'rest/v2/incident_metrics/search/');
+export const incidentEventsSearch = request('POST', 'rest/v2/incident_events/search/');
+export const incidentEventsDetail = request('POST', 'rest/v2/incident_events/detail/');
 export const incidentList = request('POST', 'rest/v2/incident/incident_list/');
 export const exportIncident = request('POST', 'rest/v2/incident/export_incident/');
 export const incidentOverview = request('POST', 'rest/v2/incident/incident_overview/');
@@ -24,6 +27,9 @@ export const incidentResults = request('GET', 'rest/v2/incident/incident_results
 export const incidentDiagnosis = request('POST', 'rest/v2/incident/incident_diagnosis/');
 
 export default {
+  incidentMetricsSearch,
+  incidentEventsSearch,
+  incidentEventsDetail,
   incidentList,
   exportIncident,
   incidentOverview,

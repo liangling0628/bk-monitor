@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -70,7 +70,7 @@ export default class CollectGroup extends tsc<FavoriteIndexType.IContainerProps>
 
   /** 获取展示时间 */
   getShowTime(timeStr: string) {
-    return dayjs.tz(timeStr).format('YYYY-MM-DD HH:mm:ss');
+    return dayjs.tz(timeStr).format('YYYY-MM-DD HH:mm:ssZZ');
   }
   /** 鼠标移动到名称时 获取更新信息 */
   handleHoverFavoriteName(e: Event, item) {

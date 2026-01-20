@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -41,6 +41,8 @@ export interface IChildrenHiddenStore {
 }
 
 export interface IFocusMatchesStore {
+  /** 外部触发的定位/高亮目标（比如从span视角表格点击打开 Trace 侧滑,高亮对应span id所在行） */
+  externalActiveSpanId: Ref<string>;
   findMatchesIDs: Ref<any>;
   focusMatchesId: Ref<string>;
   focusMatchesIdIndex: Ref<number>;

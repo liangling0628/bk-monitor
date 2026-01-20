@@ -32,7 +32,8 @@
           :data-with-intersection="true"
           :data-field-name="item.name"
           :ref="item.formatter.ref"
-        >{{ item.formatter.stringValue }}</span>
+          >{{ item.formatter.stringValue }}</span
+        >
       </span>
     </template>
     <template v-if="showMoreTextAction && hasScrollY">
@@ -47,19 +48,20 @@
   </div>
 </template>
 <script setup lang="ts">
-  import { computed, ref, watch, onBeforeUnmount, onMounted, inject } from 'vue';
+  import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
   // @ts-ignore
-  import { parseTableRowData } from '@/common/util';
-  import useFieldNameHook from '@/hooks/use-field-name';
+  import { getRowFieldValue } from '@/common/util';
+import useFieldNameHook from '@/hooks/use-field-name';
 
-  import useJsonRoot from '../hooks/use-json-root';
-  import useStore from '../hooks/use-store';
-  import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
-  import { BK_LOG_STORAGE } from '../store/store.type';
-  import { debounce } from 'lodash';
-  import JSONBig from 'json-bigint';
   import useLocale from '@/hooks/use-locale';
+import useRetrieveEvent from '@/hooks/use-retrieve-event';
+import JSONBig from 'json-bigint';
+import { debounce, isEmpty } from 'lodash-es';
+import useJsonRoot from '../hooks/use-json-root';
+import useStore from '../hooks/use-store';
+import { BK_LOG_STORAGE } from '../store/store.type';
+import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
 
   const emit = defineEmits(['menu-click']);
   const store = useStore();
@@ -157,8 +159,7 @@
   let mousedownItem = null;
   const handleMouseDown = e => {
     mousedownItem = e.target;
-  }
-
+  };
 
   const handleMouseUp = e => {
     e.stopPropagation();
@@ -169,7 +170,7 @@
     }
 
     mousedownItem = null;
-  }
+  };
 
   const onSegmentClick = args => {
     emit('menu-click', args);
@@ -213,16 +214,15 @@
       }
 
       if (typeof props.jsonValue === 'object') {
-        const fieldValue = parseTableRowData(props.jsonValue, field.field_name);
+        const fieldValue = getRowFieldValue(props.jsonValue, field);
         return [convertToObject(fieldValue), fieldValue];
       }
 
       return [props.jsonValue, props.jsonValue];
-
     }
 
     if (typeof props.jsonValue === 'object') {
-      const fieldValue = parseTableRowData(props.jsonValue, field.field_name);
+      const fieldValue = getRowFieldValue(props.jsonValue, field);
       return [fieldValue, fieldValue];
     }
 
@@ -242,13 +242,21 @@
     return val;
   };
 
+  const formatEmptyObject = (val: unknown) => {
+    if (typeof val === 'object') {
+      return isEmpty(val) ? '--' : val;
+    }
+
+    return val;
+  }
+
   const getFieldFormatter = (field, formatDate) => {
     const [objValue, val] = getFieldValue(field);
     const strVal = getDateFieldValue(field, getCellRender(val), formatDate);
     return {
       ref: ref(),
       isJson: typeof objValue === 'object' && objValue !== undefined,
-      value: getDateFieldValue(field, objValue, formatDate),
+      value: formatEmptyObject(getDateFieldValue(field, objValue, formatDate)),
       stringValue: strVal?.replace?.(/<\/?mark>/igm, '') ?? strVal,
       field,
     };
@@ -270,8 +278,9 @@
   });
 
   const depth = computed(() => store.state.storage[BK_LOG_STORAGE.TABLE_JSON_FORMAT_DEPTH]);
+
   const debounceUpdate = debounce(() => {
-    updateRootFieldOperator(rootList.value, depth.value);
+    updateRootFieldOperator(rootList.value as any, depth.value);
     setEditor(depth.value);
     isResolved.value = true;
     setTimeout(() => {
@@ -289,6 +298,13 @@
 
     hasScrollY.value = false;
   };
+
+  watch(() => [props.limitRow], () => {
+    showAllText.value = false;
+    nextTick(() => {
+      setIsOverflowY();
+    });
+  });
 
   watch(
     () => [isRowIntersecting.value],
@@ -318,7 +334,8 @@
     },
   );
 
-  RetrieveHelper.on(RetrieveEvent.RESULT_ROW_BOX_RESIZE, setIsOverflowY);
+  const { addEvent } = useRetrieveEvent();
+  addEvent(RetrieveEvent.RESULT_ROW_BOX_RESIZE, setIsOverflowY);
 
   onMounted(() => {
     setIsOverflowY();
@@ -326,7 +343,6 @@
 
   onBeforeUnmount(() => {
     destroy();
-    RetrieveHelper.off(RetrieveEvent.RESULT_ROW_BOX_RESIZE, setIsOverflowY);
   });
 </script>
 <style lang="scss">
@@ -374,6 +390,8 @@
     .bklog-root-field {
       margin-right: 4px;
       line-height: 20px;
+      display: inline-block; // 修复内联元素基线对齐导致的 1px 差异
+      vertical-align: top; // 确保顶部对齐，避免基线对齐问题
 
       .bklog-json-view-row {
         word-break: break-all;
@@ -498,6 +516,7 @@
     &.is-inline {
       .bklog-root-field {
         display: inline-flex;
+        vertical-align: top; // 确保顶部对齐，避免基线对齐问题
         word-break: break-all;
 
         .segment-content {

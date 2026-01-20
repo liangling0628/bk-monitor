@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import json
-from typing import Dict, List
+import time
 from urllib.parse import urljoin
 
 from django.conf import settings
@@ -65,11 +65,14 @@ class GetHostProcessPortStatusResource(Resource):
         query_config = {"promql": promql_statement, "interval": 60}
         data_source = data_source_class(bk_biz_id=params["bk_biz_id"], **query_config)
         query = UnifyQuery(bk_biz_id=params["bk_biz_id"], data_sources=[data_source], expression="")
-        data: List = query.query_data(limit=1, slimit=1)
+        # 取最近5分钟的数据
+        end_time = int(time.time())
+        start_time = end_time - 300
+        data: list = query.query_data(start_time=start_time * 1000, end_time=end_time * 1000)
         if not data:
             return []
         else:
-            data: Dict = data[-1]
+            data: list[dict] = data
 
         # 不同状态的展示信息
         status_mapping = {
@@ -77,19 +80,25 @@ class GetHostProcessPortStatusResource(Resource):
             "nonlisten": {"statusBgColor": "#f0f1f5", "statusColor": "#c4c6cc", "name": _("停用")},
             "not_accurate_listen": {"statusBgColor": "#ffe8c3", "statusColor": "#EA3636", "name": _("异常")},
         }
-
-        result = []
-        for key in status_mapping.keys():
-            ports = json.loads(data[key])
-            if not ports:
-                continue
-            for port in ports:
-                if key == "not_accurate_listen":
-                    # not_accurate_listen 字段格式：IP:PORT
-                    actual_port = port.rsplit(":", 1)[-1]
-                else:
-                    actual_port = port
-                result.append({"value": str(actual_port), **status_mapping[key]})
+        port_latest_map: dict[str, tuple[int, str]] = {}
+        for item_data in data:
+            for key in status_mapping.keys():
+                ports = json.loads(item_data[key])
+                if not ports:
+                    continue
+                for port in ports:
+                    if key == "not_accurate_listen":
+                        # not_accurate_listen 字段格式：IP:PORT
+                        actual_port = port.rsplit(":", 1)[-1]
+                    else:
+                        actual_port = port
+                    # 取每个端口最新的一条数据
+                    _time = item_data.get("_time_", 0)
+                    if str(actual_port) not in port_latest_map or _time > port_latest_map[str(actual_port)][0]:
+                        port_latest_map[str(actual_port)] = (_time, key)
+        result: list[dict] = []
+        for actual_port, (_time, key) in port_latest_map.items():
+            result.append({"value": str(actual_port), **status_mapping[key]})
         return result
 
 
@@ -106,9 +115,10 @@ class GetHostOrTopoNodeDetailResource(ApiAuthResource):
         bk_inst_id = serializers.IntegerField(required=False)
         bk_obj_id = serializers.CharField(required=False)
         bk_host_id = serializers.IntegerField(required=False)
+        topo_tree = serializers.BooleanField(required=False, default=False)
 
     @classmethod
-    def get_process_info(cls, bk_biz_id: int, bk_process_name: str, bk_host_id: int = None) -> List:
+    def get_process_info(cls, bk_biz_id: int, bk_process_name: str, bk_host_id: int = None) -> list:
         if not bk_process_name:
             return []
 
@@ -123,9 +133,11 @@ class GetHostOrTopoNodeDetailResource(ApiAuthResource):
 
         # 获得指定进程名的端口绑定信息
         bind_info_list = []
+        bk_func_name = ""
         for p in processes:
             if p.bk_process_name != bk_process_name:
                 continue
+            bk_func_name = p.bk_func_name
 
             protocol = cls.protocol_map.get(p.protocol)
             if is_v6(p.bind_ip):
@@ -136,12 +148,11 @@ class GetHostOrTopoNodeDetailResource(ApiAuthResource):
                 bind_ip = f"{bind_ip}:{p.port}"
             bind_info_list.append(bind_ip)
 
-            return [
-                {"name": _("名称"), "type": "string", "value": p.bk_process_name},
-                {"name": _("别名"), "type": "string", "value": p.bk_func_name},
-                {"name": _("绑定信息"), "type": "list", "value": bind_info_list},
-            ]
-        return []
+        return [
+            {"name": _("名称"), "type": "string", "value": bk_process_name},
+            {"name": _("别名"), "type": "string", "value": bk_func_name},
+            {"name": _("绑定信息"), "type": "list", "value": bind_info_list},
+        ]
 
     @classmethod
     def get_host_info(cls, bk_biz_id: int, bk_host_id: int):
@@ -151,7 +162,7 @@ class GetHostOrTopoNodeDetailResource(ApiAuthResource):
         host = hosts[0]
 
         # 查询拓扑信息
-        topo_links: Dict[str, List[TopoNode]] = api.cmdb.get_topo_tree(bk_biz_id=bk_biz_id).convert_to_topo_link()
+        topo_links: dict[str, list[TopoNode]] = api.cmdb.get_topo_tree(bk_biz_id=bk_biz_id).convert_to_topo_link()
         topo_links = {key: value for key, value in topo_links.items() if int(key.split("|")[1]) in host.bk_module_ids}
 
         # 查询Agent状态
@@ -331,9 +342,51 @@ class GetHostOrTopoNodeDetailResource(ApiAuthResource):
                 )
         return result
 
+    def get_topo_node_info(self, bk_biz_id: int, bk_host_id: int):
+        hosts = api.cmdb.get_host_by_id(bk_biz_id=bk_biz_id, bk_host_ids=[bk_host_id])
+        if not hosts:
+            return []
+        host = hosts[0]
+
+        set_nodes = {}
+        # 查询拓扑信息
+        topo_links: dict[str, list[TopoNode]] = api.cmdb.get_topo_tree(bk_biz_id=bk_biz_id).convert_to_topo_link()
+        topo_links: list[list[TopoNode]] = [
+            value for key, value in topo_links.items() if int(key.split("|")[1]) in host.bk_module_ids
+        ]
+
+        bk_set_inst_id: int | None = None
+        for topo_link in topo_links:
+            topo_link.reverse()  # 业务 -> 集群 -> 模块
+            for topo_node in topo_link:
+                if topo_node.bk_obj_id == "biz":
+                    continue
+                elif topo_node.bk_obj_id == "set" and not set_nodes.get(topo_node.bk_inst_id):
+                    set_nodes[topo_node.bk_inst_id] = {
+                        "bk_inst_id": topo_node.bk_inst_id,
+                        "bk_inst_name": topo_node.bk_inst_name,
+                        "bk_obj_id": topo_node.bk_obj_id,
+                        "bk_obj_name": topo_node.bk_obj_name,
+                        "child": [],
+                    }
+                    bk_set_inst_id = topo_node.bk_inst_id
+                elif topo_node.bk_obj_id == "module":
+                    set_nodes[bk_set_inst_id]["child"].append(
+                        {
+                            "bk_inst_id": topo_node.bk_inst_id,
+                            "bk_inst_name": topo_node.bk_inst_name,
+                            "bk_obj_id": topo_node.bk_obj_id,
+                            "bk_obj_name": topo_node.bk_obj_name,
+                        }
+                    )
+        return list(set_nodes.values())
+
     def perform_request(self, params):
         if not params.get("bk_host_id") and not params.get("bk_inst_id") and not params.get("bk_obj_id"):
             return {}
+
+        if params.get("topo_tree") is True and params.get("bk_host_id"):
+            return self.get_topo_node_info(bk_biz_id=params["bk_biz_id"], bk_host_id=params["bk_host_id"])
 
         if "bk_obj_id" in params and "bk_inst_id" in params:
             info = self.get_node_info(params["bk_biz_id"], params["bk_obj_id"], params["bk_inst_id"])
@@ -393,7 +446,7 @@ class GetHostProcessUptimeResource(Resource):
             },
         )
         query = UnifyQuery(bk_biz_id=params["bk_biz_id"], data_sources=[data_source], expression="A")
-        data: List = query.query_data()
+        data: list = query.query_data()
         if data:
             value = data[-1]["_result_"]
         else:
@@ -443,7 +496,7 @@ class GetHostListResource(Resource):
         bk_biz_id = serializers.IntegerField(required=True, label="业务ID")
 
     def perform_request(self, params):
-        hosts: List[Host] = api.cmdb.get_host_by_topo_node(bk_biz_id=params["bk_biz_id"])
+        hosts: list[Host] = api.cmdb.get_host_by_topo_node(bk_biz_id=params["bk_biz_id"])
         return [
             {
                 "id": host.bk_host_id,

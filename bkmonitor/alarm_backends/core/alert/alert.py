@@ -1,22 +1,20 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import copy
 import json
 import logging
 import time
-from typing import List
 
 from django.conf import settings
 from django.utils.translation import gettext as _
-from MySQLdb import DatabaseError as MysqlDatabaseError
 from redis.exceptions import RedisError
 
 from alarm_backends.constants import DEFAULT_DEDUPE_FIELDS, NO_DATA_TAG_DIMENSION
@@ -36,6 +34,7 @@ from bkmonitor.utils import extended_json
 from bkmonitor.utils.common_utils import count_md5
 from constants.action import ActionSignal, AssignMode
 from constants.alert import EventStatus
+from constants.common import DEFAULT_TENANT_ID
 from constants.data_source import DataTypeLabel
 from core.prometheus import metrics
 
@@ -86,7 +85,7 @@ class Alert:
         self._status_changed = False
 
         # 流水日志
-        self.logs: List[dict] = []
+        self.logs: list[dict] = []
 
         # 最新事件
         self.last_event = None
@@ -343,6 +342,64 @@ class Alert:
         return self.data.get("labels")
 
     @property
+    def circuit_breaking_dimensions(self) -> dict:
+        """
+        获取用于熔断匹配的维度字典
+        :return: 熔断匹配维度字典
+        """
+        dimension = {}
+
+        # 策略ID
+        if self.strategy_id is not None:
+            dimension["strategy_id"] = str(self.strategy_id)
+
+        # 业务ID
+        if self.bk_biz_id:
+            dimension["bk_biz_id"] = str(self.bk_biz_id)
+
+        # 从策略信息中提取数据源和数据类型标签
+        strategy = self.strategy
+        if strategy and strategy.get("items"):
+            # 取第一个item的第一个query_config作为代表
+            first_item = strategy["items"][0]
+            if first_item.get("query_configs"):
+                first_query_config = first_item["query_configs"][0]
+
+                data_source_label = first_query_config.get("data_source_label")
+                data_type_label = first_query_config.get("data_type_label")
+
+                if data_source_label:
+                    dimension["data_source_label"] = str(data_source_label)
+                if data_type_label:
+                    dimension["data_type_label"] = str(data_type_label)
+
+                # 构建策略源
+                if data_source_label and data_type_label:
+                    dimension["strategy_source"] = f"{data_source_label}:{data_type_label}"
+
+        # 标签信息（如果需要的话）
+        if self.labels:
+            dimension["labels"] = self.labels
+
+        return dimension
+
+    def check_circuit_breaking(self, circuit_breaking_manager=None) -> bool:
+        """
+        检查当前告警是否触发熔断
+        :param circuit_breaking_manager: 熔断管理器实例，如果不提供则使用默认的AccessDataCircuitBreakingManager
+        :return: 是否触发熔断
+        """
+        if not circuit_breaking_manager:
+            return False
+
+        try:
+            dimensions = self.circuit_breaking_dimensions
+            return circuit_breaking_manager.is_circuit_breaking(**dimensions)
+        except Exception as e:
+            logger.exception(f"[circuit breaking] circuit breaking check failed for alert({self.id}): {e}")
+            return False
+
+    @property
     def is_composite_strategy(self):
         """
         检查是否为关联告警策略
@@ -380,6 +437,10 @@ class Alert:
         params["op_type"] = op_type
         params["create_time"] = int(time.time())
         self.logs.append(params)
+
+    @property
+    def bk_tenant_id(self) -> str:
+        return self.data.get("bk_tenant_id") or DEFAULT_TENANT_ID
 
     @property
     def alert_name(self) -> str:
@@ -461,7 +522,7 @@ class Alert:
         return self.severity
 
     @property
-    def dimensions(self) -> List:
+    def dimensions(self) -> list:
         return self.data.get("dimensions", [])
 
     @property
@@ -519,7 +580,7 @@ class Alert:
         # 如果没有这个key则追加
         self.data["dimensions"].append(data)
 
-    def update_key_value_field(self, field_name, new_value: List):
+    def update_key_value_field(self, field_name, new_value: list):
         self.data.setdefault(field_name, [])
         field_value_dict = {item["key"]: item for item in self.data[field_name]}
         new_value_dict = {item["key"]: item for item in new_value}
@@ -601,7 +662,7 @@ class Alert:
     def update_labels(self, value):
         self.data["labels"] = value
 
-    def update_assign_tags(self, value: List):
+    def update_assign_tags(self, value: list):
         """
         更新分派的tags信息
         """
@@ -613,7 +674,7 @@ class Alert:
         self.data["assign_tags"] = list(all_tags.values())
         self.update_top_event_tags(value)
 
-    def update_top_event_tags(self, value: List):
+    def update_top_event_tags(self, value: list):
         if not self.top_event:
             return
         event_tags = {item["key"]: item for item in self.data["event"]["tags"]}
@@ -691,12 +752,13 @@ class Alert:
         self.data[key] = value
 
     @classmethod
-    def from_event(cls, event: Event):
+    def from_event(cls, event: Event, circuit_breaking_manager=None):
         """
         将事件创建为新的告警对象
         """
         create_time = int(time.time())
         data = {
+            "bk_tenant_id": event.bk_tenant_id,
             "dedupe_md5": event.dedupe_md5,
             "create_time": create_time,
             "update_time": create_time,
@@ -730,6 +792,10 @@ class Alert:
             alert.add_dimension(
                 key, event.get_field(key), event.get_tag_display_key(key), event.get_tag_display_value(key)
             )
+        # 如果有 additional_dimensions，则添加到维度中
+        if "additional_dimensions" in event.extra_info:
+            for key, value in event.extra_info["additional_dimensions"].items():
+                alert.add_dimension(key, value)
 
         alert.set_next_status(EventStatus.CLOSED, cls.CLOSE_WINDOW_SIZE)
         alert._refresh_db = True
@@ -742,19 +808,40 @@ class Alert:
             description=event.description,
             time=event.time,
         )
-        qos_result = alert.qos_check()
-        if qos_result["is_blocked"]:
-            alert.update_qos_status(True)
-            alert.add_log(
-                op_type=AlertLog.OpType.ALERT_QOS,
-                event_id=int(time.time()),
-                description=qos_result["message"],
-                time=int(time.time()),
-            )
+
+        # 熔断检查：对新创建的告警进行熔断判定
+        circuit_breaking_blocked = False
+        if circuit_breaking_manager:
+            circuit_breaking_blocked = alert.check_circuit_breaking(circuit_breaking_manager)
+            if circuit_breaking_blocked:
+                alert.update_qos_status(True)
+                alert.add_log(
+                    op_type=AlertLog.OpType.ALERT_QOS,
+                    event_id=int(time.time()),
+                    description=_("告警触发熔断规则，被流控"),
+                    time=int(time.time()),
+                )
+                logger.info(
+                    f"[circuit breaking] [alert.from_event] new alert({alert.id}) strategy({alert.strategy_id}) "
+                    f"is blocked by circuit breaking rules"
+                )
+
+        # QoS检查：如果未被熔断规则流控，再进行QoS检查
+        if not circuit_breaking_blocked:
+            qos_result = alert.qos_check()
+            if qos_result["is_blocked"]:
+                alert.update_qos_status(True)
+                alert.add_log(
+                    op_type=AlertLog.OpType.ALERT_QOS,
+                    event_id=int(time.time()),
+                    description=qos_result["message"],
+                    time=int(time.time()),
+                )
+
         return alert
 
     @classmethod
-    def get_from_snapshot(cls, alert_key: AlertKey) -> "Alert":
+    def get_from_snapshot(cls, alert_key: AlertKey):
         """
         从Redis中获取告警快照
         :param alert_key: 告警标识
@@ -762,13 +849,15 @@ class Alert:
         alert_json = ALERT_SNAPSHOT_KEY.client.get(alert_key.get_snapshot_key())
 
         if not alert_json:
-            return
+            return None
 
         try:
             alert_data = json.loads(alert_json)
             return cls(alert_data)
         except Exception as e:
             logger.warning("load alert failed: %s, origin data: %s", e, alert_json)
+
+        return None
 
     @classmethod
     def get_from_es(cls, alert_id: int) -> "Alert":
@@ -777,10 +866,20 @@ class Alert:
 
     @classmethod
     def get(cls, alert_key: AlertKey) -> "Alert":
+        """获取告警对象，优先从 Redis 快照读取，失败时降级从 ES 获取。
+
+        实现了两级数据获取策略：
+        1. 优先从 Redis 快照中获取告警数据（高性能）
+        2. Redis 获取失败或数据不存在时，降级从 ES 中获取（高可靠）
+
+        :param alert_key: 告警标识对象，包含告警的唯一标识信息
+        :return: 告警对象实例
+        :raises: 当 ES 中也无法获取到告警数据时，会抛出相应异常
+        """
         try:
             alert = cls.get_from_snapshot(alert_key)
-        except (MysqlDatabaseError, RedisError) as error:
-            # 如果从 redis获取缓存抛异常的时候，需要记录一下日志，并且此时一定要从ES获取一次
+        except RedisError as error:
+            # redis 获取缓存失败时记录异常日志，并降级从 ES 获取告警数据
             logger.exception("load alert(%s) from redis failed: %s", alert_key, str(error))
             alert = None
         if not alert:
@@ -788,7 +887,7 @@ class Alert:
         return alert
 
     @classmethod
-    def mget(cls, alert_keys: List[AlertKey]) -> List["Alert"]:
+    def mget(cls, alert_keys: list[AlertKey]) -> list["Alert"]:
         """
         批量获取告警，优先从Redis快照获取，没有则从ES获取
         :param alert_keys: 告警标识列表
@@ -884,7 +983,9 @@ class Alert:
 
         if is_blocked:
             # 被熔断，返回熔断日志
-            message = _("告警所属策略在当前窗口期（{window} min）内产生的告警数量({current_count})个，已大于QOS阈值({threshold})，当前告警被流控").format(
+            message = _(
+                "告警所属策略在当前窗口期（{window} min）内产生的告警数量({current_count})个，已大于QOS阈值({threshold})，当前告警被流控"
+            ).format(
                 window=qos_threshold["window"] // 60, current_count=current_count, threshold=qos_threshold["threshold"]
             )
         else:
@@ -941,11 +1042,13 @@ class Alert:
         return current_count > threshold["threshold"], current_count
 
     @staticmethod
-    def create_qos_log(alerts: List[str], total_count, qos_actions):
+    def create_qos_log(alerts: list[str], total_count, qos_actions):
         return AlertLog(
             op_type=AlertLog.OpType.ACTION,
             alert_id=alerts,
-            description=_("告警所属策略在当前窗口期（%s min）内产生的处理次数为%s次，已超过QOS阈值(%s)，当前告警的(%s)个处理被抑制")
+            description=_(
+                "告警所属策略在当前窗口期（%s min）内产生的处理次数为%s次，已超过QOS阈值(%s)，当前告警的(%s)个处理被抑制"
+            )
             % (
                 settings.QOS_DROP_ACTION_WINDOW // 60,
                 total_count,
@@ -1033,7 +1136,7 @@ class AlertUIDManager:
 class AlertCache:
     # todo 下面两个可以合并
     @staticmethod
-    def save_alert_to_cache(alerts: List[Alert]):
+    def save_alert_to_cache(alerts: list[Alert]):
         alerts_to_saved = {}
         for alert in alerts:
             current_alert = alerts_to_saved.get(alert.dedupe_md5)
@@ -1061,8 +1164,73 @@ class AlertCache:
         pipeline.execute()
         return update_count, finished_count
 
+    # 仅id一致更新，否则跳过
     @staticmethod
-    def save_alert_snapshot(alerts: List[Alert]):
+    def update_alert_to_cache(alerts: list[Alert]):
+        alerts_to_saved = {}
+        for alert in alerts:
+            current_alert = alerts_to_saved.get(alert.dedupe_md5)
+            if not current_alert or alert.create_time > current_alert.create_time:
+                # 哪些告警需要刷新到缓存呢？
+                # 1. 从未出现过的维度
+                # 2. 维度已经出现过，但告警的创建时间更加新
+                alerts_to_saved[alert.dedupe_md5] = alert
+
+        update_count = 0
+        finished_count = 0
+        skip_count = 0
+
+        # 先获取现有缓存中的告警数据，检查ID是否一致
+        cache_keys = []
+        for alert in alerts_to_saved.values():
+            key = ALERT_DEDUPE_CONTENT_KEY.get_key(strategy_id=alert.strategy_id or 0, dedupe_md5=alert.dedupe_md5)
+            cache_keys.append((key, alert))
+
+        # 批量获取缓存中的数据
+        pipeline_get = ALERT_DEDUPE_CONTENT_KEY.client.pipeline(transaction=False)
+        for key, _value in cache_keys:
+            pipeline_get.get(key)
+        cached_data_list = pipeline_get.execute()
+
+        # 通过 pipeline 批量更新告警，只更新ID一致的告警
+        pipeline = ALERT_DEDUPE_CONTENT_KEY.client.pipeline(transaction=False)
+        for (key, alert), cached_data in zip(cache_keys, cached_data_list):
+            should_update = True
+
+            if cached_data:
+                try:
+                    cached_alert_data = Alert(data=json.loads(cached_data))
+                    cached_alert_id = cached_alert_data.id
+                    if cached_alert_id and cached_alert_id != alert.id:
+                        # 如果缓存中的告警ID与当前告警ID不一致，跳过更新
+                        should_update = False
+                        skip_count += 1
+                except (json.JSONDecodeError, KeyError) as e:
+                    # 如果解析失败，允许更新
+                    logger.warning("load alert failed: invalid json data: %s, origin data: %s", e, cached_data)
+                except Exception as e:
+                    # 其他异常，记录日志但允许更新
+                    logger.warning("load alert failed: %s, origin data: %s", e, cached_data)
+
+            if not should_update:
+                continue
+
+            if alert.is_end():
+                # 如果告警已经结束，不做删除，更新告警内容
+                finished_count += 1
+            else:
+                # 如果告警未结束就更新
+                update_count += 1
+            pipeline.set(key, json.dumps(alert.to_dict()), ALERT_DEDUPE_CONTENT_KEY.ttl)
+
+        pipeline.execute()
+        logger.debug(
+            "update_alert_to_cache: updated=%d, finished=%d, skipped=%d", update_count, finished_count, skip_count
+        )
+        return update_count, finished_count
+
+    @staticmethod
+    def save_alert_snapshot(alerts: list[Alert]):
         if not alerts:
             return 0
 

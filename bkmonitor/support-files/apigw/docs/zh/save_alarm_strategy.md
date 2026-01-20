@@ -3,7 +3,7 @@
 保存告警策略
 
 
-#### 接口参数
+### 请求参数
 | 字段         | 类型      | 必选  | 描述             |
 |:-----------|---------|-----|----------------|
 | actions    | list    | 是   | 处理套餐列表(ActionRelation)   |
@@ -39,6 +39,7 @@
 | options.start_time             | string | 是   |    生效开始时间（格式：00:00:00）     |
 | options.end_time             | string | 是   |    生效结束时间（格式：23:59:59)     |
 | config             | string | 是   |         |
+| config.voice_notice             | string | 否   | 语音通知模式，可选值：parallel(并行，默认值)、serial(串行)  |
 | config.template                   | list   | 是   | 通知模板配置         |
 | config.template.signal  | string | 是   | 触发信号，NOTICE_SIGNAL单选       |
 | config.template.message_tmpl | string | 否   | 通知信息模板       |
@@ -410,7 +411,7 @@ host_set_template
 }
 ```
 
-#### 示例数据
+### 请求参数示例
 
 ```json
 {
@@ -513,6 +514,7 @@ host_set_template
         "config": {
             "interval_notify_mode": "standard",    // 间隔模式
             "notify_interval": 7200,    // 通知间隔
+            "voice_notice": "parallel",  //语音通知模式，可选值：parallel(并行，默认值)、serial(串行，合并通知组用户后通知一次)  |
             "template": [   // 通知模板配置
                 {
                     "signal": "abnormal",   // 触发信号：abnormal-告警触发时，recovered-告警恢复时，closed-告警关闭时
@@ -555,7 +557,7 @@ host_set_template
 
 data返回保存的策略结构，与请求参数一致（示例数据中省略）
 
-#### 示例数据
+### 响应参数示例
 
 ```json
 {

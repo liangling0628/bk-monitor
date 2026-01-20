@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -319,7 +319,7 @@ PROCESS_BIG_LATENCY = Histogram(
 PROCESS_OVER_FLOW = Counter(
     name="bkmonitor_process_overflow",
     documentation="模块处理量级过大",
-    labelnames=("module", "strategy_id", "bk_biz_id", "strategy_name"),
+    labelnames=("module", "strategy_id", "bk_biz_id", "strategy_name", "redis_node"),
 )
 
 DETECT_PROCESS_LATENCY = Histogram(
@@ -1209,13 +1209,32 @@ API_REQUESTS_TOTAL = Counter(
 )
 
 AI_AGENTS_REQUESTS_TOTAL = Counter(
-    name="bkmonitor_ai_agents_requests_total",
+    name="ai_agents_requests_total",
     documentation="AI小鲸服务调用统计",
     labelnames=("agent_code", "resource_name", "status", "username", "command"),
 )
 
+MCP_REQUESTS_TOTAL = Counter(
+    name="bkmonitor_mcp_requests_total",
+    documentation="MCP工具调用统计",
+    labelnames=("tool_name", "bk_biz_id", "username", "status", "permission_action"),
+)
+
+MCP_RESOURCE_REQUESTS_TOTAL = Counter(
+    name="bkmonitor_mcp_resource_requests_total",
+    documentation="MCP Resource调用统计",
+    labelnames=("resource_name", "tool_name", "bk_biz_id", "username", "status", "exception_type", "has_data"),
+)
+
+MCP_RESOURCE_REQUESTS_COST_SECONDS = Histogram(
+    name="bkmonitor_mcp_resource_requests_cost_seconds",
+    documentation="MCP Resource调用耗时统计",
+    labelnames=("resource_name", "tool_name", "bk_biz_id", "username", "status"),
+    buckets=(0.1, 0.5, 1, 3, 5, 10, 30, 60, 300, INF),
+)
+
 AI_AGENTS_REQUESTS_COST_SECONDS = Gauge(
-    name="bkmonitor_ai_agents_requests_cost_seconds",
+    name="ai_agents_requests_cost_seconds",
     documentation="AI小鲸服务调用耗时统计",
     labelnames=("agent_code", "resource_name", "status", "username", "command"),
 )

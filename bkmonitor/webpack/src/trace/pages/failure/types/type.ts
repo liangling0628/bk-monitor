@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -382,21 +382,37 @@ export interface IAnomalyAnalysis {
 }
 
 export interface IContentList {
+  alerts_analysis?: IAnomalyAnalysis[];
   anomaly_analysis?: IAnomalyAnalysis[];
+  events_analysis?: IEventsAnalysis[];
+  logs_analysis?: Record<string, ILogAnalysis[]>;
   suggestion?: string;
   summary?: string;
+  trace_analysis?: ITraceAnalysis[];
 }
-
 export type ICurrentISnapshot = ISnapshot;
 
 export interface IDetail {
-  dimension?: string;
+  alertId: string;
+  dimension?: IDimensionItem[];
+  isModified?: boolean;
   severity: number;
   trigger?: string;
   strategy?: {
     id?: number | string;
     name?: string;
   };
+}
+export interface IDimensionConfig {
+  alert_ids: string[];
+  dimensions?: { [key: string]: string[] };
+}
+
+export interface IDimensionItem {
+  display_key: string;
+  display_value: string;
+  key: string;
+  value: string;
 }
 
 export interface IEdge {
@@ -406,6 +422,7 @@ export interface IEdge {
   target_id: string;
   target_type: string;
 }
+
 export interface IEntityData {
   anomaly_score: number;
   anomaly_type: string;
@@ -423,6 +440,22 @@ export interface IEntityData {
   };
 }
 
+export interface IEventsAnalysis {
+  $index?: number;
+  _sub_count?: number; // 子事件条数
+  _sub_unit?: string; // 子事件标题单位
+  contents?: any; // 事件内容的表格映射value
+  fields?: Record<string, string>; // 事件内容的表格映射label
+  title?: string; // 事件主标题
+  top?: number; // 展示事件条数
+  total?: number; // 事件总条数
+  type?: string; // 事件所属类型
+  unit?: string; // 事件主标题单位
+}
+
+export interface IEventsContentsData {
+  [key: string]: string;
+}
 export interface IFilterSearch {
   aggregate_bys: string[];
   bk_biz_id: number;
@@ -457,6 +490,7 @@ export interface IIncident {
   status_alias: string;
   update_time: number;
 }
+
 export interface IListItem {
   icon?: string;
   key?: string;
@@ -464,16 +498,23 @@ export interface IListItem {
   name?: string;
   render?: () => JSX.Element;
 }
+
+export interface ILogAnalysis {
+  demo_log?: string;
+  log_count?: number;
+  pattern?: string;
+}
+
 export interface IncidentNameTemplate {
   affected_types: [[string, string[]]];
   elements: Array<[string, string] | string>;
   template: string;
 }
-
 export interface IncidentPropagationGraph {
   edges: IEdge[];
   entities: IEntityData[];
 }
+
 export interface ISnapshot {
   alerts: number[];
   bk_biz_id: number[];
@@ -488,6 +529,7 @@ export interface ISnapshot {
   status: string;
   update_time?: any;
 }
+
 export interface ISnapshotContent {
   alerts: number;
   anomaly_time: number;
@@ -567,16 +609,28 @@ export interface IStrategyMapItem {
   strategy_id?: number;
   strategy_name?: string;
 }
-
+export interface ISummaryList {
+  events_analysis?: string;
+  logs_analysis?: string;
+  trace_analysis?: string;
+}
 export interface ITagInfoType {
   bk_biz_id: number;
   bk_biz_name: string;
   isCheck: boolean;
 }
+
+export interface ITraceAnalysis {
+  [key: string]: number | string; // span表格映射key-value
+  log_count: number;
+  pattern: string;
+}
 export interface IUserName {
   id: string;
   name: string;
 }
+
+export type OverflowPopType = 'demo_log' | 'log_pattern' | 'trace_pattern';
 
 interface IncidentRoot {
   rca_trace_info: {

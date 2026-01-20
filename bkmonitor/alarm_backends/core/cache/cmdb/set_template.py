@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -9,57 +9,40 @@ specific language governing permissions and limitations under the License.
 """
 
 import json
-from collections import defaultdict
+from typing import cast
+
+from .base import CMDBCacheManager
 
 
-from alarm_backends.core.cache.cmdb.base import CMDBCacheManager, RefreshByBizMixin
-from core.drf_resource import api
-
-
-class SetTemplateManager(RefreshByBizMixin, CMDBCacheManager):
+class SetTemplateManager(CMDBCacheManager):
     """
     CMDB 集群模板缓存
     """
 
-    type = "set_template"
-    CACHE_KEY = f"{CMDBCacheManager.CACHE_KEY_PREFIX}.cmdb.set_template"
-    SET_TEMPLATE_TO_SETS = f"{CMDBCacheManager.CACHE_KEY_PREFIX}.cmdb.set_template_to_sets"
+    cache_type = "set_template"
 
     @classmethod
-    def key_to_internal_value(cls, set_template_id):
-        return str(set_template_id)
+    def mget(cls, *, bk_tenant_id: str, ids: list[int]) -> dict[int, list[int]]:
+        """
+        批量获取集群模板
+        :param bk_tenant_id: 租户ID
+        :param ids: 集群模板ID列表
+        """
+        if not ids:
+            return {id: [] for id in ids}
+
+        cache_key = cls.get_cache_key(bk_tenant_id)
+        id_list: list[str] = list(str(id) for id in ids)
+        result: list[str | None] = cast(list[str | None], cls.cache.hmget(cache_key, id_list))
+        return {id: json.loads(r) if r else [] for id, r in zip(ids, result)}
 
     @classmethod
-    def key_to_representation(cls, origin_key):
-        return int(origin_key)
-
-    @classmethod
-    def serialize(cls, obj):
-        return json.dumps(obj)
-
-    @classmethod
-    def get(cls, set_template_id):
+    def get(cls, *, bk_tenant_id: str, id: int, **kwargs) -> list[int]:
         """
-        :param set_template_id: 集群模板ID
+        获取单个集群模板
+        :param bk_tenant_id: 租户ID
+        :param id: 集群模板ID
         """
-        return super().get(set_template_id)
-
-    @classmethod
-    def deserialize(cls, string):
-        """
-        反序列化数据
-        """
-        return json.loads(string) if string else []
-
-    @classmethod
-    def refresh_by_biz(cls, bk_biz_id):
-        """
-        按业务ID刷新缓存
-        """
-        sets = api.cmdb.get_set(bk_biz_id=bk_biz_id)
-        set_template_to_set = defaultdict(list)
-
-        for _set in sets:
-            set_template_to_set[str(_set.set_template_id)].append(_set.bk_set_id)
-
-        return set_template_to_set
+        cache_key = cls.get_cache_key(bk_tenant_id)
+        result = cast(str | None, cls.cache.hget(cache_key, str(id)))
+        return json.loads(result) if result else []

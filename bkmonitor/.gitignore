@@ -15,6 +15,9 @@ __pycache__/
 # C extensions
 *.so
 
+.codebuddy
+.docs
+
 # Distribution / packaging
 .Python
 env/
@@ -237,3 +240,9 @@ ai_agent
 
 # Add .tico directory to ignore list
 .tico/
+
+# ai code editor
+CLAUDE.local.md
+.cursorignore
+# spec-kit 规范目录
+.specify/

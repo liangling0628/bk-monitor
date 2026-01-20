@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -11,12 +11,12 @@ specific language governing permissions and limitations under the License.
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict
 from functools import reduce
 from itertools import chain
-from typing import Any
-from collections.abc import Callable
 from re import Pattern
+from typing import Any
 
 import arrow
 from django.conf import settings
@@ -41,7 +41,7 @@ from bkmonitor.models import BCSCluster, MetricListCache
 from bkmonitor.share.api_auth_resource import ApiAuthResource
 from bkmonitor.strategy.new_strategy import get_metric_id
 from bkmonitor.utils.range import load_agg_condition_instance
-from bkmonitor.utils.request import get_request_tenant_id
+from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id
 from bkmonitor.utils.time_tools import (
     hms_string,
     parse_time_compare_abbreviation,
@@ -112,6 +112,7 @@ class TimeCompareProcessor:
                 limit=new_params["limit"],
                 slimit=new_params["slimit"],
                 down_sample_range=params["down_sample_range"],
+                not_time_align=params.get("not_time_align", False),
             )
 
             # 标记时间对比数据
@@ -210,17 +211,24 @@ class AddNullDataProcessor:
         else:
             null_threshold = 2 * interval
 
-        # 起止时间周期对齐
-        start_time = time_interval_align(params["start_time"], interval // 1000) * 1000
-        end_time = time_interval_align(params["end_time"], interval // 1000) * 1000
+        # 根据 not_time_align 参数决定是否进行时间对齐
+        not_time_align = params.get("not_time_align", False)
+        if not_time_align:
+            # 不对齐时间窗口，使用原始时间范围
+            start_time = params["start_time"] * 1000
+            end_time = params["end_time"] * 1000
+        else:
+            # 起止时间周期对齐
+            start_time = time_interval_align(params["start_time"], interval // 1000) * 1000
+            end_time = time_interval_align(params["end_time"], interval // 1000) * 1000
 
-        # 日志、事件场景在部分展示场景下不进行时间对齐，避免 drop 掉不完整周期的数据点，从而保证数据统计准确性。
-        time_alignment: bool = params.get("time_alignment", True)
-        if not time_alignment:
-            if start_time > params["start_time"] * 1000:
-                start_time -= interval
-            if end_time < params["end_time"] * 1000:
-                end_time += interval
+            # 日志、事件场景在部分展示场景下不进行时间对齐，避免 drop 掉不完整周期的数据点，从而保证数据统计准确性。
+            time_alignment: bool = params.get("time_alignment", True)
+            if not time_alignment:
+                if start_time > params["start_time"] * 1000:
+                    start_time -= interval
+                if end_time < params["end_time"] * 1000:
+                    end_time += interval
 
         for row in data:
             time_to_value = defaultdict(lambda: None)
@@ -298,6 +306,7 @@ class RankProcessor:
                 end_time=params["end_time"] * 1000,
                 limit=1000,
                 slimit=params["slimit"],
+                not_time_align=params.get("not_time_align", False),
             )
 
             metric_field = data_source.metrics[0].get("alias") or data_source.metrics[0]["field"]
@@ -567,6 +576,7 @@ class UnifyQueryRawResource(ApiAuthResource):
         query_method = serializers.CharField(label="查询方法", required=False, default="query_data")
         unit = serializers.CharField(label="单位", default="", allow_blank=True)
         with_metric = serializers.BooleanField(label="是否返回metric信息", default=True)
+        not_time_align = serializers.BooleanField(label="是否不对齐时间窗口", required=False, default=False)
 
         @classmethod
         def to_str(cls, value):
@@ -646,9 +656,11 @@ class UnifyQueryRawResource(ApiAuthResource):
             return []
 
         metrics = MetricListCache.objects.filter(
-            reduce(lambda x, y: x | y, metric_queries), bk_tenant_id=get_request_tenant_id()
+            reduce(lambda x, y: x | y, metric_queries),
+            bk_tenant_id=bk_biz_id_to_bk_tenant_id(params["bk_biz_id"]),
+            bk_biz_id__in=[params["bk_biz_id"], 0],
         )
-        metric_infos = cls.transfer_metric(metrics=metrics, bk_biz_id=params["bk_biz_id"])
+        metric_infos = cls.transfer_metric(bk_biz_id=params["bk_biz_id"], metrics=metrics)
         return metric_infos
 
     @staticmethod
@@ -760,6 +772,7 @@ class UnifyQueryRawResource(ApiAuthResource):
             limit=params["limit"],
             slimit=params["slimit"],
             down_sample_range=params["down_sample_range"],
+            not_time_align=params.get("not_time_align", False),
         )
 
         # 去掉排序函数topk
@@ -879,6 +892,7 @@ class UnifyQueryRawResource(ApiAuthResource):
             slimit=params["slimit"],
             down_sample_range=params["down_sample_range"],
             time_alignment=time_alignment,
+            not_time_align=params.get("not_time_align", False),
         )
 
         # 如果存在数据后过滤条件，则进行过滤
@@ -1026,7 +1040,8 @@ class GraphUnifyQueryResource(UnifyQueryRawResource):
 
         return result
 
-    def translate_dimensions(self, params: dict, data: list):
+    @classmethod
+    def translate_dimensions(cls, params: dict, data: list):
         """
         维度翻译
         """
@@ -1314,6 +1329,7 @@ class GraphPromqlQueryResource(Resource):
         series = HeatMapProcessor.process_formatted_data(params, series)
         series = QueryTypeProcessor.process_formatted_data(params, series)
         series = AddNullDataProcessor.process_formatted_data(params, series)
+        series = GraphUnifyQueryResource.translate_dimensions(params, series)
         return {"metrics": [], "series": series}
 
 
@@ -1355,6 +1371,18 @@ class DimensionPromqlQueryResource(Resource):
         return result
 
     @classmethod
+    def _escape_label(cls, label: str | None) -> str:
+        """转义 label 名称。
+
+        背景：Prometheus 的 label 不支持点号（.），但在非时序场景下 label 里会包含点号。
+        解决：在查询 unify-query 之前，将 __bk_46__ 还原回点号。
+
+        :param label: 待转义的 label 名称，可能包含 __bk_46__ 编码。
+        :return: 转义后的 label 名称。
+        """
+        return label.replace("__bk_46__", ".") if label else ""
+
+    @classmethod
     def get_label_values(cls, bk_biz_id: int, promql: str, start_time: str, end_time: str) -> list[str]:
         """
         查询label_values函数
@@ -1363,17 +1391,13 @@ class DimensionPromqlQueryResource(Resource):
 
         match = cls.re_label_value.match(promql)
         promql = match.group(2)
-        label = match.group(4)
+        label = cls._escape_label(match.group(4))
         try:
             match_promql = [promql]
             if cookies_filter:
                 match_promql.append(cookies_filter)
 
-            params = {
-                "bk_biz_ids": [bk_biz_id],
-                "match": match_promql,
-                "label": label,
-            }
+            params = {"bk_biz_ids": [bk_biz_id], "match": match_promql, "label": label}
 
             if start_time and end_time:
                 params["start"] = start_time

@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -477,7 +477,20 @@ class CompositeProcessor:
         public_dimensions = self.cal_public_dimensions(strategy)
 
         # 从事件中提取出所需的维度的KV结构
-        dimension_values = {key: self.event.get_field(key) for key in public_dimensions}
+        # 优先从origin_alarm.data.dimensions获取（适配拨测等场景），再从event字段或tags中获取
+        origin_dimensions = self.event.extra_info.get("origin_alarm", {}).get("data", {}).get("dimensions", {})
+        dimension_values = {}
+        for key in public_dimensions:
+            # 1. 优先从origin_alarm.data.dimensions获取（这里的key不带tags.前缀）
+            if key in origin_dimensions:
+                value = origin_dimensions[key]
+            else:
+                # 2. 尝试从顶层字段获取（标准字段如ip, bk_host_id等）
+                value = self.event.get_field(key)
+                if value is None:
+                    # 3. 尝试从tags中获取（自定义维度，需要添加tags.前缀）
+                    value = self.event.get_field(f"tags.{key}")
+            dimension_values[key] = value
 
         # 计算维度MD5
         dimension_hash = count_md5(dimension_values)
@@ -509,12 +522,23 @@ class CompositeProcessor:
                 )
 
                 # 尝试翻译一波维度
-                dimension_translations = {d["key"]: d for d in self.alert.dimensions}
+                # 维度翻译字典，需要同时支持带tags.前缀和不带前缀的key匹配
+                dimension_translations = {}
+                for d in self.alert.dimensions:
+                    dimension_key = d["key"]
+                    dimension_translations[dimension_key] = d
+                    # 如果key带有tags.前缀，也添加不带前缀的映射
+                    if dimension_key.startswith("tags."):
+                        dimension_translations[dimension_key[5:]] = d
+
                 dimensions = []
                 for key, value in dimension_values.items():
-                    if key in dimension_translations and dimension_translations[key]["value"] == value:
-                        display_key = dimension_translations[key].get("display_key", key)
-                        display_value = dimension_translations[key].get("display_value", value)
+                    # 尝试匹配维度翻译：先尝试不带前缀的key，再尝试带tags.前缀的key
+                    translation = dimension_translations.get(key) or dimension_translations.get(f"tags.{key}")
+
+                    if translation and translation["value"] == value:
+                        display_key = translation.get("display_key", key)
+                        display_value = translation.get("display_value", value)
                     else:
                         display_key = key
                         display_value = value
@@ -615,7 +639,6 @@ class CompositeProcessor:
 
                 if cached_result and not self.alert_status == EventStatus.ABNORMAL:
                     # 当前有异常，但告警已经是非异常状态，需要发信号
-                    # 注意：无数据告警不需要发送恢复和关闭信号
                     if self.alert_status == EventStatus.RECOVERED:
                         signal = ActionSignal.RECOVERED
                     else:

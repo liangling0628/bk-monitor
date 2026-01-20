@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -25,6 +25,8 @@
  */
 import { Component, Emit, Prop, Watch } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
+
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 
 import HistoryDialog from '../../components/history-dialog/history-dialog';
 
@@ -116,9 +118,9 @@ export default class ClusterDetails extends tsc<IProps> {
       ];
       this.historyList = [
         { label: this.$t('创建人'), value: this.data.creator || '--' },
-        { label: this.$t('创建时间'), value: this.data.create_time || '--' },
+        { label: this.$t('创建时间'), value: formatWithTimezone(this.data.create_time) || '--' },
         { label: this.$t('最近更新人'), value: this.data.last_modify_user || '--' },
-        { label: this.$t('修改时间'), value: this.data.last_modify_time || '--' },
+        { label: this.$t('修改时间'), value: formatWithTimezone(this.data.last_modify_time) || '--' },
       ];
     }
   }

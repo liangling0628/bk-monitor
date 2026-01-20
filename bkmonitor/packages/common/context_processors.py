@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -23,7 +23,7 @@ from bkmonitor.utils.common_utils import fetch_biz_id_from_request, safe_int
 from bkmonitor.utils.request import get_request_tenant_id
 from common.log import logger
 from constants.common import DEFAULT_TENANT_ID
-from core.drf_resource import resource
+from core.drf_resource import api, resource
 from core.errors.api import BKAPIError
 
 
@@ -102,6 +102,16 @@ def json_formatter(context: dict[str, Any]):
 
 
 def get_core_context(request):
+    username = request.user.username
+
+    # 获取用户时区
+    user_time_zone = ""
+    if username:
+        try:
+            user_time_zone = api.bk_login.get_user_info(id=username).get("time_zone", "")
+        except Exception as e:
+            logger.error(f"Get user {username} time zone failed: {e}")
+
     return {
         # healthz 自监控引用
         "PLATFORM": Platform,
@@ -116,6 +126,7 @@ def get_core_context(request):
         "ENABLE_APM_PROFILING": "true" if settings.APM_PROFILING_ENABLED else "false",
         "BK_JOB_URL": settings.JOB_URL,
         "BK_CC_URL": settings.BK_CC_URL,
+        "BK_CI_URL": settings.BK_CI_URL,
         "BK_BCS_URL": settings.BK_BCS_HOST,
         # 蓝鲸平台URL
         "BK_URL": settings.BK_URL,
@@ -125,6 +136,8 @@ def get_core_context(request):
         "CE_URL": settings.CE_URL,
         "BKLOGSEARCH_HOST": settings.BKLOGSEARCH_HOST,
         "BK_NODEMAN_HOST": settings.BK_NODEMAN_HOST,
+        # 用户管理站点（用于个人中心跳转等）
+        "BK_USER_SITE_URL": settings.BK_USER_SITE_URL,
         "TAM_ID": settings.TAM_ID,
         # 用于切换中英文用户管理 cookie
         "BK_COMPONENT_API_URL": settings.BK_COMPONENT_API_URL_FRONTEND,
@@ -136,6 +149,7 @@ def get_core_context(request):
         # 国际化
         "gettext": _,
         "_": _,
+        "USER_TIME_ZONE": user_time_zone,
         "LANGUAGE_CODE": request.LANGUAGE_CODE,
         "LANGUAGES": settings.LANGUAGES,
         # 页面title

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -27,8 +27,8 @@
 import { Component, Emit, Prop, Ref, Watch } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
 
-import dayjs from 'dayjs';
 import { checkAllowedByActionIds } from 'monitor-api/modules/iam';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { random } from 'monitor-common/utils/utils';
 import authorityStore from 'monitor-pc/store/modules/authority';
 import { transformLogUrlQuery } from 'monitor-pc/utils';
@@ -407,7 +407,7 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
           disabled: false,
           checked: false,
           props: {
-            minWidth: 150,
+            minWidth: 180,
             formatter: (row: IEventItem) => this.formatterTime(row.create_time),
             sortable: 'custom',
           },
@@ -429,7 +429,7 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
           disabled: false,
           checked: false,
           props: {
-            minWidth: 150,
+            minWidth: 180,
             formatter: (row: IEventItem) => this.formatterTime(row.end_time),
             sortable: 'custom',
           },
@@ -440,7 +440,7 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
           disabled: false,
           checked: false,
           props: {
-            minWidth: 150,
+            minWidth: 180,
             formatter: (row: IEventItem) => this.formatterTime(row.latest_time),
             sortable: 'custom',
           },
@@ -451,7 +451,7 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
           disabled: false,
           checked: false,
           props: {
-            minWidth: 150,
+            minWidth: 180,
             formatter: (row: IEventItem) => this.formatterTime(row.first_anomaly_time),
             sortable: 'custom',
           },
@@ -834,7 +834,8 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
    * @param {string} bizId
    * @return {*}
    */
-  handleGotoMore(extendInfo: Record<string, any>, bizId: string) {
+  handleGotoMore(row: IEventItem) {
+    const { extend_info: extendInfo, bk_biz_id: bizId } = row;
     const origin = process.env.NODE_ENV === 'development' ? process.env.proxyUrl : location.origin;
     switch (extendInfo.type) {
       // 监控主机监控详情
@@ -864,11 +865,16 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
       }
       // 日志检索
       case 'log_search': {
+        const getTime = (time: number) => {
+          return +time.toString().padEnd(13, '0');
+        };
         const retrieveParams = {
           // 检索参数
           bizId,
           keyword: extendInfo.query_string, // 搜索关键字
           addition: extendInfo.agg_condition || [],
+          start_time: row.latest_time ? getTime(row.latest_time) - 10 * 60 * 1000 : undefined,
+          end_time: row.latest_time ? getTime(row.latest_time) + 10 * 60 * 1000 : undefined,
         };
         const queryStr = transformLogUrlQuery(retrieveParams);
         const url = `${this.$store.getters.bkLogSearchUrl}#/retrieve/${extendInfo.index_set_id}${queryStr}`;
@@ -918,7 +924,8 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
    * @param {string} bizId
    * @return {*}
    */
-  getExtendInfoColumn(extendInfo: Record<string, string>, bizId: string) {
+  getExtendInfoColumn(row: IEventItem) {
+    const { extend_info: extendInfo } = row;
     switch (extendInfo.type) {
       case 'host':
         return [
@@ -933,7 +940,7 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
             <span class='extend-content-message'>{`${this.$t('节点信息:')}${extendInfo.topo_info || '--'}`}</span>
             <span
               class='extend-content-link link-more'
-              onClick={() => this.handleGotoMore(extendInfo, bizId)}
+              onClick={() => this.handleGotoMore(row)}
             >
               {this.$t('更多')}
             </span>
@@ -945,7 +952,7 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
         return (
           <span
             class='extend-content-link'
-            onClick={() => this.handleGotoMore(extendInfo, bizId)}
+            onClick={() => this.handleGotoMore(row)}
           >
             {this.extendInfoMap[extendInfo.type] || '--'}
           </span>
@@ -979,8 +986,8 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
   formatterTime(time: number | string): string {
     if (!time) return '--';
     if (typeof time !== 'number') return time;
-    if (time.toString().length < 13) return dayjs.tz(time * 1000).format('YYYY-MM-DD HH:mm:ss');
-    return dayjs.tz(time).format('YYYY-MM-DD HH:mm:ss');
+    if (time.toString().length < 13) return formatWithTimezone(time * 1000) as string;
+    return formatWithTimezone(time) as string;
   }
 
   handleDescEnter(e: MouseEvent, dimensions, description) {
@@ -998,7 +1005,7 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
     );
   }
   handleOverflowEnter(e: MouseEvent) {
-    // @ts-ignore
+    // @ts-expect-error
     const list = Array.from(e?.currentTarget?.childNodes || []).map(spanDom => spanDom?.textContent);
     this.handlePopoverShow(e, list.join('、 '));
   }
@@ -1322,13 +1329,13 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
                 prop={column.id}
                 {...{ props: column.props }}
                 scopedSlots={{
-                  default: ({ row: { extend_info: info, bk_biz_id: bizId } }: { row: IEventItem }) => (
+                  default: ({ row }: { row: IEventItem }) => (
                     <div
                       class='extend-column'
-                      onMouseenter={e => this.handleExtendInfoEnter(e, info)}
+                      onMouseenter={e => this.handleExtendInfoEnter(e, row.extend_info)}
                       onMouseleave={this.handlePopoverHide}
                     >
-                      {info?.type ? this.getExtendInfoColumn(info, bizId.toString()) : '--'}
+                      {row.extend_info?.type ? this.getExtendInfoColumn(row) : '--'}
                     </div>
                   ),
                 }}
@@ -1501,8 +1508,12 @@ export default class EventTable extends tsc<IEventTableProps, IEventTableEvent> 
           on-page-change={this.handlePageChange}
           on-page-limit-change={this.handlePageLimitChange}
           on-row-click={this.tableClickCurrentInstance.tableRowClick()}
-          on-row-mouse-enter={index => (this.hoverRowIndex = index)}
-          on-row-mouse-leave={() => (this.hoverRowIndex = -1)}
+          on-row-mouse-enter={index => {
+            this.hoverRowIndex = index;
+          }}
+          on-row-mouse-leave={() => {
+            this.hoverRowIndex = -1;
+          }}
           on-selection-change={this.handleSelectChange}
           on-sort-change={this.handleSortChange}
         >

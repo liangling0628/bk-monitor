@@ -33,13 +33,13 @@
   import { updateTimezone } from '@/language/dayjs';
   import { ConditionOperator } from '@/store/condition-operator';
   import RouteUrlResolver, { RetrieveUrlResolver } from '@/store/url-resolver';
-  import { isEqual } from 'lodash';
+  import { isEqual } from 'lodash-es';
   import { useRoute, useRouter } from 'vue-router/composables';
 
   import useResizeObserve from '../../../hooks/use-resize-observe';
   import useScroll from '../../../hooks/use-scroll';
   import SelectIndexSet from '../condition-comp/select-index-set.tsx';
-  import { getInputQueryIpSelectItem } from '../search-bar/const.common';
+  import { getInputQueryIpSelectItem } from '../search-bar/utils/const.common';
   import SearchBar from '../search-bar/index.vue';
   import QueryHistory from '../sub-bar/query-history.vue';
   import SearchResultPanel from '../search-result-panel/index.vue';

@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -52,6 +52,8 @@ from fta_web.alert.handlers.incident import (
 from fta_web.alert.resources import BaseTopNResource
 from fta_web.alert.serializers import AlertSearchSerializer
 from fta_web.models.alert import SearchHistory, SearchType
+from monitor_web.incident.events.resources import IncidentEventsDetailResource, IncidentEventsSearchResource  # noqa
+from monitor_web.incident.metrics.resources import IncidentMetricsSearchResource  # noqa
 from monitor_web.incident.serializers import IncidentSearchSerializer
 
 
@@ -314,7 +316,7 @@ class IncidentBaseResource(Resource):
         """
         root_entity_id = None
         now_entities = {}
-        for entity_config in snapshot_content["incident_propagation_graph"]["entities"]:
+        for entity_config in snapshot_content.get("incident_propagation_graph", {}).get("entities", []):
             if entity_config["is_root"]:
                 root_entity_id = entity_config["entity_id"]
             now_entities[entity_config["entity_id"]] = entity_config
@@ -322,7 +324,7 @@ class IncidentBaseResource(Resource):
         new_edges = []
         new_entities = {}
         new_rank_set = set()
-        for edge_config in snapshot_content["incident_propagation_graph"]["edges"]:
+        for edge_config in snapshot_content.get("incident_propagation_graph", {}).get("edges", []):
             if edge_config["source_id"] != root_entity_id and edge_config["target_id"] != root_entity_id:
                 continue
 
@@ -351,6 +353,8 @@ class IncidentBaseResource(Resource):
 
         snapshot_content["product_hierarchy_category"] = new_categories
         snapshot_content["product_hierarchy_rank"] = new_ranks
+        if "incident_propagation_graph" not in snapshot_content:
+            snapshot_content["incident_propagation_graph"] = {}
         snapshot_content["incident_propagation_graph"]["entities"] = list(new_entities.values())
         snapshot_content["incident_propagation_graph"]["edges"] = new_edges
         snapshot_content["incident_alerts"] = new_incident_alerts
@@ -401,6 +405,7 @@ class ExportIncidentResource(Resource):
     """
 
     class RequestSerializer(IncidentSearchSerializer):
+        bk_biz_id = serializers.IntegerField(label="业务ID", required=True)
         level = serializers.ListField(required=False, label="故障级别", default=[])
         assignee = serializers.ListField(required=False, label="故障负责人", default=[])
         handler = serializers.ListField(required=False, label="故障处理人", default=[])
@@ -408,7 +413,7 @@ class ExportIncidentResource(Resource):
     def perform_request(self, validated_request_data):
         handler = IncidentQueryHandler(**validated_request_data)
         incidents = handler.export()
-        return resource.export_import.export_package(list_data=incidents)
+        return resource.export_import.export_package(list_data=incidents, bk_biz_id=validated_request_data["bk_biz_id"])
 
 
 class IncidentOverviewResource(IncidentBaseResource):
@@ -548,6 +553,13 @@ class IncidentTopologyResource(IncidentBaseResource):
             )
             incident_snapshots = sorted(incident_snapshots, key=lambda x: x["create_time"])
 
+        # 过滤不需要的snapshots
+        incident_snapshots = [
+            snapshot
+            for snapshot in incident_snapshots
+            if all([snapshot.fpp_snapshot_id != "fpp:None", not snapshot.fpp_snapshot_id.endswith(":llm_summary")])
+        ]
+
         # 根据实体加入的时间生成实体ID到时间的映射
         entities_orders = self.generate_entities_orders(incident_snapshots)
 
@@ -602,6 +614,8 @@ class IncidentTopologyResource(IncidentBaseResource):
     def generate_entities_orders(self, incident_snapshots: list[IncidentSnapshotDocument]) -> dict:
         entities_orders = {}
         for incident_snapshot in incident_snapshots:
+            if "incident_propagation_graph" not in incident_snapshot.content:
+                continue
             for entity in incident_snapshot.content["incident_propagation_graph"]["entities"]:
                 if entity["entity_id"] not in entities_orders:
                     entities_orders[entity["entity_id"]] = incident_snapshot.create_time
@@ -757,7 +771,7 @@ class IncidentTopologyMenuResource(IncidentBaseResource):
         default_aggregated_config = {}
         for menu in topology_menu:
             default_aggregated_config[menu["entity_type"]] = [
-                item["aggregate_key"] for item in menu["aggregate_bys"] if not item["is_anomaly"]
+                item["aggregate_key"] for item in menu["aggregate_bys"] if item["aggregate_key"]
             ]
 
         return {
@@ -819,7 +833,7 @@ class IncidentTopologyMenuResource(IncidentBaseResource):
 
             aggregate_keys = [{"count": 0, "aggregate_key": key, "is_anomaly": False} for key in list(neighbors)]
             if has_anomaly:
-                aggregate_keys.append({"count": 0, "aggregate_key": None, "is_anomaly": True})
+                aggregate_keys.append({"count": 0, "aggregate_key": entity_type, "is_anomaly": True})
 
             if len(aggregate_keys) > 0:
                 menu_data[entity_type] = {
@@ -1289,6 +1303,9 @@ class IncidentAlertListResource(IncidentBaseResource):
         snapshot = IncidentSnapshot(incident.snapshot.content.to_dict())
         alerts = self.get_snapshot_alerts(snapshot, **validated_request_data)
 
+        # 获取故障的当前版本ID
+        incident_version_id = incident.extra_info.to_dict().get("version_id") if incident.extra_info else None
+
         incident_alerts = resource.commons.get_label()
         for category in incident_alerts:
             category["alerts"] = []
@@ -1302,6 +1319,11 @@ class IncidentAlertListResource(IncidentBaseResource):
                 if alert_entity
                 else False
             )
+            # 使用 extra_info 中的 version_id 判断告警是否与当前故障更新是同一批次
+            alert_version_id = (
+                alert.get("extra_info", {}).get("incident_version_id") if alert.get("extra_info") else None
+            )
+            alert["is_current_primary"] = incident_version_id is not None and alert_version_id == incident_version_id
             for category in incident_alerts:
                 if alert["category"] in category["sub_categories"]:
                     category["alerts"].append(alert)
@@ -1332,6 +1354,9 @@ class IncidentAlertViewResource(IncidentBaseResource):
         snapshot = IncidentSnapshot(incident.snapshot.content.to_dict())
         alerts = self.get_snapshot_alerts(snapshot, **validated_request_data)
 
+        # 获取故障的当前版本ID
+        incident_version_id = incident.extra_info.to_dict().get("version_id") if incident.extra_info else None
+
         incident_alerts = resource.commons.get_label()
         for category in incident_alerts:
             category["alerts"] = []
@@ -1345,6 +1370,11 @@ class IncidentAlertViewResource(IncidentBaseResource):
                 if alert_entity
                 else False
             )
+            # 使用 extra_info 中的 version_id 判断告警是否与当前故障更新是同一批次
+            alert_version_id = (
+                alert.get("extra_info", {}).get("incident_version_id") if alert.get("extra_info") else None
+            )
+            alert["is_current_primary"] = incident_version_id is not None and alert_version_id == incident_version_id
             alert_doc = AlertDocument(**alert)
             # 检索得到的alert详情不包含event信息，只有event_id，这里默认当前告警时间的extra_info跟event相同
             alert_doc.event.extra_info = alert_doc.extra_info
@@ -1407,7 +1437,7 @@ class AlertIncidentDetailResource(IncidentDetailResource):
 
 INCIDENT_ANALYSIS_MAPPING_CONFIG = {
     "anomaly_analysis": {"content_key": "dimension_drill_result", "display_panel_name": "anomaly_analysis"},
-    "alerts_analysis": {"content_key": "dimension_drill", "display_panel_name": "anomaly_analysis"},
+    "alerts_analysis": {"content_key": "dimension_drill", "display_panel_name": "alerts_analysis"},
 }
 
 
@@ -1421,7 +1451,7 @@ class IncidentResultsResource(IncidentBaseResource):
         if not content:
             return False
         if isinstance(content, dict):
-            return all([sub_content for sub_content in content.values()])
+            return all([sub_content for sub_content in content.values()]) and content.get("is_show", True)
         return True
 
     def perform_request(self, validated_request_data: dict) -> dict:

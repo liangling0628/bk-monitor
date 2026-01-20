@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -31,6 +31,7 @@ import { getNoticeWay } from 'monitor-api/modules/notice_group';
 import { frontendShieldDetail } from 'monitor-api/modules/shield';
 import { getStrategyV2 } from 'monitor-api/modules/strategies';
 import { random } from 'monitor-common/utils';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 
@@ -112,6 +113,10 @@ export default defineComponent({
     },
     id: {
       type: [Number, String],
+      default: '',
+    },
+    failureTime: {
+      type: String,
       default: '',
     },
     onShowChange: {
@@ -381,42 +386,45 @@ export default defineComponent({
                     {this.statusColorMap[this.detail.status]?.text}
                   </span>
                 </FormItem>
+                {this.failureTime && (
+                  <FormItem label={this.t('屏蔽失效时间')}>
+                    <span class='detail-text'>{formatWithTimezone(this.failureTime)}</span>
+                  </FormItem>
+                )}
                 {(() => {
                   if (this.detail.category === 'scope') {
                     return (
-                      <>
-                        <FormItem
-                          class='content-flex-1'
-                          label={this.t('屏蔽范围')}
-                        >
-                          <div class='scope-content'>
-                            {this.scopeData.type !== 'biz' ? (
-                              <div>
-                                <PrimaryTable
-                                  columns={[
-                                    {
-                                      colKey: 'name',
-                                      title: this.scopeLabelMap?.[this.scopeData?.type] || '',
-                                      ellipsis: {
-                                        popperOptions: {
-                                          strategy: 'fixed',
-                                        },
+                      <FormItem
+                        class='content-flex-1'
+                        label={this.t('屏蔽范围')}
+                      >
+                        <div class='scope-content'>
+                          {this.scopeData.type !== 'biz' ? (
+                            <div>
+                              <PrimaryTable
+                                columns={[
+                                  {
+                                    colKey: 'name',
+                                    title: this.scopeLabelMap?.[this.scopeData?.type] || '',
+                                    ellipsis: {
+                                      popperOptions: {
+                                        strategy: 'fixed',
                                       },
                                     },
-                                  ]}
-                                  bordered={true}
-                                  data={this.scopeData.tableData}
-                                  maxHeight={450}
-                                  resizable={true}
-                                  rowKey='name'
-                                />
-                              </div>
-                            ) : (
-                              <span>{this.scopeData.biz}</span>
-                            )}
-                          </div>
-                        </FormItem>
-                      </>
+                                  },
+                                ]}
+                                bordered={true}
+                                data={this.scopeData.tableData}
+                                maxHeight={450}
+                                resizable={true}
+                                rowKey='name'
+                              />
+                            </div>
+                          ) : (
+                            <span>{this.scopeData.biz}</span>
+                          )}
+                        </div>
+                      </FormItem>
                     );
                   }
                   if (this.detail.category === 'strategy') {
@@ -549,13 +557,15 @@ export default defineComponent({
                 <FormItem label={this.t('时间范围')}>
                   {(() => {
                     if (this.detail.cycleConfig.type === 1) {
-                      return <span class='detail-text'>{`${this.detail.beginTime} ~ ${this.detail.endTime}`}</span>;
+                      return (
+                        <span class='detail-text'>{`${formatWithTimezone(this.detail.beginTime)} ~ ${formatWithTimezone(this.detail.endTime)}`}</span>
+                      );
                     }
                     if (this.detail.cycleConfig.type === 2) {
                       return (
                         <span class='detail-text'>
                           {this.t('每天的')}&nbsp;
-                          <span class='item-highlight'>{`${this.detail.beginTime} ~ ${this.detail.endTime}`}</span>
+                          <span class='item-highlight'>{`${formatWithTimezone(this.detail.beginTime)} ~ ${formatWithTimezone(this.detail.endTime)}`}</span>
                           &nbsp;
                           {this.t('进行告警屏蔽')}
                         </span>

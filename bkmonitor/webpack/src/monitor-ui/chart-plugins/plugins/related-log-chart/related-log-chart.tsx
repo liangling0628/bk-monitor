@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -355,7 +355,7 @@ class RelatedLogChart extends CommonSimpleChart {
                           padding: [8, 8, 8, 8],
                           transitionDuration: 0,
                           formatter: params => {
-                            const time = dayjs(params[0].value[0]).format('YYYY-MM-DD HH:mm:ss');
+                            const time = dayjs(params[0].value[0]).format('YYYY-MM-DD HH:mm:ssZZ');
                             const value = params[0].value[1];
                             return `
                     <div class="time-text">${time}</div>
@@ -506,9 +506,7 @@ class RelatedLogChart extends CommonSimpleChart {
     // const hash = `#/apm/service-config?app_name=${appName}&service_name=${serviceName}`;
     // const url = location.href.replace(location.hash, hash);
     // window.open(url, '_blank');
-    const url = `${window.bk_log_search_url}#/manage/log-collection/collection-item?bizId=${
-      this.bkBizId || (this.relatedBkBizId === -1 ? window.cc_biz_id : this.relatedBkBizId)
-    }`;
+    const url = `${window.bk_log_search_url}?bizId=${this.bkBizId || (this.relatedBkBizId === -1 ? window.cc_biz_id : this.relatedBkBizId)}#/manage/log-collection/collection-item`;
     window.open(url);
   }
   /** 选择索引集 */

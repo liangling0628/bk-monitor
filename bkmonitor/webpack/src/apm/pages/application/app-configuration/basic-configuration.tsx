@@ -3,7 +3,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -39,6 +39,7 @@ import {
   stop,
 } from 'monitor-api/modules/apm_meta';
 import { getFieldOptionValues } from 'monitor-api/modules/apm_trace';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { deepClone, typeTools } from 'monitor-common/utils/utils';
 import ChangeRcord from 'monitor-pc/components/change-record/change-record';
 // import CycleInput from '../../../components/cycle-input/cycle-input';
@@ -476,11 +477,22 @@ export default class BasicInfo extends tsc<IProps> {
     this.showInstanceSelector = !show;
     if (show) {
       if (!this.logAsciiList.length && this.isShowLog2TracesFormItem) this.fetchEncodingList();
-      const { app_alias: appAlias, description, plugin_config, application_sampler_config } = this.appInfo;
+      const {
+        app_alias: appAlias,
+        description,
+        plugin_config,
+        application_sampler_config,
+        is_enabled_tail_sampling,
+      } = this.appInfo;
       const apdexConfig = this.appInfo.application_apdex_config || {};
-      const samplerConfig = Object.assign({}, application_sampler_config, {
-        sampler_percentage: application_sampler_config.sampler_percentage || 0,
-      });
+      let samplerConfig = {};
+      // 如果is_enabled_tail_sampling关闭，不设置sampler_type=tail的相关配置
+      if (is_enabled_tail_sampling || application_sampler_config.sampler_type !== 'tail') {
+        samplerConfig = Object.assign({}, application_sampler_config, {
+          sampler_percentage: application_sampler_config.sampler_percentage || 0,
+        });
+      }
+
       Object.assign(this.formData, apdexConfig, samplerConfig, {
         app_alias: appAlias,
         description,
@@ -610,7 +622,7 @@ export default class BasicInfo extends tsc<IProps> {
 
     if (this.isShowLog2TracesFormItem) {
       plugin_config.bk_data_id = this.appInfo.plugin_config.bk_data_id;
-      // @ts-ignore
+      // @ts-expect-error
       params.plugin_config = plugin_config;
     }
     return params;
@@ -757,6 +769,10 @@ export default class BasicInfo extends tsc<IProps> {
   async getSamplingOptions() {
     await samplingOptions().then(data => {
       this.samplingTypeList = this.samplingTypeList.filter(item => (data?.sampler_types || []).includes(item.id));
+      // is_enabled_tail_sampling关闭 则不显示尾部采样的下拉选项
+      if (!this.appInfo.is_enabled_tail_sampling) {
+        this.samplingTypeList = this.samplingTypeList.filter(item => item.id !== 'tail');
+      }
       this.samplingRuleOptions = (data?.tail_sampling_options || []).map(item => {
         return {
           id: item.key,
@@ -1226,7 +1242,7 @@ export default class BasicInfo extends tsc<IProps> {
                   formType='input'
                   label={this.$t('创建时间')}
                   showEditable={false}
-                  value={this.appInfo.create_time}
+                  value={formatWithTimezone(this.appInfo.create_time)}
                 />
                 <EditableFormItem
                   authority={this.authority.MANAGE_AUTH}
@@ -2217,7 +2233,9 @@ export default class BasicInfo extends tsc<IProps> {
           <div
             class='history-btn'
             v-bk-tooltips={{ content: this.$t('变更记录'), allowHTML: false }}
-            onClick={() => (this.record.show = true)}
+            onClick={() => {
+              this.record.show = true;
+            }}
           >
             <i class='icon-monitor icon-lishijilu' />
           </div>
@@ -2257,7 +2275,9 @@ export default class BasicInfo extends tsc<IProps> {
         <ChangeRcord
           recordData={this.record.data}
           show={this.record.show}
-          onUpdateShow={v => (this.record.show = v)}
+          onUpdateShow={v => {
+            this.record.show = v;
+          }}
         />
 
         {this.isShowLog2TracesFormItem && (
@@ -2267,7 +2287,9 @@ export default class BasicInfo extends tsc<IProps> {
             objectType={this.formData.plugin_config.target_object_type}
             showDialog={this.selectorDialog.isShow}
             onChange={this.handleSelectorChange}
-            onCloseDialog={v => (this.selectorDialog.isShow = v)}
+            onCloseDialog={v => {
+              this.selectorDialog.isShow = v;
+            }}
           />
         )}
 

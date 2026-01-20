@@ -3,14 +3,14 @@
 批量更新策略局部配置
 
 
-#### 接口参数
+### 请求参数
 | 字段        | 类型   | 必选  | 描述     |
 |:----------|------|-----|--------|
 | edit_data | dict | 是   | 待修改数据  |
 | ids       | int  | 是   | 策略ID列表 |
 | bk_biz_id | int  | 是   | 业务ID   |
 
-####edit_data
+#### edit_data
 | 字段                  | 类型      | 描述    |
 |:--------------------|---------|-------|
 | is_enabled          | boolean | 启用状态  |
@@ -46,6 +46,7 @@
 | options.start_time             | string | 是   |    生效开始时间（格式：00:00:00）     |
 | options.end_time             | string | 是   |    生效结束时间（格式：23:59:59)     |
 | config             | string | 是   |         |
+| config.voice_notice             | string | 否   | 语音通知模式，可选值：parallel(并行，默认值)、serial(串行)  |
 | config.template                   | list   | 是   | 通知模板配置         |
 | config.template.signal  | string | 是   | 触发信号，NOTICE_SIGNAL单选       |
 | config.template.message_tmpl | string | 否   | 通知信息模板       |
@@ -97,7 +98,7 @@
     |COLLECT_ALARM|汇总通知|
 
 
-#### 示例数据
+### 请求参数示例
 
 ```json
 {
@@ -115,9 +116,14 @@
 
 ### 响应参数
 
-data返回更新成功的策略id表
+| 字段       | 类型      | 描述     |
+| ---------- |---------|--------|
+| result     | bool    | 请求是否成功 |
+| code       | int     | 返回的状态码 |
+| message    | string  | 描述信息   |
+| data       | list[int] | 更新成功的策略id列表      |
 
-#### 示例数据
+### 响应参数示例
 
 ```json
 {

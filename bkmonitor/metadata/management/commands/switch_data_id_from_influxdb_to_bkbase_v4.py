@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -50,7 +50,11 @@ class Command(BaseCommand):
             raise CommandError("only support bk_standard_v2_time_series type datasource!")
 
         # Step2. 更改数据源来源为bkdata，并删除Consul+停用Transfer
-        modify_data_id_source(data_id_list=[bk_data_id], source_type=DataIdCreatedFromSystem.BKDATA.value)
+        modify_data_id_source(
+            bk_tenant_id=datasource.bk_tenant_id,
+            data_id_list=[bk_data_id],
+            source_type=DataIdCreatedFromSystem.BKDATA.value,
+        )
 
         # Step3. 将数据源信息同步至BkBase，组装配置
         bkbase_data_name = utils.compose_bkdata_data_id_name(datasource.data_name)
@@ -58,8 +62,11 @@ class Command(BaseCommand):
             f"data_id: {bk_data_id}, kafka_name: {kafka_name} use bkbase_data_name: {bkbase_data_name} to access bkbase"
         )
         # 创建DataId实例（计算平台侧）
-        data_id_ins, _ = models.DataIdConfig.objects.get_or_create(
-            name=bkbase_data_name, namespace="bkmonitor", bk_biz_id=bk_biz_id
+        data_id_ins, _ = models.DataIdConfig.objects.update_or_create(
+            bk_tenant_id=datasource.bk_tenant_id,
+            namespace="bkmonitor",
+            name=bkbase_data_name,
+            defaults={"bk_biz_id": bk_biz_id, "bk_data_id": datasource.bk_data_id},
         )
         # 组装DataId Config
         config = self.compose_data_id_config(
@@ -78,7 +85,9 @@ class Command(BaseCommand):
         self.stdout.write(
             f"use bk_data_id->{bk_data_id},bk_biz_id->{bk_biz_id},table_id->{table_id} to access bkbase v4"
         )
-        access_v2_bkdata_vm(bk_biz_id=bk_biz_id, table_id=table_id, data_id=bk_data_id)
+        access_v2_bkdata_vm(
+            bk_tenant_id=datasource.bk_tenant_id, bk_biz_id=bk_biz_id, table_id=table_id, data_id=bk_data_id
+        )
 
         # Step6. 验证此前接入的资源是否畅通
         self.stdout.write(f"bk_data_id->{bk_data_id}, bkbase component config->{data_id_ins.component_config}")

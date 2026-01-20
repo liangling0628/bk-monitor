@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -218,10 +218,10 @@ class ApmHeatmap extends CommonSimpleChart {
             };
             return `<div class="monitor-chart-tooltips">
             <p class="tooltips-header">
-                ${dayjs.tz(+xPreValue).format('YYYY-MM-DD HH:mm:ss')}
+                ${dayjs.tz(+xPreValue).format('YYYY-MM-DD HH:mm:ssZZ')}
             </p>
             <p class="tooltips-header">
-              ${dayjs.tz(+xValue).format('YYYY-MM-DD HH:mm:ss')}
+              ${dayjs.tz(+xValue).format('YYYY-MM-DD HH:mm:ssZZ')}
             </p>
             <ul class="tooltips-content">
               <li class="tooltips-content-item">
@@ -351,6 +351,7 @@ class ApmHeatmap extends CommonSimpleChart {
           needMoreMenu={false}
           showAddMetric={false}
           showMore={true}
+          showTitleIcon={false}
           subtitle={this.panel.subTitle || ''}
           title={this.panel.title}
         />

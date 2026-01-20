@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -282,7 +282,7 @@ ${connectionsStr.replace(/^par\nend\n^/gm, '')}
             addListener(sequenceGraphWrapRef.value!, handleResize);
             sequenceGraphRef.value.addEventListener('scroll', handleSequenceGraphScroll);
             // setTimeout(() => handleShowThumbnail(), 500);
-            const svgDom = mermaidRef.value!.querySelector('svg');
+            const svgDom = mermaidRef.value?.querySelector('svg');
             if (svgDom) {
               const { width, height } = svgDom.getBoundingClientRect();
               svgDom.style.width = `${width * (graphScale.value / 100)}px`;
@@ -576,7 +576,7 @@ ${connectionsStr.replace(/^par\nend\n^/gm, '')}
       image.onload = () => {
         canvas.getContext('2d')?.drawImage(image, 0, 0);
         const a = document.createElement('a');
-        a.download = `${props.traceId}_${dayjs.tz().format('YYYY-MM-DD HH:mm:ss')}`;
+        a.download = `${props.traceId}_${dayjs.tz().format('YYYY-MM-DD HH:mm:ssZZ')}`;
         a.href = canvas.toDataURL('image/png');
         a.click();
       };

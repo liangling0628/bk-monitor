@@ -4,7 +4,7 @@ import type { VNode } from 'vue';
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -43,7 +43,7 @@ import type { INavItem } from '../../pages/monitor-k8s/typings';
 import type { TranslateResult } from 'vue-i18n';
 
 import './temporary-share.scss';
-// const MomentFormater = 'YYYY-MM-DD HH:mm:ss';
+// const MomentFormater = 'YYYY-MM-DD HH:mm:ssZZ';
 
 export interface ITemporaryShareProps {
   customData?: Record<string, any>;

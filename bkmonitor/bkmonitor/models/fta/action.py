@@ -1,23 +1,25 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
+import inspect
 import json
 import logging
 import time
 from collections import defaultdict
 from datetime import datetime
 from importlib import import_module
+from typing import Any
 
 import jmespath
 from django.conf import settings
-from django.db import connections, models
+from django.db import models
 from django.utils.translation import gettext as _
 
 from bkmonitor.documents import AlertLog
@@ -39,6 +41,7 @@ from constants.action import (
     ConvergeType,
     NoticeWay,
     UserGroupType,
+    VoiceNoticeMode,
 )
 from constants.alert import EVENT_SEVERITY, EventSeverity
 from core.errors.api import BKAPIError
@@ -105,7 +108,7 @@ class ActionPlugin(AbstractRecordModel):
     has_child = models.BooleanField("是否有子级联", default=False)
     category = models.CharField("插件分类", max_length=64, null=False)
     # 事件执行分类：回调类，轮询类，直调 需要放到这里吗？
-    config_schema = JsonField("参数配置格式")
+    config_schema: dict[str, Any] = JsonField("参数配置格式")  # type: ignore
     """
     比如标准运维：
     返回前端的样例
@@ -189,6 +192,10 @@ class ActionPlugin(AbstractRecordModel):
         "job_site_url": settings.JOB_URL.rstrip("/"),
         "sops_site_url": settings.BK_SOPS_HOST.rstrip("/"),
         "itsm_site_url": settings.BK_ITSM_HOST.rstrip("/"),
+        "itsm_v4_site_url": settings.BK_ITSM_V4_HOST.rstrip("/"),
+        "itsm_v4_api_url": settings.BK_ITSM_V4_API_URL.rstrip("/"),
+        "itsm_v4_system_id": settings.BK_ITSM_V4_SYSTEM_ID,
+        "incident_saas_site_url": settings.BK_INCIDENT_SAAS_HOST.rstrip("/"),  # 故障分析SaaS URL
     }
 
     @staticmethod
@@ -197,13 +204,14 @@ class ActionPlugin(AbstractRecordModel):
         return json.loads(Jinja2Renderer.render(json.dumps(data_mapping), validate_request_data))
 
     def perform_resource_request(self, req_type, **kwargs) -> list:
-        request_schema = self.config_schema[req_type]
+        request_schema: dict[str, Any] = self.config_schema[req_type]
 
         try:
-            resource_module = import_module(request_schema.get("resource_module"))
+            resource_module = import_module(request_schema.get("resource_module", ""))
         except ImportError as err:
             logger.exception(err)
             return []
+
         source_class = request_schema["resource_class"]
         if not hasattr(resource_module, source_class):
             return []
@@ -237,7 +245,7 @@ class ActionPlugin(AbstractRecordModel):
             try:
                 url_info = self.perform_resource_request("plugin_url", **kwargs)
             except BKAPIError as error:
-                logger.warning("failed to get_plugin_template_create_url: {}".format(error))
+                logger.warning(f"failed to get_plugin_template_create_url: {error}")
                 url_info = None
             url_info = url_info[0] if url_info else {}
         else:
@@ -374,6 +382,23 @@ class ActionInstance(AbstractRecordModel):
             if notice_way in exclude_notice_ways:
                 # 当前的通知方式被排除，不创建对应的具体通知
                 continue
+            if notice_way == NoticeWay.VOICE:
+                # 判断通知模式
+                voice_notice_mode = self.inputs.get("voice_notice_mode", VoiceNoticeMode.PARALLEL)
+                if voice_notice_mode == VoiceNoticeMode.SERIAL:
+                    # 串行通知，将通知人员列表的列表 合并为一个通知人员列表 为单个列表(并去重)创建子任务
+                    # [["user1", "user2"], ["user3", "user2"]] -> [["user1", "user2", "user3"]]
+                    combined = [user for sublist in notice_receivers if isinstance(sublist, list) for user in sublist]
+                    if combined:
+                        notice_receivers = [list(dict.fromkeys(combined))]
+                    else:
+                        # 如果合并后没有有效用户，记录日志并跳过语音通知
+                        logger.warning(
+                            f"[create_sub_actions] action({self.id}) alerts({self.alerts}) "
+                            f"no valid users found after merging, notice_receivers: {notice_receivers}"
+                        )
+                        continue
+
             for notice_receiver in notice_receivers:
                 if not notice_receiver:
                     continue
@@ -549,7 +574,9 @@ class ActionInstance(AbstractRecordModel):
                 kwargs["url"] = "{bk_itsm_host}#/ticket/detail?id={ticket_id}".format(
                     bk_itsm_host=settings.BK_ITSM_HOST, ticket_id=approve_info.get("id")
                 )
-        content_template = content_template or _("%s执行{{status_display}}") % self.action_config.get("name", _("处理套餐"))
+        content_template = content_template or _("%s执行{{status_display}}") % self.action_config.get(
+            "name", _("处理套餐")
+        )
         text = Jinja2Renderer.render(content_template, kwargs)
 
         content = {
@@ -579,7 +606,7 @@ class ActionInstance(AbstractRecordModel):
 
     @property
     def es_action_id(self):
-        return "{}{}".format(int(self.create_time.timestamp()), self.id)
+        return f"{int(self.create_time.timestamp())}{self.id}"
 
     def insert_alert_log(self, description=None, content_template="", notice_way_display=""):
         if self.parent_action_id or not self.alerts or self.signal == ActionSignal.COLLECT:
@@ -622,6 +649,79 @@ class ActionInstance(AbstractRecordModel):
             queryset = queryset.filter(update_time__gte=end_time)
 
         return queryset.values("action_config_id").annotate(dcount=models.Count("action_config_id")).order_by("dcount")
+
+    def replay_blocked_notice(self):
+        """
+        重新发送被熔断的通知
+
+        :return: 重放结果列表，每个元素包含 success 和 error 信息
+        """
+        retry_params_list = self.ex_data.get("retry_params", [])
+        if not retry_params_list:
+            logger.warning(f"[replay blocked notice] action({self.id}) no retry_params found")
+            return []
+
+        results = []
+        for retry_param in retry_params_list:
+            api_module_path = retry_param["api_module"]
+            resource_name = retry_param["resource"]
+            try:
+                args = retry_param.get("args", ())
+                kwargs = retry_param.get("kwargs", {})
+
+                # 核心逻辑：动态导入模块，获取类或方法，然后调用
+                ret = None
+
+                # 方式1：尝试将 api_module_path 作为完整模块路径导入
+                # 例如：api_module_path="api.cmsi.default", resource_name="SendVoice"
+                try:
+                    api_module = import_module(api_module_path)
+                    resource = getattr(api_module, resource_name, None)
+                    if resource is not None:
+                        # 如果是类，实例化后调用；如果是函数，直接调用
+                        if inspect.isclass(resource):
+                            ret = resource()(*args, **kwargs)
+                        else:
+                            ret = resource(*args, **kwargs)
+                except ImportError:
+                    # 导入失败，尝试方式2
+                    pass
+
+                # 方式2：如果方式1失败，尝试将最后一个点号后的部分作为类名
+                # 例如：api_module_path="bkmonitor.utils.send.Sender", resource_name="send_wxwork_layouts"
+                if ret is None and "." in api_module_path:
+                    try:
+                        module_path, class_name = api_module_path.rsplit(".", 1)
+                        api_module = import_module(module_path)
+                        api_class = getattr(api_module, class_name, None)
+                        if api_class and inspect.isclass(api_class):
+                            func = getattr(api_class, resource_name, None)
+                            if func is not None:
+                                # 尝试直接通过类调用（类方法/静态方法）
+                                try:
+                                    ret = func(*args, **kwargs)
+                                except TypeError:
+                                    # 如果是实例方法，需要先实例化
+                                    ret = getattr(api_class(), resource_name)(*args, **kwargs)
+                    except (ImportError, AttributeError, TypeError):
+                        pass
+
+                if ret is None:
+                    raise ImportError(f"Cannot import module or class: {api_module_path}")
+
+                logger.info(
+                    f"[replay blocked notice] action({self.id}) strategy({self.strategy_id}) "
+                    f"replay success: {api_module_path}.{resource_name}, result: {ret}"
+                )
+                results.append({"success": True, "result": ret, "api": f"{api_module_path}.{resource_name}"})
+            except Exception as e:
+                logger.exception(
+                    f"[replay blocked notice] action({self.id}) strategy({self.strategy_id}) "
+                    f"replay failed: {api_module_path}.{resource_name}, error: {e}"
+                )
+                results.append({"success": False, "error": str(e), "api": f"{api_module_path}.{resource_name}"})
+
+        return results
 
 
 class ActionInstanceLog(models.Model):
@@ -666,10 +766,10 @@ class ConvergeInstance(AbstractRecordModel):
         ("network-attack", "success"),
         ("network-quality", "success"),
         ("host-quality", "success"),
-        ("analyze", u"success"),
-        ("collect_alarm", u"success"),
-        ("defence", u"danger"),
-        ("convergence", u"primary"),  # 优先显示主告警的状态
+        ("analyze", "success"),
+        ("collect_alarm", "success"),
+        ("defence", "danger"),
+        ("convergence", "primary"),  # 优先显示主告警的状态
     )
 
     NOTIFY_STATUSES = (
@@ -737,44 +837,6 @@ class ConvergeInstance(AbstractRecordModel):
         ordering = ("-id",)
 
 
-class BulkCreateIgnoreManager(ModelManager):
-    def bulk_insert_ignore(self, create_fields, values):
-        """
-        Bulk insert/ignore
-        @param create_fields : list, required, fields for the insert field declaration
-        @param values : list of tuples. each tuple must have same len() as create_fields
-        Notes on usage :
-            create_fields = ['f1', 'f2', 'f3']
-            values = [
-                (1, 2, 3),
-                (4, 5, 6),
-                (5, 3, 8)
-            ]
-        Example usage :
-            modelName.objects.bulk_insert_ignore(
-                create_fields,
-                values
-            )
-        Remember to add to model declarations:
-            objects = BulkInsertManager() # custom manager
-        @return False on fail
-        """
-
-        cursor = connections[settings.BACKEND_DATABASE_NAME].cursor()
-        values_sql = "({})".format(",".join([" %s " for i in range(len(create_fields))]))  # correct format
-
-        sql = "INSERT IGNORE INTO {} ({}) VALUES {}".format(
-            self.model._meta.db_table, ",".join(create_fields), values_sql
-        )
-        result = False
-        try:
-            cursor.executemany(sql, values)
-            result = True
-        except BaseException as error:
-            logger.exception("insert error : %s， format_sql %s, values %s", str(error), sql, values)
-        return result
-
-
 class ConvergeRelation(models.Model):
     """
     Converge 的 many_to_many 关联
@@ -796,7 +858,7 @@ class ConvergeRelation(models.Model):
     )
     alerts = JsonField("防御的告警列表", default=[])
 
-    objects = BulkCreateIgnoreManager()
+    objects = ModelManager()
 
     class Meta:
         unique_together = ("converge_id", "related_id", "related_type")
@@ -826,7 +888,7 @@ class ConvergeRelation(models.Model):
         return ConvergeInstance.objects.get(id=self.related_id)
 
     def __unicode__(self):
-        return "Inc-{} | relate_instance-{}({})".format(self.converge_id, self.relate_instance.id, self.relate_instance)
+        return f"Inc-{self.converge_id} | relate_instance-{self.relate_instance.id}({self.relate_instance})"
 
 
 class StrategyActionConfigRelation(AbstractRecordModel):

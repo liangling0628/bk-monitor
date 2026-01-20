@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -31,6 +31,7 @@ import { getPlugins, getPluginTemplates, getTemplateDetail } from 'monitor-api/m
 import { retrieveActionConfig } from 'monitor-api/modules/model';
 import { getNoticeWay } from 'monitor-api/modules/notice_group';
 import { getStrategyListV2 } from 'monitor-api/modules/strategies';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { Debounce, deepClone, transformDataKey } from 'monitor-common/utils/utils';
 import HistoryDialog from 'monitor-pc/components/history-dialog/history-dialog';
 
@@ -208,9 +209,9 @@ export default class SetMealDeail extends tsc<ISetMealDetail, IEvent> {
     if (!this.detailInfo || !Object.keys(this.detailInfo).length) return [];
     return [
       { label: this.$t('创建人'), value: this.detailInfo.create_user || '--' },
-      { label: this.$t('创建时间'), value: this.detailInfo.create_time || '--' },
+      { label: this.$t('创建时间'), value: formatWithTimezone(this.detailInfo.create_time) || '--' },
       { label: this.$t('最近更新人'), value: this.detailInfo.update_user || '--' },
-      { label: this.$t('修改时间'), value: this.detailInfo.update_time || '--' },
+      { label: this.$t('修改时间'), value: formatWithTimezone(this.detailInfo.update_time) || '--' },
     ];
   }
 

@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -13,13 +12,14 @@ from django_elasticsearch_dsl.registries import registry
 from elasticsearch_dsl import Q, field
 
 from bkmonitor.documents.base import BaseDocument, Date
+from bkmonitor.documents.constants import ES_INDEX_SETTINGS
 
 
 @registry.register_document
 class AlertLog(BaseDocument):
     class Index:
         name = "bkfta_log_alert"
-        settings = {"number_of_shards": 3, "number_of_replicas": 1, "refresh_interval": "1s"}
+        settings = ES_INDEX_SETTINGS.copy()
 
     class OpType:
         # 告警产生

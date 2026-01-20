@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -8,12 +8,14 @@ an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express o
 specific language governing permissions and limitations under the License.
 """
 
+import copy
 import logging
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from typing import Any
 
 import redis
 from django.conf import settings
@@ -22,8 +24,9 @@ from django.db import transaction
 from alarm_backends.core.lock.service_lock import share_lock
 from core.drf_resource import api
 from core.prometheus import metrics
-from metadata import models
-from metadata.models.space.constants import SpaceTypes, SpaceStatus
+from metadata import config, models
+from metadata.models.data_link.data_link_configs import ClusterConfig
+from metadata.models.space.constants import SpaceStatus, SpaceTypes
 from metadata.task.constants import BKBASE_V4_KIND_STORAGE_CONFIGS
 from metadata.task.tasks import sync_bkbase_v4_metadata
 from metadata.task.utils import chunk_list
@@ -35,10 +38,20 @@ from metadata.utils.redis_tools import RedisTools, bkbase_redis_client
 logger = logging.getLogger("metadata")
 
 
+DEFAULT_VM_EXPIRES_MS = 24 * 3600 * 90 * 1000
+
+
 def watch_bkbase_meta_redis_task():
     """
     任务入口 计算平台元数据Redis键变化事件
     """
+    bkbase_redis = bkbase_redis_client()
+
+    # 检查bkbase redis配置是否存在
+    if not bkbase_redis:
+        logger.info("watch_bkbase_meta_redis_task: bkbase redis config is not set.")
+        return
+
     logger.info("watch_bkbase_meta_redis_task: Start watching bkbase meta redis")
 
     # 初始化分布式锁
@@ -58,7 +71,6 @@ def watch_bkbase_meta_redis_task():
     stop_event = threading.Event()
 
     try:
-        bkbase_redis = bkbase_redis_client()
         key_pattern = f"{settings.BKBASE_REDIS_PATTERN}:*"
         runtime_limit = settings.BKBASE_REDIS_TASK_MAX_EXECUTION_TIME_SECONDS  # 任务运行时间限制为一天
 
@@ -80,10 +92,8 @@ def watch_bkbase_meta_redis_task():
             key_pattern=key_pattern,
             runtime_limit=runtime_limit,
         )
-
     except Exception as e:  # pylint: disable=broad-except
         logger.exception("watch_bkbase_meta_redis_task: Error watching bkbase meta redis, error->[%s]", e)
-
     finally:
         # 确保在任务完成后释放锁
         stop_event.set()  # 设置停止事件来终止守护线程
@@ -111,6 +121,7 @@ def watch_bkbase_meta_redis(redis_conn, key_pattern, runtime_limit=86400):
     end_time = start_time + timedelta(seconds=runtime_limit)
 
     while datetime.now() < end_time:  # 运行时间控制
+        pubsub = None
         try:
             # 初始化 pubsub
             pubsub = redis_conn.pubsub()
@@ -149,13 +160,12 @@ def watch_bkbase_meta_redis(redis_conn, key_pattern, runtime_limit=86400):
                 )
 
                 # Celery异步调用同步逻辑
-                sync_bkbase_v4_metadata.delay(key=key)
+                sync_bkbase_v4_metadata.delay(key=key, skip_types=["es"])
 
-        except redis.exceptions.ConnectionError as e:
+        except redis.ConnectionError as e:
             logger.error("watch_bkbase_meta_redis: Redis connection error->[%s]", e)
             logger.info("watch_bkbase_meta_redis: Retrying connection in 10 seconds...")
             time.sleep(settings.BKBASE_REDIS_RECONNECT_INTERVAL_SECONDS)  # 等待x秒后尝试重连
-
         except Exception as e:  # pylint: disable=broad-except
             logger.error("watch_bkbase_meta_redis: Unexpected error->[%s]", e, exc_info=True)
             logger.info("watch_bkbase_meta_redis: Retrying listener in 10 seconds...")
@@ -163,7 +173,8 @@ def watch_bkbase_meta_redis(redis_conn, key_pattern, runtime_limit=86400):
 
         finally:
             try:
-                pubsub.close()  # 确保 pubsub 在异常退出时被正确关闭
+                if pubsub:
+                    pubsub.close()  # 确保 pubsub 在异常退出时被正确关闭
                 logger.info("watch_bkbase_meta_redis: Pubsub connection closed.")
             except Exception as close_error:  # pylint: disable=broad-except
                 logger.warning("watch_bkbase_meta_redis: Failed to close pubsub->[%s]", close_error)
@@ -171,61 +182,210 @@ def watch_bkbase_meta_redis(redis_conn, key_pattern, runtime_limit=86400):
     logger.info("watch_bkbase_meta_redis: Task completed after reaching runtime limit.")
 
 
-@share_lock(ttl=3600, identify="metadata_sync_bkbase_cluster_info")
-def sync_bkbase_cluster_info():
+@share_lock(ttl=3600, identify="metadata_sync_all_bkbase_cluster_info")
+def sync_all_bkbase_cluster_info():
+    """同步 bkbase 集群信息 VM / ES /Doris ...
+
+    Args:
+        update: 是否更新集群信息，默认不更新
     """
-    同步 bkbase 集群信息
-    VM / ES /Doris ...
-    """
-    logger.info("sync_bkbase_cluster_info: Start syncing cluster info from bkbase.")
+    logger.info("sync_all_bkbase_cluster_info: Start syncing cluster info from bkbase.")
     start_time = time.time()
     metrics.METADATA_CRON_TASK_STATUS_TOTAL.labels(
-        task_name="sync_bkbase_cluster_info", status=TASK_STARTED, process_target=None
+        task_name="sync_all_bkbase_cluster_info", status=TASK_STARTED, process_target=None
     ).inc()
 
     # 遍历所有存储类型配置
-    for config in BKBASE_V4_KIND_STORAGE_CONFIGS:
-        clusters = api.bkdata.list_data_bus_raw_data(namespace=config["namespace"], kind=config["kind"])
-        _sync_cluster_info(
-            cluster_list=clusters,
-            field_mappings=config["field_mappings"],
-            cluster_type=config["cluster_type"],
-        )
+    for tenant in api.bk_login.list_tenant():
+        for storage_config in BKBASE_V4_KIND_STORAGE_CONFIGS:
+            clusters = api.bkdata.list_data_link(
+                bk_tenant_id=tenant["id"], namespace=storage_config["namespace"], kind=storage_config["kind"]
+            )
+            for cluster_data in clusters:
+                try:
+                    sync_bkbase_cluster_info(
+                        bk_tenant_id=tenant["id"],
+                        cluster_data=cluster_data,
+                        field_mappings=storage_config["field_mappings"],
+                        cluster_type=storage_config["cluster_type"],
+                        update=settings.SYNC_BKBASE_CLUSTER_INFO_UPDATE,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"sync_bkbase_cluster_info: failed to sync {storage_config['cluster_type']} cluster info, error->[{e}]"
+                    )
     cost_time = time.time() - start_time
     metrics.METADATA_CRON_TASK_STATUS_TOTAL.labels(
-        task_name="sync_bkbase_cluster_info", status=TASK_FINISHED_SUCCESS, process_target=None
+        task_name="sync_all_bkbase_cluster_info", status=TASK_FINISHED_SUCCESS, process_target=None
     ).inc()
-    metrics.METADATA_CRON_TASK_COST_SECONDS.labels(task_name="sync_bkbase_cluster_info", process_target=None).observe(
-        cost_time
+    metrics.METADATA_CRON_TASK_COST_SECONDS.labels(
+        task_name="sync_all_bkbase_cluster_info", process_target=None
+    ).observe(cost_time)
+
+    logger.info("sync_all_bkbase_cluster_info: Finished syncing cluster info from bkbase, cost time->[%s]", cost_time)
+
+
+def _get_attr_by_path(data: dict[str, Any], path: str) -> Any:
+    """根据路径获取数据
+
+    Args:
+        data: 数据
+        path: 路径, 例如: "auth.sasl.username"
+
+    Returns:
+        value: 数据
+    """
+    paths = path.split(".")
+    value: Any | None = data
+    for key in paths:
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            return None
+    return value
+
+
+def sync_bkbase_cluster_info(
+    bk_tenant_id: str, cluster_data: dict[str, Any], field_mappings: dict, cluster_type: str, update: bool = False
+):
+    """通用集群信息同步函数
+
+    Args:
+        bk_tenant_id: 租户ID
+        cluster_data: 集群数据
+        field_mappings: 字段映射
+        cluster_type: 集群类型
+        update: 是否更新集群信息
+    """
+
+    cluster_spec = cluster_data.get("spec", {})
+    cluster_metadata = cluster_data.get("metadata", {})
+    cluster_annotations = cluster_metadata.get("annotations", {})
+
+    # 动态获取字段映射（支持不同存储类型的字段差异）
+    cluster_name = cluster_metadata["name"]
+    namespace = cluster_metadata["namespace"]
+    domain_name = _get_attr_by_path(cluster_spec, field_mappings["domain_name"])
+    port = _get_attr_by_path(cluster_spec, field_mappings["port"])
+    username = _get_attr_by_path(cluster_spec, field_mappings["username"])
+    password = _get_attr_by_path(cluster_spec, field_mappings["password"])
+    version = _get_attr_by_path(cluster_spec, field_mappings.get("version", ""))
+
+    # kafka 集群专用字段
+    sasl_mechanisms = _get_attr_by_path(cluster_spec, field_mappings.get("sasl_mechanisms", ""))
+    is_auth = _get_attr_by_path(cluster_spec, field_mappings.get("is_auth", ""))
+    security_protocol: str | None = None
+    stream_to_id = _get_attr_by_path(cluster_spec, field_mappings.get("stream_to_id", ""))
+    v3_channel_id = _get_attr_by_path(cluster_spec, field_mappings.get("v3_channel_id", ""))
+
+    # 同步ClusterConfig
+    cluster_config_data = copy.deepcopy(cluster_data)
+    cluster_config_data.pop("status", None)
+    ClusterConfig.objects.get_or_create(
+        bk_tenant_id=bk_tenant_id,
+        namespace=namespace,
+        name=cluster_name,
+        kind=ClusterConfig.CLUSTER_TYPE_TO_KIND_MAP[cluster_type],
+        defaults={"origin_config": cluster_config_data},
     )
 
-    logger.info("sync_bkbase_cluster_info: Finished syncing cluster info from bkbase, cost time->[%s]", cost_time)
+    # 设置集群配置
+    default_settings = {}
 
+    if cluster_type == models.ClusterInfo.TYPE_VM:
+        # 如果是VictoriaMetrics集群，需要获取过期时间和所属业务ID
+        # 记录过期时间，单位为秒
+        default_settings["retention_time"] = (cluster_spec.get("expiresMs") or DEFAULT_VM_EXPIRES_MS) // 1000
+        # 记录集群所属业务ID，只有业务独立集群才会有对应字段，默认为None
+        default_settings["bk_biz_id"] = cluster_spec.get("bkBizId")
+    elif cluster_type == models.ClusterInfo.TYPE_KAFKA:
+        # 如果是kafka集群，需要获取SASL认证信息
+        if is_auth:
+            security_protocol = config.KAFKA_SASL_PROTOCOL
 
-def _sync_cluster_info(cluster_list: list, field_mappings: dict, cluster_type: str):
-    """通用集群信息同步函数"""
-    for cluster_data in cluster_list:
-        try:
-            cluster_auth_info = cluster_data.get("spec", {})
-            cluster_metadata = cluster_data.get("metadata", {})
+        if v3_channel_id:
+            default_settings["v3_channel_id"] = v3_channel_id
 
-            # 动态获取字段映射（支持不同存储类型的字段差异）
-            domain_name = cluster_auth_info.get(field_mappings["domain_name"])
-            if not models.ClusterInfo.objects.filter(domain_name=domain_name).exists():
-                logger.info(f"sync_bkbase_cluster_info: create {cluster_type} cluster, domain_name->[{domain_name}]")
-                with transaction.atomic():
-                    models.ClusterInfo.objects.create(
-                        domain_name=domain_name,
-                        port=cluster_auth_info.get(field_mappings["port"]),
-                        username=cluster_auth_info.get(field_mappings["username"]),
-                        password=cluster_auth_info.get(field_mappings["password"]),
-                        cluster_name=cluster_metadata.get("name"),
-                        is_default_cluster=False,
-                        cluster_type=cluster_type,
+        # 如果stream_to_id不存在，则尝试从annotations中获取
+        if not stream_to_id:
+            stream_to_id = cluster_annotations.get("StreamToId")
+            stream_to_id = int(stream_to_id) if stream_to_id else -1
+
+        # 跳过inner角色集群的同步
+        if cluster_spec.get("role") == "inner":
+            return
+
+    need_update_fields = {
+        "port": port,
+        "username": username,
+        "password": password,
+        "default_settings": default_settings,
+        "sasl_mechanisms": sasl_mechanisms,
+        "is_auth": is_auth,
+        "gse_stream_to_id": stream_to_id,
+        "security_protocol": security_protocol,
+        "version": version,
+    }
+
+    with transaction.atomic():
+        cluster = models.ClusterInfo.objects.filter(
+            bk_tenant_id=bk_tenant_id, cluster_type=cluster_type, cluster_name=cluster_name
+        ).first()
+        if cluster:
+            # 如果域名发生变化，为了防止出现问题，不进行更新并记录日志
+            if cluster.domain_name != domain_name:
+                logger.warning(
+                    f"sync_bkbase_cluster_info: domain_name changed for {cluster_type} cluster: {cluster_name}, from {cluster.domain_name} to {domain_name}"
+                )
+                return
+
+            # 更新集群信息
+            is_updated = False
+            update_fields: list[str] = []
+
+            for field, value in need_update_fields.items():
+                if value is not None and getattr(cluster, field) != value:
+                    setattr(cluster, field, value)
+                    is_updated = True
+                    update_fields.append(field)
+
+            # 如果集群未被标记为已注册到bkbase平台，则标记为已注册
+            if not cluster.registered_to_bkbase:
+                cluster.registered_to_bkbase = True
+                is_updated = True
+                update_fields.append("registered_to_bkbase")
+
+            # 如果字段有更新，则保存模型
+            if is_updated:
+                if update:
+                    logger.info(f"sync_bkbase_cluster_info: updated {cluster_type} cluster: {cluster_name}")
+                    cluster.save(update_fields=update_fields)
+                else:
+                    logger.info(
+                        f"sync_bkbase_cluster_info: updated {cluster_type} cluster: {cluster_name} but not saved because update is False"
                     )
-        except Exception as e:
-            logger.error(f"sync_bkbase_cluster_info: failed to sync {cluster_type} cluster info, error->[{e}]")
-            continue
+        else:
+            # 创建新集群，默认为非默认集群
+            models.ClusterInfo.objects.create(
+                bk_tenant_id=bk_tenant_id,
+                cluster_type=cluster_type,
+                cluster_name=cluster_name,
+                display_name=cluster_name,
+                domain_name=domain_name,
+                port=port,
+                security_protocol=security_protocol,
+                sasl_mechanisms=sasl_mechanisms,
+                is_auth=is_auth or False,
+                username=username or "",
+                password=password or "",
+                is_default_cluster=False,
+                default_settings=default_settings,
+                registered_system=models.ClusterInfo.BKDATA_REGISTERED_SYSTEM,
+                registered_to_bkbase=True,
+                version=version,
+                gse_stream_to_id=stream_to_id,
+            )
+            logger.info(f"sync_bkbase_cluster_info: created new {cluster_type} cluster: {cluster_name}")
 
 
 @share_lock(identify="metadata_SyncBkbaseMetadataAll", ttl=7200)
@@ -241,6 +401,10 @@ def sync_bkbase_metadata_all():
 
     # 获取BkBase数据一致性Redis中符合模式的所有key
     bkbase_redis = bkbase_redis_client()
+    if not bkbase_redis:
+        logger.warning("sync_bkbase_metadata_all: bkbase redis config is not set.")
+        return
+
     cursor = 0
     matching_keys = []
 
@@ -256,7 +420,7 @@ def sync_bkbase_metadata_all():
     # 使用线程池并发发送任务
     def _send_task(key):
         try:
-            sync_bkbase_v4_metadata.delay(key=key)
+            sync_bkbase_v4_metadata.delay(key=key, skip_types=["es"])
         except Exception as e:
             logger.error(f"Failed to send task for key {key}: {e}")
 

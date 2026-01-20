@@ -327,7 +327,9 @@
           min-width="55"
         >
           <template #default="props">
-            <span :class="{ 'text-disabled': props.row.status === 'stop' }">{{ props.row.updated_by }}</span>
+            <span :class="{ 'text-disabled': props.row.status === 'stop' }">
+              <bk-user-display-name :user-id="props.row.updated_by"></bk-user-display-name>
+            </span>
           </template>
         </bk-table-column>
         <bk-table-column
@@ -607,7 +609,7 @@
     clearTableFilter,
     getDefaultSettingSelectFiled,
     setDefaultSettingSelectFiled,
-    deepClone,
+    updateLastSelectedIndexId
   } from '@/common/util';
   import collectedItemsMixin from '@/mixins/collected-items-mixin';
   import { mapGetters } from 'vuex';
@@ -780,6 +782,7 @@
         ],
         filterStorageLabelList: [],
         currentRowCollectorConfigId: '',
+        isDestroyed: false,
       };
     },
     computed: {
@@ -857,6 +860,7 @@
       !this.authGlobalInfo && this.requestData();
     },
     beforeDestroy() {
+      this.isDestroyed = true;
       this.isShouldPollCollect = false;
       this.stopStatusPolling();
     },
@@ -974,6 +978,7 @@
           query.type = 'collectionStatus';
         }
         if (operateType === 'search') {
+          updateLastSelectedIndexId(this.spaceUid, row.index_set_id)
           if (!row.index_set_id && !row.bkdata_index_set_ids.length) return;
           params.indexId = row.index_set_id ? row.index_set_id : row.bkdata_index_set_ids[0];
         }
@@ -1103,6 +1108,7 @@
         }
       },
       requestCollectStatus(isPrivate) {
+        if (this.isDestroyed) return; // 组件已销毁，直接返回
         this.$http
           .request('collect/getCollectStatus', {
             query: {
@@ -1110,6 +1116,7 @@
             },
           })
           .then(res => {
+            if (this.isDestroyed) return; // 再次检查组件状态
             this.statusHandler(res.data || []);
             if (this.isShouldPollCollect) this.startStatusPolling();
             if (!isPrivate) this.loadingStatus = true;
@@ -1182,7 +1189,7 @@
         try {
           const res = await this.$http.request('unionSearch/unionLabelList');
           this.selectLabelList = res.data;
-          const cloneTagBase = deepClone(this.tagBaseList);
+          const cloneTagBase = structuredClone(this.tagBaseList);
           const notBuiltInList = res.data
             .filter(item => !item.is_built_in)
             .map(item => ({
@@ -1259,7 +1266,7 @@
         this.handleFilterChange(this.tagsData);
       },
       handleToggleTagSelect() {
-        this.tagSelect = !!this.tagsData.tags.length ? deepClone(this.tagsData.tags) : ['all'];
+        this.tagSelect = !!this.tagsData.tags.length ? structuredClone(this.tagsData.tags) : ['all'];
       },
       renderTagsHeader(h, { column }) {
         const isActive = !!this.filterLabelList.length && !this.tagSelect.includes('all');

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -26,6 +26,7 @@
 import { Component, Prop } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
 
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import TableSkeleton from 'monitor-pc/components/skeleton/table-skeleton';
 
 import PanelItem from '../../../../components/panel-item/panel-item';
@@ -101,8 +102,11 @@ export default class Metric extends tsc<IProps> {
                 prop={'created_by'}
               />
               <bk-table-column
+                width={180}
+                scopedSlots={{
+                  default: scope => <span>{formatWithTimezone(scope.row.created_at)}</span>,
+                }}
                 label={this.$t('创建时间')}
-                prop={'created_at'}
               />
             </bk-table>
           )}

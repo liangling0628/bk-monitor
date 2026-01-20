@@ -153,7 +153,9 @@ class CollectorViewSet(ModelViewSet):
         if self.request.query_params.get(BKDATA_OPEN) and settings.FEATURE_TOGGLE["scenario_bkdata"] == "off":
             qs = qs.filter(Q(etl_config=EtlConfig.BK_LOG_TEXT) | Q(etl_config__isnull=True))
         if self.request.query_params.get(NOT_CUSTOM):
-            qs = qs.exclude(collector_scenario_id=CollectorScenarioEnum.CUSTOM.value)
+            qs = qs.exclude(
+                collector_scenario_id__in=[CollectorScenarioEnum.CUSTOM.value, CollectorScenarioEnum.CLIENT.value]
+            )
         if self.request.query_params.get(IGNORE_DISPLAY_CONFIG):
             return qs.all()
         return qs.filter(is_display=True)
@@ -2522,13 +2524,14 @@ class CollectorViewSet(ModelViewSet):
         proxy_host_info = []
         report_url_list = []
         # 云区域为 0 的地址
-        conf = FeatureToggleObject.toggle(BK_CUSTOM_REPORT).feature_config
-
-        for item in conf.get("otlp", {}).get("0", []):
-            protocol, report_url = item.split(":", maxsplit=1)
-            report_url_list.append({"protocol": protocol, "report_url": report_url.strip()})
-        if report_url_list:
-            proxy_host_info.append({"bk_cloud_id": 0, "urls": report_url_list})
+        bk_custom_report = FeatureToggleObject.toggle(BK_CUSTOM_REPORT)
+        if bk_custom_report:
+            conf = bk_custom_report.feature_config
+            for item in conf.get("otlp", {}).get("0", []):
+                protocol, report_url = item.split(":", maxsplit=1)
+                report_url_list.append({"protocol": protocol, "report_url": report_url.strip()})
+            if report_url_list:
+                proxy_host_info.append({"bk_cloud_id": 0, "urls": report_url_list})
 
         space = SpaceApi.get_related_space(params.get("space_uid"), SpaceTypeEnum.BKCC.value)
         if not space or not space.bk_biz_id:

@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -444,6 +444,9 @@ DB_DUPLICATE_ID = 1062
 # ES别名延迟过期时间
 ES_ALIAS_EXPIRED_DELAY_DAYS = 1
 
+# 无rt表但需要注册gse的data_ids
+NEED_REFRESH_DATA_IDS = [1000, 1100000]
+
 
 class ESScopeTypes(Enum):
     """可见范围类型"""
@@ -497,6 +500,7 @@ DT_TIME_STAMP = "dtEventTimeStamp"
 DT_TIME_STAMP_NANO = "dtEventTimeStampNanos"
 NANO_FORMAT = "date_nanos"
 STRICT_NANO_ES_FORMAT = "strict_date_optional_time_nanos"
+EPOCH_MILLIS_FORMAT = "epoch_millis"
 NON_STRICT_NANO_ES_FORMAT = "strict_date_optional_time_nanos||epoch_millis"
 
 BASEREPORT_RESULT_TABLE_FIELD_MAP = {

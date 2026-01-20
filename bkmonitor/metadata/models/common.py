@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -10,6 +10,7 @@ specific language governing permissions and limitations under the License.
 
 import datetime
 import json
+from typing import Any
 
 from django.db import models
 from django.utils.translation import gettext as _
@@ -171,7 +172,7 @@ class OptionBase(models.Model):
         abstract = True
 
     @classmethod
-    def get_option(cls, query_id):
+    def get_option(cls, query_id) -> dict[str, Any]:
         """
         返回一个指定的option配置内容
         :param query_id: 查询的ID名
@@ -257,16 +258,18 @@ class OptionBase(models.Model):
             "option_name": option_value
         }
         """
+        return {self.name: self.get_value()}
+
+    def get_value(self) -> Any:
+        """获取选项值"""
         try:
             option_value = self.TYPE_OPTION_DICT[self.value_type]
             real_value = option_value(self.value) if self.value_type != "string" else str(self.value)
-
         except KeyError:
             # 如果找不到对应的配置，表示不是简单的基本功能，需要依赖函数实现
             trans_method = getattr(self, f"_trans_{self.value_type}")
             real_value = trans_method()
-
-        return {self.name: real_value}
+        return real_value
 
 
 class BaseModel(models.Model):

@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -57,7 +57,7 @@ INSTALLED_APPS += (  # noqa: F405
     "apm",
     "apm_ebpf",
     "core.drf_resource",
-    "ai_agents",
+    "ai_whale",
 )
 
 # 系统名称
@@ -67,6 +67,16 @@ BACKEND_NAME = "BK Monitor Backend"
 MIN_DATA_ACCESS_CHECKPOINT = 30 * 60
 # access 每次往前多拉取1个周期的数据
 NUM_OF_COUNT_FREQ_ACCESS = 1
+# access.data 模块数据处理最大时间点数量，默认 10 个时间点
+# 用于限制故障恢复后一次性处理过量数据，防止给下游模块造成压力
+# 仅对 TIME_SERIES 类型数据生效
+# 注意：限制的是时间点数量，同一时间点的所有序列数据会被完整处理
+ACCESS_DATA_MAX_TIME_POINTS = 10
+
+# access-detect 合并处理开关
+# 当策略的所有检测算法均为静态阈值时，在 access 模块直接执行检测
+# 跳过 Redis 队列传递和 detect 异步任务调度，减少延迟和资源消耗
+ACCESS_DETECT_MERGE_ENABLED = True
 
 # 流控配置
 QOS_DROP_ALARM_THREADHOLD = 3
@@ -130,6 +140,7 @@ DEFAULT_CRONTAB = [
     ("alarm_backends.core.cache.action_config.refresh_latest_5_minutes", "* * * * *", "global"),
     ("alarm_backends.core.cache.assign", "* * * * *", "global"),
     ("alarm_backends.core.cache.calendar", "* * * * *", "global"),
+    ("alarm_backends.core.cache.subscribe", "* * * * *", "global"),
     # api cache
     ("alarm_backends.core.cache.result_table", "*/10 * * * *", "global"),
     # delay queue
@@ -151,6 +162,8 @@ DEFAULT_CRONTAB = [
     ("apm.task.tasks.datasource_discover_cron", "* * * * *", "global"),
     # apm 配置下发: 每分钟触发，每次分片处理1/30应用
     ("apm.task.tasks.refresh_apm_config", "* * * * *", "global"),
+    # apm k8s 批量配置下发: 每5分钟触发，获取全部数据进行批量调度
+    ("apm.task.tasks.refresh_apm_config_to_k8s", "*/10 * * * *", "global"),
     ("apm.task.tasks.refresh_apm_platform_config", "*/30 * * * *", "global"),
     # apm 检测预计算表字段是否有更新 1小时执行检测一次
     ("apm.task.tasks.check_pre_calculate_fields_update", "0 */1 * * *", "global"),
@@ -227,6 +240,8 @@ DEFAULT_CRONTAB += [
     ("metadata.task.custom_report.refresh_all_custom_report_2_node_man", "*/5 * * * *", "global"),
     # metadata同步自定义日志配置到节点管理，虽然 1 分钟一次，实际只会运行ID对30取模后和当前分钟对齐的任务
     ("metadata.task.custom_report.refresh_all_log_config", "* * * * *", "global"),
+    # metadata同步自定义日志k8s批量配置，每5分钟触发，获取全部数据进行批量调度
+    ("metadata.task.custom_report.refresh_all_log_config_to_k8s", "*/10 * * * *", "global"),
     # metadata自动部署bkmonitorproxy
     ("metadata.task.auto_deploy_proxy", "30 */2 * * *", "global"),
     ("metadata.task.config_refresh.refresh_kafka_storage", "*/10 * * * *", "global"),
@@ -244,7 +259,7 @@ DEFAULT_CRONTAB += [
     ("metadata.task.bcs.refresh_bcs_monitor_info", "*/10 * * * *", "global"),
     ("metadata.task.bcs.discover_bcs_clusters", "*/5 * * * *", "global"),
     # BkBase信息同步,一小时一次
-    ("metadata.task.bkbase.sync_bkbase_cluster_info", "0 */1 * * *", "global"),
+    ("metadata.task.bkbase.sync_all_bkbase_cluster_info", "0 */1 * * *", "global"),
     # 检查并执行接入vm命令, 每5分钟执行一次
     ("metadata.task.vm.check_access_vm_task", "*/5 * * * *", "global"),
     # 同步空间信息
@@ -296,9 +311,6 @@ LONG_TASK_CRONTAB = [
     # 新版链路状态自动兜底刷新,15min 一次
     ("metadata.task.refresh_data_link.refresh_data_link_status", "*/15 * * * *", "global"),
 ]
-
-# Timeout for image exporter service, default set to 10 seconds
-IMAGE_EXPORTER_TIMEOUT = 10
 
 AES_X_KEY_FIELD = "SAAS_SECRET_KEY"
 

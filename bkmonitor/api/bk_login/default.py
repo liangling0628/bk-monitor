@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -71,7 +71,7 @@ class ListTenantResource(BkUserApiResource):
             return [{"id": "system", "name": "Blueking", "status": "enabled"}]
 
         result = super().perform_request({"bk_tenant_id": DEFAULT_TENANT_ID})
-        # result = [item for item in result if item["id"] in settings.INITIALIZED_TENANT_LIST]
+        result = [item for item in result if item["id"] in settings.INITIALIZED_TENANT_LIST]
         return result
 
 
@@ -257,6 +257,38 @@ class GetUserSensitiveInfo(UnityUserBaseResource):
         fields = serializers.CharField(required=True)
 
 
+class GetUserInfo(BkUserApiResource):
+    """
+    获取用户信息
+    """
+
+    @property
+    def action(self):
+        if self.use_apigw():
+            return "/api/v3/open/tenant/users/{bk_username}/"
+        return "/retrieve_user/"
+
+    method = "GET"
+
+    class RequestSerializer(serializers.Serializer):
+        id = serializers.CharField(required=True, label="用户名")
+        lookup_field = serializers.CharField(required=False, label="查询字段")
+        fields = serializers.CharField(required=False, label="返回字段")
+
+    def perform_request(self, validated_request_data):
+        if self.use_apigw():
+            # API Gateway 模式：转换参数格式
+            params = {"bk_username": validated_request_data["id"]}
+            return super().perform_request(params)
+
+        result = GetAllUserResource().perform_request(
+            {"lookup_field": "username", "exact_lookups": validated_request_data["id"]}
+        )
+        if not result["results"]:
+            raise ValueError(f"用户 {validated_request_data['id']} 不存在")
+        return result["results"][0]
+
+
 class BatchLookupVirtualUserResource(BkUserApiResource):
     """
     批量查询虚拟用户
@@ -290,4 +322,12 @@ class BatchQueryUserDisplayInfoResource(BkUserApiResource):
     method = "GET"
 
     class RequestSerializer(serializers.Serializer):
-        bk_usernames = serializers.CharField(required=True)
+        bk_usernames = serializers.ListField(required=True)
+
+    def perform_request(self, params: dict):
+        if not settings.ENABLE_MULTI_TENANT_MODE:
+            return [{"bk_username": username, "display_name": username} for username in params["bk_usernames"]]
+
+        # 参数格式转换
+        params["bk_usernames"] = ",".join(params["bk_usernames"])
+        return super().perform_request(params)

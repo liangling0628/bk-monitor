@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -221,13 +221,7 @@ export default class DetectionRules extends tsc<IDetectionRules, IEvent> {
 
   /** 是否支持智能检测算法 时序预测条件一致 */
   get isCanSetAiops(): boolean {
-    const {
-      data_source_label: dataSourceLabel,
-      data_type_label: dataTypeLabel,
-      functions,
-      result_table_id,
-    } = this.metricData[0] || {};
-
+    const { data_type_label: dataTypeLabel } = this.metricData[0] || {};
     const isTimeSeries = dataTypeLabel === 'time_series' || this.dataTypeLabel === 'time_series'; // 数据类型是否为指标
     const isLogMetric = dataTypeLabel === 'log' || this.dataTypeLabel === 'log';
     const isEventMetric = dataTypeLabel === 'event' || this.dataTypeLabel === 'event';
@@ -263,7 +257,7 @@ export default class DetectionRules extends tsc<IDetectionRules, IEvent> {
     }
     const uptimeItem = this.uptimeCheckMap?.[this.uptimeCheckType];
     // 是否已选择离群算法
-    const hasAbnormalCluster = this.addType.some(item => item.id === DetectionRuleTypeEnum.AbnormalCluster);
+    // const hasAbnormalCluster = this.addType.some(item => item.id === DetectionRuleTypeEnum.AbnormalCluster);
     const list = this.detectionTypeList.map(item => {
       item.disabled = item.id === DetectionRuleTypeEnum.PartialNodes;
 
@@ -288,13 +282,13 @@ export default class DetectionRules extends tsc<IDetectionRules, IEvent> {
        * 1. 已选择离群检测，则其它选项禁用
        * 2. 没有选择离群检测且已选择其他选项，则离群检测禁用
        * */
-      if (
-        (hasAbnormalCluster && item.id !== DetectionRuleTypeEnum.AbnormalCluster) ||
-        (!hasAbnormalCluster && !!this.addType.length && item.id === DetectionRuleTypeEnum.AbnormalCluster)
-      ) {
-        item.disabled = true;
-        item.disabledTip = this.$tc('离群检测和其他算法互斥');
-      }
+      // if (
+      //   (hasAbnormalCluster && item.id !== DetectionRuleTypeEnum.AbnormalCluster) ||
+      //   (!hasAbnormalCluster && !!this.addType.length && item.id === DetectionRuleTypeEnum.AbnormalCluster)
+      // ) {
+      //   item.disabled = true;
+      //   item.disabledTip = this.$tc('离群检测和其他算法互斥');
+      // }
 
       // 智能检测算法 | 时序预测算法一致 | 离群检测
       if (
@@ -493,7 +487,9 @@ export default class DetectionRules extends tsc<IDetectionRules, IEvent> {
   }
 
   clearErrorMsg() {
-    this.ruleWrapRefList.forEach(vm => vm.clearError());
+    for (const vm of this.ruleWrapRefList) {
+      vm.clearError();
+    }
   }
 
   /**
@@ -512,7 +508,7 @@ export default class DetectionRules extends tsc<IDetectionRules, IEvent> {
    */
   @Emit('ruleClick')
   handleRuleClick(item: IDetectionTypeItem) {
-    return this.modelList.findIndex(model => item.modelData === model);
+    return this.modelList.indexOf(item.modelData);
   }
 
   render() {

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -27,7 +27,7 @@
 import { Component, Emit, Prop, Ref, Watch } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
 
-import dayjs from 'dayjs';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 
 import { random } from '../../../monitor-common/utils/utils';
 import { transformLogUrlQuery } from '../../../monitor-pc/utils';
@@ -36,14 +36,14 @@ import { handleToAlertList } from './event-detail/action-detail';
 
 import type { TType as TSliderType } from './event-detail/event-detail-slider';
 // import { getStatusInfo } from './event-detail/type';
-import type { eventPanelType, IPagination, SearchType } from './typings/event';
+import type { eventPanelType, IEventItem, IPagination, SearchType } from './typings/event';
 import type { TranslateResult } from 'vue-i18n';
 
 import './incident-table.scss';
 
 export interface IShowDetail {
   activeTab?: string;
-  bizId: string;
+  bizId: number;
   id: string;
   type: TSliderType;
 }
@@ -63,6 +63,10 @@ interface IColumnItem {
   };
 }
 
+interface IEventStatusList {
+  text: any;
+  value: string;
+}
 interface IEventStatusMap {
   bgColor: string;
   color: string;
@@ -70,14 +74,15 @@ interface IEventStatusMap {
   name: string | TranslateResult;
 }
 interface IEventTableEvent {
-  onAlarmDispatch?: IncidentItem;
-  onAlertConfirm?: IncidentItem;
+  onAlarmDispatch?: IIncidentItem;
+  onAlertConfirm?: IIncidentItem;
   onBatchSet: string;
-  onChatGroup?: IncidentItem;
+  onChatGroup?: IIncidentItem;
+  onFilterChange: Record<string, string[]>;
   onLimitChange: number;
-  onManualProcess?: IncidentItem;
+  onManualProcess?: IIncidentItem;
   onPageChange: number;
-  onQuickShield?: IncidentItem;
+  onQuickShield?: IIncidentItem;
   onSelectChange: string[];
   onShowDetail?: { id: string; type: TSliderType };
   onSortChange: string;
@@ -89,34 +94,21 @@ interface IEventTableProps {
   pagination: IPagination;
   searchType: SearchType;
   selectedList?: string[];
-  tableData: IncidentItem[];
+  tableData: IIncidentItem[];
 }
-interface IncidentItem {
-  alert_count: number;
-  assignees: string[];
-  begin_time: string;
-  bk_biz_id: string;
-  create_time: number | string;
-  duration: string;
-  end_time: number | string;
-  event_time: string;
-  id: string;
-  incident_reason: string;
-  labels: string[] | { key: string; value: string }[];
-  last_time: string;
-  level: string;
-  severity: number;
-  status: string;
+interface IIncidentItem extends IEventItem {
+  incident_reason?: string;
+  level?: number;
 }
 
-// const alertStoreKey = '__ALERT_EVENT_COLUMN__' ;
-// const actionStoreKey = '__ACTION_EVENT_COLUMN__';
+const incidentKey = '__INCIDENT_EVENT_COLUMN__';
+
 type TableSizeType = 'large' | 'medium' | 'small';
 @Component({
   // components: { Popover, Pagination, Checkbox }
 })
 export default class IncidentTable extends tsc<IEventTableProps, IEventTableEvent> {
-  @Prop({ required: true }) tableData: IncidentItem[];
+  @Prop({ required: true }) tableData: IIncidentItem[];
   @Prop({ required: true }) pagination: IPagination;
   @Prop({ default: false }) loading: boolean;
   @Prop({ default: () => [] }) bizIds: number[];
@@ -128,6 +120,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
   @Ref('moreItems') moreItemsRef: HTMLDivElement;
 
   eventStatusMap: Record<string, IEventStatusMap> = {};
+  eventStatusList: IEventStatusList[] = [];
   actionStatusColorMap: Record<string, string> = {
     running: '#A3C4FD',
     success: '#8DD3B5',
@@ -141,6 +134,8 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
   tableKey: string = random(10);
   extendInfoMap: Record<string, TranslateResult>;
   popoperInstance: any = null;
+  // 故障标签溢出提示实例
+  tagPopoverIns = null;
   selectedCount = 0;
   tableToolList: {
     id: string;
@@ -160,6 +155,12 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
    * @return {*}
    */
   get tableColumn(): IColumnItem[] {
+    let storeColumnList: any = localStorage.getItem(incidentKey) || '';
+    try {
+      storeColumnList = JSON.parse(storeColumnList) || [];
+    } catch {
+      storeColumnList = [];
+    }
     return (
       [
         {
@@ -206,6 +207,9 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
           disabled: true,
           props: {
             width: 110,
+            filters: this.eventStatusList,
+            'filter-method': () => true,
+            'filter-multiple': true,
           },
         },
         {
@@ -225,40 +229,29 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
           disabled: false,
           checked: true,
           props: {
-            width: 120,
-            minWidth: 120,
-            formatter: (row: IncidentItem) => {
+            width: 121,
+            minWidth: 121,
+            formatter: (row: IIncidentItem) => {
               return (
                 <div class='tag-column-wrap'>
-                  <div class='tag-column'>
-                    {row.labels ? (
-                      <div>
-                        <div class='tag-item set-item'>
-                          {typeof row.labels[0] === 'string'
-                            ? row.labels[0].replace(/\//g, '')
-                            : row.labels[0]?.key
-                              ? `${row.labels[0].key}: ${row.labels[0].value.replace(/\//g, '')}`
-                              : '--'}
-                        </div>
-                        {row.labels.length > 1 && (
-                          <bk-popover>
-                            <div slot='content'>
-                              {row.labels.map(item => (
-                                <div
-                                  key={item}
-                                  style={'margin:0 -5px'}
-                                >
-                                  {item}
-                                </div>
-                              ))}
-                            </div>
-                            <div class='tag-item set-item'>+ {row.labels.length - 1}</div>
-                          </bk-popover>
-                        )}
-                      </div>
-                    ) : (
-                      '--'
-                    )}
+                  <div
+                    class='tag-column'
+                    onMouseenter={e => this.handleTagMouseenter(e, row.labels)}
+                  >
+                    {row.labels?.length
+                      ? row.labels.map((item, index) => (
+                          <div
+                            key={`${item}__${index}`}
+                            class='tag-item set-item'
+                          >
+                            {typeof item === 'string'
+                              ? item.replace(/\//g, '')
+                              : item.key
+                                ? `${item.key}: ${item.value.replace(/\//g, '')}`
+                                : '--'}
+                          </div>
+                        ))
+                      : '--'}
                   </div>
                 </div>
               );
@@ -274,7 +267,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
             width: 174,
             minWidth: 150,
             // sortable: 'curstom',
-            formatter: (row: IncidentItem) => {
+            formatter: (row: IIncidentItem) => {
               return (
                 <span>
                   {this.formatterTime(row.begin_time)} / <br />
@@ -293,7 +286,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
             width: 100,
             minWidth: 100,
             // sortable: 'curstom',
-            formatter: (row: IncidentItem) => {
+            formatter: (row: IIncidentItem) => {
               return row.duration || '--';
             },
           },
@@ -306,7 +299,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
           props: {
             width: 150,
             minWidth: 150,
-            formatter: (row: IncidentItem) => {
+            formatter: (row: IIncidentItem) => {
               return (
                 (row?.assignees || []).map(name => (
                   <bk-user-display-name
@@ -327,11 +320,16 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
           props: {
             width: 240,
             showOverflowTooltip: true,
-            formatter: (row: IncidentItem) => row.incident_reason || '--', // row.content.text || '--'
+            formatter: (row: IIncidentItem) => row.incident_reason || '--', // row.content.text || '--'
           },
         },
       ] as IColumnItem[]
-    ).filter(Boolean);
+    )
+      .filter(Boolean)
+      .map(item => ({
+        ...item,
+        checked: storeColumnList?.length ? storeColumnList.includes(item.id) : item.checked,
+      }));
   }
 
   @Watch('tableData')
@@ -375,6 +373,12 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
         name: this.$t('已解决'),
         icon: 'icon-mc-solved',
       },
+      merged: {
+        color: '#979ba5',
+        bgColor: '#f0f1f5',
+        name: this.$t('已合并'),
+        icon: 'icon-yihebing',
+      },
       ABNORMAL: {
         color: '#EA3536',
         bgColor: '#FEEBEA',
@@ -394,6 +398,28 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
         icon: '',
       },
     };
+    this.eventStatusList = [
+      {
+        value: 'abnormal',
+        text: this.$t('未恢复'),
+      },
+      {
+        value: 'recovering',
+        text: this.$t('观察中'),
+      },
+      {
+        value: 'recovered',
+        text: this.$t('已恢复'),
+      },
+      {
+        value: 'closed',
+        text: this.$t('已解决'),
+      },
+      {
+        value: 'merged',
+        text: this.$t('已合并'),
+      },
+    ];
     this.extendInfoMap = {
       log_search: this.$t('查看更多相关的日志'),
       custom_event: this.$t('查看更多相关的事件'),
@@ -444,7 +470,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
    * @return {*}
    */
   @Emit('showDetail')
-  handleShowDetail(item: IncidentItem, activeTab = ''): IShowDetail {
+  handleShowDetail(item: IIncidentItem, activeTab = ''): IShowDetail {
     const typeMap = {
       alert: 'eventDetail',
       action: 'handleDetail',
@@ -471,15 +497,47 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
   }
 
   @Emit('selectChange')
-  handleSelectChange(selectList: IncidentItem[]) {
+  handleSelectChange(selectList: IIncidentItem[]) {
     this.selectedCount = selectList?.length || 0;
     return selectList.map(item => item.id);
+  }
+
+  @Emit('filterChange')
+  handleFilterChange(filters: Record<string, string[]>) {
+    // 将故障状态筛选抛给父组件处理
+    return {
+      status: Object.values(filters)[0],
+    };
   }
 
   @Emit('alarmDispatch')
   handleAlarmDispatch(v) {
     return v;
   }
+
+  /**
+   * @description: 故障标签溢出时的popover展示
+   * @param {MouseEvent} e
+   * @param {IEventItem['labels']} data
+   */
+  handleTagMouseenter(e: MouseEvent, data: IEventItem['labels']) {
+    this.tagPopoverIns?.destroy?.();
+    const { clientWidth, clientHeight, scrollWidth, scrollHeight } = e.target as HTMLDivElement;
+    if (scrollWidth > clientWidth || scrollHeight > clientHeight) {
+      this.tagPopoverIns = this.$bkPopover(e.target, {
+        content: `${data.map(item => `<div>${item}</div>`).join('')}`,
+        maxWidth: 320,
+        placement: 'top',
+        boundary: 'window',
+        interactive: true,
+        distance: 7,
+        duration: [0, 0],
+        arrow: true,
+      });
+      this.tagPopoverIns?.show?.(100);
+    }
+  }
+
   /**
    * @description: 关联信息跳转
    * @param {Record} extendInfo
@@ -608,7 +666,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
     return '--';
   }
   // 跳转关联事件
-  handleClickEventCount(item: IncidentItem) {
+  handleClickEventCount(item: IIncidentItem) {
     this.handleShowDetail(item, 'FailureView');
   }
   /**
@@ -616,7 +674,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
    * @param {string} id
    * @return {*}
    */
-  handleClickActionCount(type: 'defense' | 'trigger', row: IncidentItem) {
+  handleClickActionCount(type: 'defense' | 'trigger', row: IIncidentItem) {
     // const data = { queryString: `action_id : ${id}`, timeRange }
     const { id, create_time: createTime, end_time: endTime } = row;
     handleToAlertList(
@@ -633,8 +691,8 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
   formatterTime(time: number | string): string {
     if (!time) return '--';
     if (typeof time !== 'number') return time;
-    if (time.toString().length < 13) return dayjs(time * 1000).format('YYYY-MM-DD HH:mm:ss');
-    return dayjs(time).format('YYYY-MM-DD HH:mm:ss');
+    if (time.toString().length < 13) return formatWithTimezone(time * 1000) as string;
+    return formatWithTimezone(time) as string;
   }
 
   handleDescEnter(e: MouseEvent, dimensions, description) {
@@ -703,7 +761,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
         prop={column.id}
         {...{ props: column.props }}
         scopedSlots={{
-          default: ({ row }: { row: IncidentItem }) => (
+          default: ({ row }: { row: IIncidentItem }) => (
             <a
               class={`event-status status-${row.severity} id-column ${row.level}_id`}
               v-bk-overflow-tips
@@ -779,7 +837,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
         prop={column.id}
         {...{ props: column.props }}
         scopedSlots={{
-          default: ({ row }: { row: IncidentItem }) =>
+          default: ({ row }: { row: IIncidentItem }) =>
             row.alert_count > -1 ? (
               <bk-button
                 text={true}
@@ -793,6 +851,22 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
         }}
       />
     );
+  }
+  /**
+   * @description: 设置表字段显示
+   * @param {*} param1
+   * @return {*}
+   */
+  handleSettingChange({ size, fields }) {
+    this.tableSize = size;
+    for (const item of this.tableColumn) {
+      item.checked = fields.some(field => field.id === item.id);
+    }
+    localStorage.setItem(
+      incidentKey,
+      JSON.stringify(this.tableColumn.filter(item => item.checked || item.disabled).map(item => item.id))
+    );
+    this.tableKey = random(10);
   }
   // 表格column设置
   handleGetColumns() {
@@ -828,6 +902,7 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
           pagination={this.pagination}
           row-class-name={this.tableClickCurrentInstance.getClassNameByCurrentIndex()}
           size={this.tableSize}
+          on-filter-change={this.handleFilterChange}
           on-page-change={this.handlePageChange}
           on-page-limit-change={this.handlePageLimitChange}
           on-row-click={this.tableClickCurrentInstance.tableRowClick()}
@@ -841,6 +916,19 @@ export default class IncidentTable extends tsc<IEventTableProps, IEventTableEven
           on-sort-change={this.handleSortChange}
         >
           {this.handleGetColumns()}
+          <bk-table-column
+            key={`${this.tableKey}_${this.searchType}`}
+            type='setting'
+          >
+            <bk-table-setting-content
+              class='event-table-setting'
+              fields={this.tableColumn}
+              label-key='name'
+              selected={this.tableColumn.filter(item => item.checked || item.disabled)}
+              value-key='id'
+              on-setting-change={this.handleSettingChange}
+            />
+          </bk-table-column>
         </bk-table>
       </div>
     );

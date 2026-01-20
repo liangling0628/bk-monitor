@@ -173,7 +173,8 @@ class StorageHandler(object):
                 "index_count": i["index_count"],
                 "biz_count": i["biz_count"],
                 "storage_cluster_id": i["cluster_config"].get("cluster_id"),
-                "storage_cluster_name": i["cluster_config"].get("cluster_name"),
+                "storage_cluster_name": i["cluster_config"].get("display_name") or
+                                        i["cluster_config"].get("cluster_name"),
                 "storage_version": i["cluster_config"].get("version"),
                 "storage_type": STORAGE_CLUSTER_TYPE,
                 "priority": i["priority"],
@@ -478,6 +479,8 @@ class StorageHandler(object):
             cluster_info = self._get_cluster_detail_info(cluster_info)
         cluster_groups = self.filter_cluster_groups(cluster_info, bk_biz_id, is_default, enable_archive)
         for cluster_info in cluster_groups:
+            if cluster_info["cluster_config"].get("display_name"):
+                cluster_info["cluster_config"]["cluster_name"] = cluster_info["cluster_config"]["display_name"]
             cluster_info["is_platform"] = self.is_platform_cluster(
                 cluster_info["cluster_config"]["custom_option"]["visible_config"]["visible_type"]
             )
@@ -637,6 +640,9 @@ class StorageHandler(object):
             bkbase_cluster_id = self.sync_es_cluster(params)
             params["custom_option"]["bkbase_cluster_id"] = bkbase_cluster_id
 
+        if params.get("cluster_name"):
+            params["display_name"] = params.pop("cluster_name")
+
         bk_biz_id = int(params["custom_option"]["bk_biz_id"])
         es_source_id = TransferApi.create_cluster_info(params)
         username = get_request_username()
@@ -654,7 +660,7 @@ class StorageHandler(object):
 
         Permission().grant_creator_action(
             resource=ResourceEnum.ES_SOURCE.create_simple_instance(
-                es_source_id, attribute={"name": params["cluster_name"]}
+                es_source_id, attribute={"name": params.get("display_name") or params.get("cluster_name")}
             )
         )
 
@@ -727,6 +733,9 @@ class StorageHandler(object):
             params["custom_option"]["option"] = params["option"]
         elif raw_custom_option.get("option"):
             params["custom_option"]["option"] = raw_custom_option["option"]
+
+        if params.get("cluster_name"):
+            params["display_name"] = params.pop("cluster_name")
 
         cluster_obj = TransferApi.modify_cluster_info(params)
         cluster_obj["auth_info"]["password"] = ""
@@ -943,6 +952,7 @@ class StorageHandler(object):
         @cache_five_minute("connect_info_{cluster_id}")
         def _cache_status_and_stats(*, cluster_id, bk_biz_id):
             cluster_stats_info = None
+            _status = False
             try:
                 _status = BkLogApi.connectivity_detect(
                     params={"bk_biz_id": bk_biz_id, "cluster_id": cluster_id, "default_auth": True},
@@ -954,7 +964,6 @@ class StorageHandler(object):
                     cluster_stats_info = StorageHandler._build_cluster_stats(cluster_stats)
             except Exception as e:  # pylint: disable=broad-except
                 logger.error(f"[storage] get cluster status failed => [{e}]")
-                _status = False
             # connectivity_detect连通性正常返回的事[True, Version], 失败的时候返回的是False
             if isinstance(_status, list):
                 _status = _status[0]
@@ -969,8 +978,8 @@ class StorageHandler(object):
         nodes_count = cluster_stats["nodes"]["count"]
         return {
             "node_count": cluster_stats["nodes"]["count"]["total"],
-            "shards_total": cluster_stats["indices"]["shards"]["total"],
-            "shards_pri": cluster_stats["indices"]["shards"]["primaries"],
+            "shards_total": cluster_stats["indices"]["shards"].get("total", 0),
+            "shards_pri": cluster_stats["indices"]["shards"].get("primaries", 0),
             "data_node_count": nodes_count.get("data_hot") or nodes_count.get("data_content") or nodes_count["data"],
             "indices_count": cluster_stats["indices"]["count"],
             "indices_docs_count": cluster_stats["indices"]["docs"]["count"],

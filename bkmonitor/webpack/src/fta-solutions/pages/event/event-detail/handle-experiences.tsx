@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -169,7 +169,7 @@ export default class HandleExperience extends tsc<IHandleExperienceProps> {
       resultTableId = metricList[0]?.result_table_id || graphQueryConfig?.table || `${dataSourceType}.${dataTypeLabel}`;
     // 取维度交集
     let mixed = metricList[0]?.dimensions || [];
-    metricList?.reduce((pre, cur) => {
+    metricList?.reduce((_pre, cur) => {
       mixed = mixed.filter(n => cur.dimensions.map(dim => dim.id).indexOf(n.id) !== -1);
       return mixed;
     }, []);
@@ -449,14 +449,14 @@ export default class HandleExperience extends tsc<IHandleExperienceProps> {
       return (
         <div>
           <bk-user-display-name user-id={item.update_user} />
-          {this.$t(' 于 {0} 更新', [dayjs.tz(item.update_time).format('YYYY-MM-DD HH:mm:ss')])},
+          {this.$t(' 于 {0} 更新', [dayjs.tz(item.update_time).format('YYYY-MM-DD HH:mm:ssZZ')])},
         </div>
       );
     }
     return (
       <div>
         <bk-user-display-name user-id={item.create_user} />,
-        {this.$t(' 于 {0} 创建', [dayjs.tz(item.create_time).format('YYYY-MM-DD HH:mm:ss')])}
+        {this.$t(' 于 {0} 创建', [dayjs.tz(item.create_time).format('YYYY-MM-DD HH:mm:ssZZ')])}
       </div>
     );
   }

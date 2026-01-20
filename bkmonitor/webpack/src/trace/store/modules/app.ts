@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -35,8 +35,14 @@ export interface IAppState {
   extraDocLinkMap: Record<string, IDocLinkData>;
   navId: string;
   siteUrl: string;
+  spaceTimezone: string;
   userName: string;
 }
+
+const getSpaceTimezone = () => {
+  const spaceTimezone = window.space_list.find(item => +item.bk_biz_id === +window.bk_biz_id)?.time_zone || '';
+  return spaceTimezone;
+};
 
 export const useAppStore = defineStore('app', {
   state: (): IAppState => ({
@@ -48,6 +54,7 @@ export const useAppStore = defineStore('app', {
     siteUrl: window.site_url,
     bkUrl: window.bk_url,
     extraDocLinkMap: {},
+    spaceTimezone: getSpaceTimezone(),
   }),
   actions: {
     /**

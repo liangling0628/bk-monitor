@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -10,7 +9,6 @@ specific language governing permissions and limitations under the License.
 """
 
 from functools import partial
-from typing import List
 
 from constants.alert import EventSeverity
 
@@ -28,11 +26,16 @@ NO_DATA_CONFIG = {"agg_dimension": [], "continuous": 10, "is_enabled": False, "l
 
 
 def detects_config(
-    recovery_check_window: int, trigger_check_window: int, trigger_count: int, level: int, status_setter="recovery"
-) -> List:
+    recovery_check_window: int,
+    trigger_check_window: int,
+    trigger_count: int,
+    level: int,
+    status_setter="recovery",
+    connector: str = "and",
+) -> list:
     return [
         {
-            "connector": "and",
+            "connector": connector,
             "expression": "",
             "level": level,
             "recovery_config": {"check_window": recovery_check_window, "status_setter": status_setter},
@@ -51,7 +54,7 @@ remind_detects_config = partial(detects_config, level=EventSeverity.REMIND)
 nodata_recover_detects_config = partial(detects_config, status_setter="recovery-nodata")
 
 
-def algorithms_config(method: str, threshold: int, level: int) -> List:
+def algorithms_config(method: str, threshold: int, level: int) -> list:
     return [
         {
             "config": [[{"method": method, "threshold": threshold}]],

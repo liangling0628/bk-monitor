@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -26,6 +26,7 @@
 
 // import { listEventLog } from 'monitor-api/modules/alert_events'
 import { listAlertLog } from 'monitor-api/modules/alert';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { transformDataKey } from 'monitor-common/utils/utils';
 import { Action, getModule, Module, VuexModule } from 'vuex-module-decorators';
 
@@ -57,7 +58,7 @@ class EventDetail extends VuexModule {
 
       if (item.is_multiple) {
         item.collapse = true;
-        item.expandTime = `${item.begin_time} 至 ${item.time}`;
+        item.expandTime = `${formatWithTimezone(item.begin_time)} ${window.i18n.locale === 'zhCN' ? '至' : 'to'} ${formatWithTimezone(item.time)}`;
         item.expand = false;
       } else {
         item.collapse = false;

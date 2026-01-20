@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -23,8 +23,6 @@ from api.cmdb.default import (
 from api.kubernetes.default import (
     FetchContainerUsage,
     FetchK8sBkmMetricbeatEndpointUpResource,
-    FetchK8sEventListResource,
-    FetchK8sEventLogResource,
     FetchK8sNodePerformanceResource,
     FetchK8sPodListByClusterResource,
     FetchK8sWorkloadListByClusterResource,
@@ -3126,23 +3124,6 @@ def monkeypatch_kubernetes_fetch_k8s_monitor_list_by_cluster(monkeypatch):
 
 
 @pytest.fixture
-def monkeypatch_kubernetes_fetch_k8s_event_list(monkeypatch):
-    """返回event信息 ."""
-
-    def mock_return(self, params):
-        data_type = params.get("data_type")
-        if data_type == "chart":
-            return MOCK_KUBERNETES_FETCH_K8S_EVENT_LIST_TYPE_IS_CHART
-        return MOCK_KUBERNETES_FETCH_K8S_EVENT_LIST
-
-    monkeypatch.setattr(
-        FetchK8sEventListResource,
-        "perform_request",
-        mock_return,
-    )
-
-
-@pytest.fixture
 def monkeypatch_kubernetes_fetch_container_usage(monkeypatch):
     """返回一个集群的容器container usage信息 ."""
     monkeypatch.setattr(
@@ -3207,14 +3188,6 @@ def monkeypatch_fetch_k8s_bkm_metricbeat_endpoint_up(monkeypatch):
         return result
 
     monkeypatch.setattr(FetchK8sBkmMetricbeatEndpointUpResource, "perform_request", mock_return)
-
-
-@pytest.fixture
-def monkeypatch_kubernetes_monitor_endpoint_list(monkeypatch):
-    """返回一个集群的Node usage信息 ."""
-    monkeypatch.setattr(
-        FetchK8sMonitorEndpointList, "perform_request", lambda self, params: MOCK_KUBERNETES_MONITOR_ENDPOINT_LIST
-    )
 
 
 @pytest.fixture
@@ -4321,14 +4294,6 @@ def monkeypatch_request_performance_data(monkeypatch):
                 ],
             ),
         ],
-    )
-
-
-@pytest.fixture
-def monkeypatch_kubernetes_fetch_k8s_event_log(monkeypatch):
-    """返回一个集群的事件日志 ."""
-    monkeypatch.setattr(
-        FetchK8sEventLogResource, "perform_request", lambda self, params: MOCK_KUBERNETES_FETCH_K8S_EVENT_LOG
     )
 
 

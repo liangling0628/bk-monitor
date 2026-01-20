@@ -19,6 +19,7 @@ We undertake not to change the open source license (MIT license) applicable to t
 the project delivered to anyone in the future.
 """
 
+from django.conf import settings
 from django.utils.translation import gettext_lazy as _  # noqa
 
 from apps.api.base import DataAPI  # noqa
@@ -29,10 +30,21 @@ from config.domains import RESOURCE_CENTER_APIGATEWAY_ROOT  # noqa
 class _BkDataResourceCenterApi:
     MODULE = _("数据平资源中心模块")
 
+    @property
+    def use_apigw(self):
+        return settings.USE_APIGW
+
+    def _build_url(self, new_path, old_path):
+        return (
+            f"{settings.PAAS_API_HOST}/api/bk-base/{settings.ENVIRONMENT}/v3/resourcecenter/{new_path}"
+            if self.use_apigw
+            else f"{RESOURCE_CENTER_APIGATEWAY_ROOT}{old_path}"
+        )
+
     def __init__(self):
         self.cluster_query_digest = DataAPI(
             method="GET",
-            url=RESOURCE_CENTER_APIGATEWAY_ROOT + "clusters/query_digest/",
+            url=self._build_url("clusters/query_digest/", "clusters/query_digest/"),
             module=self.MODULE,
             description="获取资源管理系统集群信息",
             default_return_value=None,
@@ -42,7 +54,7 @@ class _BkDataResourceCenterApi:
         )
         self.create_resource_set = DataAPI(
             method="POST",
-            url=RESOURCE_CENTER_APIGATEWAY_ROOT + "resource_sets/",
+            url=self._build_url("resource_sets/", "resource_sets/"),
             module=self.MODULE,
             description="创建资源",
             default_return_value=None,
@@ -52,7 +64,7 @@ class _BkDataResourceCenterApi:
         )
         self.update_resource_set = DataAPI(
             method="PATCH",
-            url=RESOURCE_CENTER_APIGATEWAY_ROOT + "resource_sets/{resource_set_id}/",
+            url=self._build_url("resource_sets/{resource_set_id}/", "resource_sets/{resource_set_id}/"),
             module=self.MODULE,
             description="更新资源",
             default_return_value=None,

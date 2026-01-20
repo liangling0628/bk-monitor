@@ -231,11 +231,11 @@
               filter-multiple
               :filter-method="sourceFilterMethod"
             >
+              <template #default="{ row }">
+                <bk-user-display-name :user-id="row.updated_by"></bk-user-display-name>
+              </template>
             </bk-table-column>
             <bk-table-column :label="$t('变更时间')" prop="updated_at" sortable>
-              <template #default="{ row }">
-                {{ dayjs(row.updated_at).format("YYYY-MM-DD HH:mm:ss") }}
-              </template>
             </bk-table-column>
             <bk-table-column :label="$t('操作')" prop="operation" width="80">
               <template #default="{ row }">
@@ -276,6 +276,8 @@ import useLocale from "@/hooks/use-locale";
 import BatchOperationMenu from "./batch-operation-menu";
 import FavoriteDetail from "./favorite-detail";
 import dayjs from "dayjs";
+import useUtils from "@/hooks/use-utils";
+
 const props = defineProps({
   modelValue: {
     type: Boolean,
@@ -430,6 +432,8 @@ const getGroupList = async () => {
   } 
 };
 
+const { formatResponseListTimeZoneString } = useUtils();
+
 /** 获取收藏请求 */
 const getFavoriteList = async () => {
   try {
@@ -440,13 +444,13 @@ const getFavoriteList = async () => {
         order_type: "NAME_ASC",
       },
     });
-    const data = res.data.map((item) => {
+    const data = formatResponseListTimeZoneString(res.data, () => {
       return {
-        ...item,
         editName: false,
         editGroup: false,
       };
     });
+
     allGroupList.value = data;
 
     searchResultFavorites.value = allGroupList.value;

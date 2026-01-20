@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -58,6 +58,7 @@ class UnifyQuery:
         functions: list | None = None,
         bk_tenant_id: str | None = None,
     ):
+        self.is_partial = False
         self.functions = [] if functions is None else functions
         # 不传业务指标时传 0，为 None 时查询所有业务
         self.bk_biz_id = bk_biz_id
@@ -189,8 +190,8 @@ class UnifyQuery:
     def process_data_by_datasource(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         first_ds: DataSource = self.data_sources[0]
         if (first_ds.data_source_label, first_ds.data_type_label) in [
-            (DataSourceLabel.BK_APM, DataTypeLabel.EVENT),
-            (DataSourceLabel.BK_MONITOR_COLLECTOR_NEW, DataTypeLabel.LOG),
+            (DataSourceLabel.CUSTOM, DataTypeLabel.EVENT),
+            (DataSourceLabel.BK_MONITOR_COLLECTOR, DataTypeLabel.LOG),
         ]:
             records = first_ds.process_unify_query_data(records)
         return records
@@ -199,6 +200,8 @@ class UnifyQuery:
         first_ds: DataSource = self.data_sources[0]
         if (first_ds.data_source_label, first_ds.data_type_label) in [
             (DataSourceLabel.BK_APM, DataTypeLabel.LOG),
+            (DataSourceLabel.CUSTOM, DataTypeLabel.EVENT),
+            (DataSourceLabel.BK_MONITOR_COLLECTOR, DataTypeLabel.LOG),
         ]:
             records = first_ds.process_unify_query_log(records)
         return records
@@ -209,7 +212,7 @@ class UnifyQuery:
         for record in data.get("list") or []:
             record["_meta"] = {
                 meta_field: record.pop(meta_field, "")
-                for meta_field in ["__data_label", "__doc_id", "__index", "__result_table"]
+                for meta_field in ["__data_label", "__doc_id", "__index", "__result_table", "__parse_failure"]
             }
             record["_meta"]["_time_"] = int(record.pop("_time", 0))
             records.append(record)
@@ -297,6 +300,7 @@ class UnifyQuery:
         end_time: int = None,
         time_alignment: bool = True,
         order_by: list[str] | None = None,
+        not_time_align: bool = False,
     ):
         """
         生成查询参数
@@ -331,10 +335,11 @@ class UnifyQuery:
             "step": f"{step}s",
             "space_uid": self.space_uid,
             "bk_tenant_id": self.bk_tenant_id,
+            "not_time_align": not_time_align,
         }
 
         if start_time and end_time:
-            if time_alignment:
+            if time_alignment and not not_time_align:
                 params["start_time"] = str(time_interval_align(start_time // 1000, step))
                 params["end_time"] = str(time_interval_align(end_time // 1000, step))
             else:
@@ -353,13 +358,15 @@ class UnifyQuery:
         down_sample_range: int | None = "",
         time_alignment: bool = True,
         instant: bool = None,
-    ) -> list[dict]:
+        not_time_align: bool = False,
+    ) -> tuple[list[dict], bool]:
         """
         使用统一查询模块进行查询
         """
-        params = self.get_unify_query_params(start_time, end_time, time_alignment)
+        is_partial = False
+        params = self.get_unify_query_params(start_time, end_time, time_alignment, not_time_align=not_time_align)
         if not params["query_list"]:
-            return []
+            return [], is_partial
 
         params.update(dict(down_sample_range=down_sample_range, timezone=timezone.get_current_timezone_name()))
 
@@ -374,9 +381,10 @@ class UnifyQuery:
             span.set_attribute("bk.system", "unify_query")
             span.set_attribute("bk.unify_query.statement", json.dumps(params))
             data = api.unify_query.query_data(**params)
+            is_partial = data.get("is_partial", False)
             records: list[dict[str, Any]] = self.process_unify_query_data(params, data, end_time=end_time)
             records = self.process_data_by_datasource(records)
-        return records
+        return records, is_partial
 
     def _query_reference_using_unify_query(
         self,
@@ -428,6 +436,10 @@ class UnifyQuery:
         params: dict[str, Any] = self.get_unify_query_params(start_time, end_time, time_alignment, order_by)
         if not params["query_list"]:
             return []
+
+        for query in params["query_list"]:
+            # 原始日志查询，无需聚合及函数。
+            query.update({"function": [], "field_name": "", "time_aggregation": {}})
 
         params["limit"] = limit or 1
         params["_from"] = offset or 0
@@ -506,9 +518,11 @@ class UnifyQuery:
         slimit: int | None = settings.SQL_MAX_LIMIT,
         offset: int | None = None,
         down_sample_range: str | None = "",
+        not_time_align: bool = False,
         *args,
         **kwargs,
     ) -> list[dict]:
+        self.is_partial = False
         if not self.data_sources:
             return []
 
@@ -522,16 +536,21 @@ class UnifyQuery:
         if self.use_unify_query():
             labels["api"] = "unify_query"
             try:
+                time_alignment = kwargs.get("time_alignment", True)
+                if not_time_align:
+                    time_alignment = False
                 with metrics.DATASOURCE_QUERY_TIME.labels(**labels).time():
-                    data = self._query_unify_query(
+                    data, is_partial = self._query_unify_query(
                         start_time=start_time,
                         end_time=end_time,
                         limit=limit,
                         slimit=slimit,
                         down_sample_range=down_sample_range,
-                        time_alignment=kwargs.get("time_alignment", True),
+                        time_alignment=time_alignment,
                         instant=kwargs.get("instant"),
+                        not_time_align=not_time_align,
                     )
+                    self.is_partial = is_partial
             except Exception as e:
                 exc = e
         else:

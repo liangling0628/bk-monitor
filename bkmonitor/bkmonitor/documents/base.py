@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -86,7 +85,7 @@ class BaseDocument(Document):
         if hasattr(self, "id"):
             # 需要在 Document 初始化时传入 id 参数，如果不给，则由ES自动生成
             self.meta["id"] = getattr(self, "id")
-        return super(BaseDocument, self).save(using, index, validate, skip_empty, **kwargs)
+        return super().save(using, index, validate, skip_empty, **kwargs)
 
     @classmethod
     def _format_index_by_day(cls, start_time, end_time):

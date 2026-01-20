@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -47,7 +47,11 @@ class IntelligentDetect(SDKPreDetectMixin, RangeRatioAlgorithmsCollection):
             "predict_args": {
                 arg_key.lstrip("$"): arg_value for arg_key, arg_value in self.validated_config["args"].items()
             },
-            "serving_config": {"service_name": self.validated_config.get("service_name") or "default"},
+            "serving_config": {
+                # 从 extra_config 中获取控制参数
+                "service_name": self.extra_config.get("service_name") or "default",
+                "grey_to_bkfara": self.extra_config.get("grey_to_bkfara", False),
+            },
             "extra_data": {
                 "history_anomaly": {
                     "source": "backfill",

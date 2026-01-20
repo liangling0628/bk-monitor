@@ -149,18 +149,23 @@
         </template>
       </bk-table-column>
       <bk-table-column
+        width="190"
         :label="$t('创建时间')"
         :render-header="$renderHeader"
       >
         <template #default="props">
-          <div>{{ props.row.created_at.slice(0, 19) || '--' }}</div>
+          <div>{{ props.row.created_at || '--' }}</div>
         </template>
       </bk-table-column>
       <bk-table-column
         :label="$t('创建人')"
         :render-header="$renderHeader"
         prop="created_by"
-      ></bk-table-column>
+      >
+        <template #default="props">
+          <bk-user-display-name :user-id="props.row.created_by"></bk-user-display-name>
+        </template>
+      </bk-table-column>
       <bk-table-column
         :width="operatorWidth"
         :label="$t('操作')"
@@ -223,12 +228,13 @@
 </template>
 
 <script>
-  import { projectManages} from '@/common/util';
+  import { projectManages, updateLastSelectedIndexId } from '@/common/util';
   import EmptyStatus from '@/components/empty-status';
   import IndexSetLabelSelect from '@/components/index-set-label-select';
   import { mapGetters } from 'vuex';
   import { formatBytes, requestStorageUsage } from '../../../util';
   import * as authorityMap from '../../../../../../common/authority-map';
+  import useUtils from '@/hooks/use-utils';
 
   export default {
     name: 'IndexSetList',
@@ -318,12 +324,14 @@
         this.isTableLoading = true;
         const { ids } = this.$route.query; // 根据id来检索
         const indexSetIDList = ids ? decodeURIComponent(ids) : [];
-        const query = JSON.parse(JSON.stringify(this.searchParams));
+        const query = structuredClone(this.searchParams);
         query.page = this.pagination.current;
         query.pagesize = this.pagination.limit;
         query.space_uid = this.spaceUid;
         query.index_set_id_list = indexSetIDList;
         this.emptyType = this.searchParams.keyword ? 'search-empty' : 'empty';
+        const { formatResponseListTimeZoneString } = useUtils();
+
         this.$http
           .request('/indexSet/list', {
             query,
@@ -332,14 +340,14 @@
             const resList = res.data.list;
             const indexIdList = resList.filter(item => !!item.index_set_id).map(item => item.index_set_id);
             const { data: desensitizeStatus } = await this.getDesensitizeStatus(indexIdList);
-            this.indexSetList = resList.map(item => ({
-              ...item,
-              is_desensitize: desensitizeStatus[item.index_set_id]?.is_desensitize ?? false,
+            this.indexSetList = formatResponseListTimeZoneString(resList, (item) => ({ 
+              is_desensitize: desensitizeStatus[item.index_set_id]?.is_desensitize ?? false, 
             }));
             this.pagination.count = res.data.total;
             this.loadData()
           })
-          .catch(() => {
+          .catch((err) => {
+            console.warn(err);
             this.emptyType = '500';
           })
           .finally(() => {
@@ -411,7 +419,7 @@
                 },
               ],
             });
-            this.$store.commit('updateAuthDialogData', res.data);
+            this.$store.commit('updateState', {'authDialogData': res.data});
           } catch (err) {
             console.warn(err);
           } finally {
@@ -440,7 +448,7 @@
                 },
               ],
             });
-            this.$store.commit('updateAuthDialogData', res.data);
+            this.$store.commit('updateState', {'authDialogData': res.data});
           } catch (err) {
             console.warn(err);
           } finally {
@@ -463,6 +471,7 @@
           });
         } else if (type === 'search') {
           // 检索
+          updateLastSelectedIndexId(this.spaceUid, row.index_set_id)
           this.$router.push({
             name: 'retrieve',
             params: {

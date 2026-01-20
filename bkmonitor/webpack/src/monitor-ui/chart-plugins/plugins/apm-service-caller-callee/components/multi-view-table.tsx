@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -23,6 +23,7 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
+/** biome-ignore-all lint/suspicious/useIterableCallbackReturn: <explanation> */
 
 import { Component, Emit, InjectReactive, Prop, ProvideReactive, Watch } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
@@ -30,6 +31,7 @@ import { Component as tsc } from 'vue-tsx-support';
 import dayjs from 'dayjs';
 import { simpleServiceList } from 'monitor-api/modules/apm_meta';
 import { getFieldOptionValues } from 'monitor-api/modules/apm_metric';
+import { getCodeRemarks } from 'monitor-api/modules/apm_service';
 import { copyText } from 'monitor-common/utils/utils';
 import TableSkeleton from 'monitor-pc/components/skeleton/table-skeleton';
 import { handleTransformToTimestamp } from 'monitor-pc/components/time-range/utils';
@@ -37,6 +39,8 @@ import DashboardPanel from 'monitor-ui/chart-plugins/components/flex-dashboard-p
 
 import { CHART_TYPE, TAB_TABLE_TYPE } from '../utils';
 import { formatDateRange } from '../utils';
+import CodeRedefineSlider from './code/code-redefine-slider';
+import CodeRemarksDialog from './code/code-remarks-dialog';
 import TabBtnGroup from './tab-btn-group';
 
 import type { PanelModel } from '../../../typings';
@@ -44,6 +48,7 @@ import type { CallOptions, DimensionItem, IColumn, IDataItem, IDimensionChartOpt
 import type { TimeRangeType } from 'monitor-pc/components/time-range/time-range';
 
 import './multi-view-table.scss';
+
 interface IMultiViewTableEvent {
   onDimensionKeyChange?: (key: string) => void;
   onDrill?: () => void;
@@ -88,6 +93,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
   @ProvideReactive('curDimensionKey') curDimensionKey: string;
   @InjectReactive('viewOptions') viewOptions;
   @InjectReactive('timeRange') readonly timeRange!: TimeRangeType;
+  @InjectReactive({ from: 'variablesData', default: () => ({}) }) readonly variablesData!: Record<string, any>;
 
   active = 'request';
   cachePanels = TAB_TABLE_TYPE;
@@ -118,6 +124,14 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
   filterOpt = {};
   drillFilterData: IDataItem[] = [];
   drillGroupBy: string[] = [];
+
+  /** 返回码重定义侧栏 */
+  codeRedefineShow = false;
+  /** 返回码备注弹窗 */
+  codeRemarksShow = null;
+  /** 返回码备注 */
+  codeRemarks = {};
+  code = '';
 
   created() {
     this.curDimensionKey = 'request_total';
@@ -181,6 +195,10 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
     return this.viewOptions?.app_name;
   }
 
+  get serviceName() {
+    return this.viewOptions?.service_name;
+  }
+
   get dimensionOptions() {
     if (!this.tableListData?.length) return [];
     const options = new Map();
@@ -230,14 +248,13 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
   @Watch('tableListData', { immediate: true })
   handleListData(_val: IListItem[]) {
     this.filterOpt = {};
-    // console.log(val, 'tableListData');
   }
 
   get showTableList() {
     const { limit, current } = this.pagination;
     const groupByList = this.dimensionList.filter(item => item.active);
     if (this.totalList.length > 0) {
-      groupByList.map((item, ind) => {
+      groupByList.forEach((item, ind) => {
         Object.assign(this.totalList[0], {
           isTotal: true,
           [item.value]: ind === 0 ? '汇总' : '  ',
@@ -258,7 +275,10 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
   }
   mounted() {
     TAB_TABLE_TYPE.find(item => item.id === 'request').handle = this.handleGetDistribution;
-    setTimeout(() => this.getServiceList());
+    setTimeout(() => {
+      this.getServiceList();
+      this.getCodeRemarks();
+    });
     window.addEventListener('resize', this.handleResize);
   }
   beforeDestroy() {
@@ -410,7 +430,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
     this.handleRawCallOptionsChange();
   }
 
-  handleDimension(row, key) {
+  handleDimension(_row, key) {
     this.isShowDimension = true;
     this.drillFilterData = [];
     this.drillGroupBy = [];
@@ -446,6 +466,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
   @Emit('drill')
   chooseSelect(option: IListItem, row: IDataItem) {
     this.drillValue = option.value;
+    this.pagination.current = 1;
     return { option, row };
   }
   copyValue(text) {
@@ -510,11 +531,11 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
         kind: tagTraceMapping[kind].value,
         'resource.service.name': [service_name],
       };
-      groupBy.map(item => {
+      for (const item of groupBy) {
         if (row[item]) {
           filter[tagTraceMapping[item].field] = [row[item]];
         }
-      });
+      }
 
       const conditionList = Object.keys(filter).map(key => {
         return {
@@ -523,10 +544,12 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
           value: filter[key],
         };
       });
+      const start = dayjs(from ?? '');
+      const end = dayjs(to ?? '');
       window.open(
         location.href.replace(
           location.hash,
-          `#/trace/home?app_name=${app_name}&where=${encodeURIComponent(JSON.stringify(conditionList))}&start_time=${from}&end_time=${to}&sceneMode=span&filterMode=ui`
+          `#/trace/home?app_name=${app_name}&where=${encodeURIComponent(JSON.stringify(conditionList))}&start_time=${start.isValid() ? start.valueOf() : from}&end_time=${end.isValid() ? end.valueOf() : to}&sceneMode=span&filterMode=ui`
         )
       );
       return;
@@ -553,6 +576,21 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
       return;
     }
   }
+  /** 返回码备注 */
+  async getCodeRemarks() {
+    const data = await getCodeRemarks({
+      app_name: this.appName,
+      service_name: this.serviceName,
+      kind: this.currentKind,
+    }).catch(() => ({}));
+    this.codeRemarks = data;
+  }
+
+  handleCodeRemarksSuccess() {
+    this.codeRemarksShow = false;
+    this.getCodeRemarks();
+  }
+
   async getSimpleList(field: string, value: string) {
     const { kind } = this.dimensionParam;
     const [startTime, endTime] = handleTransformToTimestamp(this.timeRange);
@@ -581,15 +619,67 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
       ...item,
     }));
   }
-  @Watch('filterOpt', { deep: true })
-  handleFilterOpt(_val) {
-    // console.log(val, 'val');
-  }
+
   fieldFilterMethod(value, row, column) {
     const { property } = column;
     this.filterOpt[property] = Array.from(new Set([...this.filterOpt[property], value]));
     // console.log(this.filterOpt, 'this.filterOpt-val');
     return row[property] === value;
+  }
+
+  /** 返回码表格列 */
+  renderCodeColumn(item: DimensionItem, data) {
+    const remark = this.codeRemarks[data[item.value]];
+    return (
+      <span
+        class={[
+          'multi-view-table-link',
+          'code-column',
+          { 'block-link': data?.isTotal || item.value === 'time' || !data[item.value] },
+        ]}
+      >
+        <span
+          class='item-txt'
+          v-bk-overflow-tips
+          onClick={() => this.handleShowDetail(data, item.value)}
+        >
+          {data[item.value] || '--'}
+        </span>
+        {remark && <span class='remark-text'>{remark}</span>}
+        {!data?.isTotal && data[item.value] && (
+          <i
+            class='icon-monitor icon-mc-copy tab-row-icon'
+            v-bk-tooltips={{ content: this.$t('复制') }}
+            onClick={() => this.copyValue(data[item.value])}
+          />
+        )}
+        {data[item.value] && (
+          <i
+            class='icon-monitor icon-zhongdingyi tab-row-icon'
+            v-bk-tooltips={{ content: this.$t('返回码重定义') }}
+            onClick={this.handleCodeRedefine}
+          />
+        )}
+        {data[item.value] && (
+          <i
+            class='icon-monitor icon-beizhu1 tab-row-icon'
+            v-bk-tooltips={{ content: this.$t('备注') }}
+            onClick={() => this.handleEditCodeRemark(data[item.value])}
+          />
+        )}
+      </span>
+    );
+  }
+
+  /** 错误码重定义 */
+  handleCodeRedefine() {
+    this.codeRedefineShow = true;
+  }
+
+  /** 返回码备注 */
+  handleEditCodeRemark(code: string) {
+    this.codeRemarksShow = true;
+    this.code = code;
   }
 
   // 渲染左侧表格的列
@@ -654,6 +744,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
                           });
                     return (
                       <bk-popover
+                        key='caller-field-popover'
                         ext-cls='caller-field-popover'
                         placement='top'
                         theme='light'
@@ -743,7 +834,8 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
             key={`${item.value}_${key}`}
             scopedSlots={{
               default: a => {
-                const timeTxt = a.row.time ? dayjs.tz(a.row.time * 1000).format('YYYY-MM-DD HH:mm:ss') : '--';
+                if (item.value === 'code') return this.renderCodeColumn(item, a.row);
+                const timeTxt = a.row.time ? dayjs.tz(a.row.time * 1000).format('YYYY-MM-DD HH:mm:ssZZ') : '--';
                 const txt = item.value === 'time' && !a.row?.isTotal ? timeTxt : a.row[item.value];
                 return (
                   <span
@@ -762,6 +854,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
                     {!a.row?.isTotal && a.row[item.value] && (
                       <i
                         class='icon-monitor icon-mc-copy tab-row-icon'
+                        v-bk-tooltips={{ content: this.$tc('复制') }}
                         onClick={() => this.copyValue(a.row[item.value])}
                       />
                     )}
@@ -799,7 +892,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
     return value;
   }
 
-  renderHeader(h, { column }: any, item: any) {
+  renderHeader(_h, { column }: any, item: any) {
     const { pointTime } = this.dimensionParam;
     let tips = this.timeStrShow[item.prop.slice(-2)];
     if (pointTime?.startTime) {
@@ -828,7 +921,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
         </span>
         {!hasPrefix(item.prop) && (
           <i
-            class='icon-monitor icon-bingtu tab-row-icon'
+            class='icon-monitor icon-bingtu'
             onClick={e => {
               e.stopPropagation();
               this.handleDimension(column, item.prop);
@@ -950,8 +1043,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
       this.drillGroupBy.splice(ind, 1);
     }
     this.drillGroupBy.push(dimensionKey);
-
-    Object.keys(dimensions || {}).map(key => {
+    for (const key of Object.keys(dimensions || {})) {
       const ind = this.drillFilterData.findIndex(item => item.key === key);
       /** 图表下钻带有时间特殊处理 */
       if (key === 'time') {
@@ -967,7 +1059,7 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
           value: [dimensions[key]],
         });
       }
-    });
+    }
     this.dimensionChartOpt.drillFilterData = this.drillFilterData.filter(item => item.key !== 'time');
     this.dimensionChartOpt.drillGroupBy = this.drillGroupBy;
   }
@@ -1079,7 +1171,13 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
             show-total-count
             on-change={this.pageChange}
             on-limit-change={this.limitChange}
-            {...{ on: { 'update:current': v => (this.pagination.current = v) } }}
+            {...{
+              on: {
+                'update:current': v => {
+                  this.pagination.current = v;
+                },
+              },
+            }}
           />
         )}
         {/* 维度趋势图侧栏 */}
@@ -1090,7 +1188,13 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
           quick-close={true}
           title={this.$t('维度趋势图')}
           transfer={true}
-          {...{ on: { 'update:isShow': v => (this.isShowDetail = v) } }}
+          {...{
+            on: {
+              'update:isShow': v => {
+                this.isShowDetail = v;
+              },
+            },
+          }}
         >
           {this.isShowDetail && (
             <div
@@ -1196,6 +1300,33 @@ export default class MultiViewTable extends tsc<IMultiViewTableProps, IMultiView
             )}
           </div>
         </bk-dialog>
+
+        <CodeRedefineSlider
+          appName={this.appName}
+          callOptions={this.callOptions}
+          isShow={this.codeRedefineShow}
+          service={this.serviceName}
+          type={this.currentKind}
+          variablesData={this.variablesData}
+          onShowChange={show => {
+            this.codeRedefineShow = show;
+          }}
+        />
+
+        <CodeRemarksDialog
+          params={{
+            app_name: this.appName,
+            service_name: this.serviceName,
+            kind: this.currentKind,
+          }}
+          code={this.code}
+          isShow={this.codeRemarksShow}
+          value={this.codeRemarks[this.code]}
+          onShowChange={show => {
+            this.codeRemarksShow = show;
+          }}
+          onSuccess={this.handleCodeRemarksSuccess}
+        />
       </div>
     );
   }

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -76,13 +76,12 @@ export default defineComponent({
         btnLoading.value = true;
         const { incident_name, level, assignees, labels, incident_reason, id, incident_id, bk_biz_id } =
           incidentDetailData.value;
-        const newLabels = labels.map(item => `/${item}/`);
         editIncident({
           bk_biz_id,
           incident_name,
           level,
           assignees,
-          labels: newLabels,
+          labels,
           incident_reason,
           incident_id,
           id,
@@ -106,6 +105,17 @@ export default defineComponent({
     const handleUserChange = v => {
       incidentDetailData.value.assignees = v;
     };
+
+    const handleShown = () => {
+      nextTick(() => {
+        const modalBody = document.querySelector('.bk-modal-body');
+        if (modalBody) {
+          // 设置焦点，确保打开弹窗时其他元素可以正常失焦
+          modalBody.setAttribute('tabindex', '0');
+        }
+      });
+    };
+
     onMounted(() => {
       getLabelList();
     });
@@ -129,6 +139,7 @@ export default defineComponent({
       editDialogRef,
       userApi,
       handleUserChange,
+      handleShown,
     };
   },
   render() {
@@ -219,6 +230,7 @@ export default defineComponent({
         is-show={this.$props.visible}
         render-directive='if'
         title={this.t('编辑故障属性')}
+        onShown={this.handleShown}
         onUpdate:isShow={this.valueChange}
       />
     );

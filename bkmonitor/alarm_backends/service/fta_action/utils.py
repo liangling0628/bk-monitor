@@ -1,18 +1,17 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import calendar
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import List
 
 import pytz
 from dateutil.relativedelta import relativedelta
@@ -29,9 +28,11 @@ from alarm_backends.core.context.utils import (
 from alarm_backends.core.i18n import i18n
 from alarm_backends.service.converge.dimension import DimensionCalculator
 from alarm_backends.service.converge.tasks import run_converge
+from api.cmdb.define import Host
 from bkmonitor.documents import ActionInstanceDocument, AlertDocument
 from bkmonitor.models import ActionInstance, DutyArrange, DutyPlan, UserGroup
 from bkmonitor.utils import time_tools
+from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id
 from constants.action import (
     ACTION_DISPLAY_STATUS_DICT,
     ActionNoticeType,
@@ -75,7 +76,8 @@ class PushActionProcessor:
                 # 有父任务的事件，先需要创建对应的子任务
                 sub_actions = action_instance.create_sub_actions()
                 logger.info(
-                    "[create actions]create sub notice actions %s for parent action(%s), exclude_notice_ways(%s)",
+                    "[create sub actions]alert(%s) create sub notice actions %s for parent action(%s), exclude_notice_ways(%s)",
+                    alerts[0].id,
                     len(sub_actions),
                     action_instance.id,
                     "|".join(action_instance.inputs.get("exlude_notice_ways") or []),
@@ -122,15 +124,19 @@ class PushActionProcessor:
             converge_info = DimensionCalculator(
                 action_instance, converge_config=converge_config, alerts=alerts
             ).calc_dimension()
-            task_id = run_converge.delay(
-                converge_config,
-                action_instance.id,
-                ConvergeType.ACTION,
-                converge_info["converge_context"],
-                alerts=[alert.to_dict() for alert in alerts],
+            task_id = run_converge.apply_async(
+                args=(
+                    converge_config,
+                    action_instance.id,
+                    ConvergeType.ACTION,
+                    converge_info["converge_context"],
+                    [alert.to_dict() for alert in alerts],
+                ),
+                countdown=3,
             )
             logger.info(
-                "[push_actions_to_converge_queue] push action(%s) to converge queue, converge_config %s,  task id %s",
+                "[push_actions_to_converge_queue]alerts(%s) push action(%s) to converge queue, converge_config %s,  task id %s",
+                action_instance.alerts,
                 action_instance.id,
                 converge_config,
                 task_id,
@@ -149,24 +155,15 @@ class PushActionProcessor:
         :param countdown: 告警延时
         :return:
         """
-        from alarm_backends.service.fta_action.tasks import (
-            run_action,
-            run_webhook_action,
-        )
+        from alarm_backends.service.fta_action.tasks import dispatch_action_task
 
         action_info = {"id": action_instance.id, "function": callback_func, "alerts": alerts}
         if kwargs:
             action_info.update({"kwargs": kwargs})
         plugin_type = action_instance.action_plugin["plugin_type"]
-        if plugin_type in [
-            ActionPluginType.WEBHOOK,
-            ActionPluginType.MESSAGE_QUEUE,
-        ]:
-            task_id = run_webhook_action.apply_async((plugin_type, action_info), countdown=countdown)
-        else:
-            task_id = run_action.apply_async((plugin_type, action_info), countdown=countdown)
+        task_id = dispatch_action_task(plugin_type, action_info, countdown=countdown)
         logger.info(
-            "[create actions]push queue(execute): action(%s) (%s), alerts(%s), task_id(%s)",
+            "[push actions execute]action(%s) (%s), alerts(%s), task_id(%s)",
             action_instance.id,
             plugin_type,
             action_instance.alerts,
@@ -197,7 +194,8 @@ def to_document(action_instance: ActionInstance, current_time, alerts=None):
 
     converge_info = getattr(action_instance, "converge_info", {})
     action_info = dict(
-        id="{}{}".format(create_timestamp, action_instance.id),
+        bk_tenant_id=bk_biz_id_to_bk_tenant_id(action_instance.bk_biz_id),
+        id=f"{create_timestamp}{action_instance.id}",
         raw_id=action_instance.id,
         create_time=create_timestamp,
         update_time=int(action_instance.update_time.timestamp()),
@@ -248,7 +246,7 @@ def to_document(action_instance: ActionInstance, current_time, alerts=None):
     return ActionInstanceDocument(**action_info)
 
 
-def get_target_info_from_ctx(action_instance: ActionInstance, alerts: List[AlertDocument]):
+def get_target_info_from_ctx(action_instance: ActionInstance, alerts: list[AlertDocument]):
     """获取目标信息"""
     if action_instance.outputs.get("target_info"):
         return action_instance.outputs["target_info"]
@@ -326,7 +324,7 @@ class AlertAssignee:
     告警负责人
     """
 
-    def __init__(self, alert, user_groups, follow_groups=None):
+    def __init__(self, alert: AlertDocument, user_groups, follow_groups=None):
         self.alert = alert
         self.user_groups = user_groups
         self.follow_groups = follow_groups or []
@@ -630,7 +628,9 @@ class AlertAssignee:
                 # 无监控对象， 不需要获取负责人
                 return group_users
 
-            host = HostManager.get_by_id(self.alert.event.bk_host_id)
+            host = HostManager.get_by_id(
+                bk_tenant_id=str(self.alert.bk_tenant_id), bk_host_id=getattr(self.alert.event, "bk_host_id", "")
+            )
             for operator_attr in ["operator", "bk_bak_operator"]:
                 group_users[operator_attr] = self.get_host_operator(host, operator_attr)
         except AttributeError:
@@ -638,20 +638,18 @@ class AlertAssignee:
         return group_users
 
     @classmethod
-    def get_host_operator(cls, host, operator_attr="operator"):
+    def get_host_operator(cls, host: Host | None, operator_attr="operator"):
         """
         获取主机负责人，如果没有则尝试获取第一个模块负责人
         :param host: 主机
         :return: list
         """
-
         if not host:
             return []
-
         return getattr(host, operator_attr, []) or cls.get_host_module_operator(host)
 
     @classmethod
-    def get_host_module_operator(cls, host, operator_attr="operator"):
+    def get_host_module_operator(cls, host: Host, operator_attr="operator"):
         """
         获取主机第一个模块的负责人
         :param operator_attr: 模块负责人类型
@@ -660,10 +658,12 @@ class AlertAssignee:
         :param host: 主机
         :return: 人员列表
         """
-        for bk_module_id in host.bk_module_ids:
-            module = ModuleManager.get(bk_module_id)
-            if module:
-                return getattr(module, operator_attr, [])
+        bk_biz_id: int = host.bk_biz_id
+        bk_tenant_id = bk_biz_id_to_bk_tenant_id(bk_biz_id)
+
+        modules = ModuleManager.mget(bk_tenant_id=bk_tenant_id, bk_module_ids=host.bk_module_ids)
+        for module in modules.values():
+            return getattr(module, operator_attr, [])
         return []
 
 

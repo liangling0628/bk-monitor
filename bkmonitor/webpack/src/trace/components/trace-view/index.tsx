@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -24,7 +24,7 @@
  * IN THE SOFTWARE.
  */
 
-import { type PropType, computed, defineComponent, nextTick, onMounted, ref } from 'vue';
+import { type PropType, computed, defineComponent, nextTick, onMounted, ref, watch } from 'vue';
 
 import { useTraceStore } from '../../store/modules/trace';
 import { useFocusMatchesProvide, useSpanBarCurrentProvide, useViewRangeProvide } from './hooks';
@@ -53,6 +53,8 @@ export default defineComponent({
     const curFocusIndex = ref<number>(-1);
     const focusMatchesIdIndex = ref<number>(-1);
     const findMatchesIDs = ref(new Set());
+    /** span视角下的 trace 侧滑中,需要定位并高亮的 span id*/
+    const externalActiveSpanId = ref<string>('');
     const viewRange = ref<IViewRange>({
       time: {
         current: [0, 1],
@@ -81,7 +83,21 @@ export default defineComponent({
       focusMatchesId,
       focusMatchesIdIndex,
       findMatchesIDs,
+      externalActiveSpanId,
     });
+
+    // 同步“外部定位 span”的意图到 trace-view 内部状态（用于高亮/滚动定位）
+    watch(
+      [() => store.externalLocateSpan, () => traceTree.value?.traceID],
+      ([locate, traceId]) => {
+        if (!locate?.traceId || !locate?.spanId || !traceId) {
+          externalActiveSpanId.value = '';
+          return;
+        }
+        externalActiveSpanId.value = locate.traceId === traceId ? locate.spanId : '';
+      },
+      { immediate: true }
+    );
 
     const nextResult = () => {
       curFocusIndex.value = curFocusIndex.value + 1;

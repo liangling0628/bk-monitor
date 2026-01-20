@@ -195,6 +195,7 @@
   import { formatFileSize } from '@/common/util';
   import EmptyStatus from '@/components/empty-status';
   import { mapGetters } from 'vuex';
+  import useUtils from '@/hooks/use-utils';
 
   import * as authorityMap from '../../../../common/authority-map';
   import RestoreSlider from './restore-slider';
@@ -310,15 +311,17 @@
             })
             .then(res => {
               const { data } = res;
+              const { formatResponseListTimeZoneString } = useUtils();
               this.restoreIds = [];
               this.pagination.count = data.total;
               this.restoreIds = [];
-              data.list.forEach(row => {
+              const formattedList = formatResponseListTimeZoneString(data.list || [], { }, ['expired_time', 'created_at', 'updated_at']);
+              formattedList.forEach(row => {
                 row.status = '';
                 row.status_name = '';
                 this.restoreIds.push(row.restore_config_id);
               });
-              this.dataList.splice(0, this.dataList.length, ...data.list);
+              this.dataList.splice(0, this.dataList.length, ...formattedList);
               resolve(res);
             })
             .catch(err => {
@@ -483,7 +486,7 @@
         try {
           this.isTableLoading = true;
           const res = await this.$store.dispatch('getApplyData', paramData);
-          this.$store.commit('updateAuthDialogData', res.data);
+          this.$store.commit('updateState', {'authDialogData': res.data});
         } catch (err) {
           console.warn(err);
         } finally {

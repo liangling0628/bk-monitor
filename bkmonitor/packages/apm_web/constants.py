@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2022 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -18,6 +18,8 @@ from opentelemetry.semconv.trace import SpanAttributes
 
 from constants.alert import EventSeverity
 from constants.apm import CachedEnum, OtlpKey, SpanKindKey, TelemetryDataType
+
+DEFAULT_APM_LOG_SEARCH_FIELD_NAME = "*"
 
 GLOBAL_CONFIG_BK_BIZ_ID = 0
 DEFAULT_EMPTY_NUMBER = 0
@@ -1024,6 +1026,8 @@ DEFAULT_SPLIT_SYMBOL = "--"
 class ApmCacheKey:
     """一些 APM 的缓存 Key"""
 
+    # 存放应用数据状态的 key
+    APP_APPLICATION_STATUS_KEY = "apm:application:{date}:all_application_data_status"
     # 存放应用下服务的数据状态
     APP_SERVICE_STATUS_KEY = "apm:application:{application_id}:service_data_status"
     # 存放应用下监控项数据的映射

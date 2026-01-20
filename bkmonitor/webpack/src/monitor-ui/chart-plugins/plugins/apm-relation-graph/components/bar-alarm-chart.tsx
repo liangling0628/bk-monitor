@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -295,7 +295,7 @@ export default class BarAlarmChart extends tsc<IProps> {
    * @param item
    * @returns
    */
-  handleMouseEnter(event: Event, item: IAlarmDataItem) {
+  handleMouseEnter(_event: Event, item: IAlarmDataItem) {
     // if (item.type === EAlarmType.gray) {
     //   return;
     // }
@@ -450,8 +450,8 @@ export default class BarAlarmChart extends tsc<IProps> {
       }
     }
     this.selectedTimeRange = [startTime, endTime];
-    const timeFrom = dayjs(+startTime.toFixed(0)).format('YYYY-MM-DD HH:mm:ss');
-    const timeTo = dayjs(+endTime.toFixed(0)).format('YYYY-MM-DD HH:mm:ss');
+    const timeFrom = dayjs(+startTime.toFixed(0)).format('YYYY-MM-DD HH:mm:ssZZ');
+    const timeTo = dayjs(+endTime.toFixed(0)).format('YYYY-MM-DD HH:mm:ssZZ');
     if (this.needRestoreEvent) {
       this.handleChartDataZoom([startTime, endTime]);
     } else {
@@ -596,7 +596,7 @@ export default class BarAlarmChart extends tsc<IProps> {
             ref='tips'
             class='bar-alarm-chart-tooltip'
           >
-            <div class='time-text'>{dayjs(this.curHover).format('YYYY-MM-DD HH:mm:ss')}</div>
+            <div class='time-text'>{dayjs(this.curHover).format('YYYY-MM-DD HH:mm:ssZZ')}</div>
             {this.statusList.map((item, index) => (
               <div
                 key={index}
@@ -625,7 +625,7 @@ export default class BarAlarmChart extends tsc<IProps> {
             }}
             class='bar-alarm-chart-tooltip'
           >
-            <div class='time-text'>{dayjs.tz(this.curHover).format('YYYY-MM-DD HH:mm:ss')}</div>
+            <div class='time-text'>{dayjs.tz(this.curHover).format('YYYY-MM-DD HH:mm:ssZZ')}</div>
             {this.statusList.map((item, index) => (
               <div
                 key={index}

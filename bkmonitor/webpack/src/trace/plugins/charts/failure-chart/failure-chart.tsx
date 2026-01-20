@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -51,6 +51,7 @@ import { type MonitorEchartOptions, echarts } from 'monitor-ui/monitor-echarts/t
 import { debounce } from 'throttle-debounce';
 import { useI18n } from 'vue-i18n';
 
+import { checkIsRoot } from '../../../pages/failure/utils';
 import ChartTitle from '../../components/chart-title';
 import CommonLegend from '../../components/common-legend';
 import { useChartInfoInject } from '../../hooks/chart';
@@ -215,7 +216,7 @@ export default defineComponent({
       return chartInfo?.is_feedback_root;
     });
     const isRoot = computed(() => {
-      return chartInfo?.entity?.is_root;
+      return checkIsRoot(chartInfo?.entity);
     });
     // 销毁时的逻辑处理
     onUnmounted(() => {
@@ -342,7 +343,7 @@ export default defineComponent({
         },
         (props.options || {}) as any,
         {
-          arrayMerge: (destinationArray, sourceArray) => sourceArray,
+          arrayMerge: (_destinationArray, sourceArray) => sourceArray,
         }
       );
     });
@@ -656,7 +657,7 @@ export default defineComponent({
         }, 320);
       }
     };
-    const handleSetTooltip = params => {
+    const _handleSetTooltip = params => {
       if (!showTitleTool.value) return undefined;
       if (!params || params.length < 1 || params.every(item => item.value[1] === null)) {
         if (props.chartType === 'line') {
@@ -671,7 +672,7 @@ export default defineComponent({
         }
         return;
       }
-      const pointTime = dayjs.tz(params[0].axisValue).format('YYYY-MM-DD HH:mm:ss');
+      const pointTime = dayjs.tz(params[0].axisValue).format('YYYY-MM-DD HH:mm:ssZZ');
       const data = params
         .map(item => ({ color: item.color, seriesName: item.seriesName, value: item.value[1] }))
         .sort((a, b) => Math.abs(a.value - +curValue.value.yAxis) - Math.abs(b.value - +curValue.value.yAxis));
@@ -961,7 +962,7 @@ export default defineComponent({
           scatterTips.value.data.target.label = `${chartOptions.series[0].name}: ${
             scatterData._value || scatterData.metric_value || '--'
           }`;
-          scatterTips.value.data.time = dayjs.tz(e.data.value[0]).format('YYYY-MM-DD HH:mm:ss');
+          scatterTips.value.data.time = dayjs.tz(e.data.value[0]).format('YYYY-MM-DD HH:mm:ssZZ');
           scatterTips.value.top = -9999;
           scatterTips.value.show = true;
           nextTick(() => {
@@ -1083,7 +1084,10 @@ export default defineComponent({
               v-slots={{
                 title: () => (
                   <div class='root-head'>
-                    <span class='txt'>{this.$props.title}</span>
+                    <span class='txt'>
+                      {this.$props.detail?.alert_name ? `${this.$props.detail.alert_name}：` : ''}
+                      {this.$props.title}
+                    </span>
                     {(this.isRoot || this.isRootCause) && (
                       <label class={['root', { 'is-root-cause': this.isRootCause }, { 'is-root': this.isRoot }]}>
                         {this.t('根因')}
@@ -1118,11 +1122,15 @@ export default defineComponent({
                   </div>
                 ),
               }}
+              title={
+                this.$props.detail?.alert_name
+                  ? `${this.$props.detail?.alert_name}：${this.$props.title}`
+                  : this.$props.title
+              }
               isShowAlarm={true}
               menuList={this.chartOption.tool.list || []}
               showMore={true}
               subtitle={this.$props.subtitle || ''}
-              title={this.$props.title}
               onMenuClick={this.handleMoreToolItemSet}
               onSelectChild={this.handleSelectChildMenu}
               onSuccessLoad={this.handleSuccessLoad}
@@ -1175,7 +1183,7 @@ export default defineComponent({
                     legend-data={this.legend.list}
                     legend-type={this.chartOption.legend.asTable ? 'table' : 'common'}
                     to-the-right={this.chartOption.legend.toTheRight}
-                    onLegendEvent={this.handleLegendEvent}
+                    onSelectLegend={this.handleLegendEvent}
                   />
                 )}
               </div>

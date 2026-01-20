@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -28,7 +28,11 @@ import { Component as tsc } from 'vue-tsx-support';
 
 import { loadApp, mount, unmount } from '@blueking/bk-weweb';
 
+import aiWhaleStore from '@/store/modules/ai-whale';
 import '@blueking/bk-weweb';
+
+import type { AIBluekingShortcut } from '@/components/ai-whale/types';
+import type { Vue3WewebData } from '@/types/weweb/weweb';
 
 import './profiling.scss';
 const profilingAppId = 'profiling-explore';
@@ -46,12 +50,18 @@ export default class Profiling extends tsc<object> {
       ? `${this.profilingHost}/?bizId=${this.$store.getters.bizId}/#/trace/profiling`
       : `${location.origin}${window.site_url}trace/?bizId=${this.$store.getters.bizId}/#/trace/profiling`;
   }
-  get profilingData() {
+  get profilingData(): Vue3WewebData {
     return {
       host: this.profilingHost,
-      baseroute: '/trace/',
+      parentRoute: '/trace/',
+      get enableAiAssistant() {
+        return aiWhaleStore.enableAiAssistant;
+      },
       setUnmountCallback: (callback: () => void) => {
         this.unmountCallback = callback;
+      },
+      handleAIBluekingShortcut: (shortcut: AIBluekingShortcut) => {
+        aiWhaleStore.setCustomFallbackShortcut(shortcut);
       },
     };
   }
@@ -88,7 +98,7 @@ export default class Profiling extends tsc<object> {
       this.$store.commit('app/SET_ROUTE_CHANGE_LOADING', false);
     }, 300);
   }
-  beforeRouteLeave(to, from, next) {
+  beforeRouteLeave(_to, _fromm, next) {
     document.body.___zrEVENTSAVED = null; // echarts 微应用偶发tooltips错误问题
     next();
   }

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -57,7 +57,7 @@ export default class ApmPage extends tsc<object> {
   get apmData() {
     return JSON.stringify({
       host: this.apmHost,
-      baseroute: '/apm/',
+      parentRoute: '/apm/',
     });
   }
   // 是否显示引导页
@@ -82,19 +82,21 @@ export default class ApmPage extends tsc<object> {
       scopeCss: true,
       scopeJs: true,
       scopeLocation: false,
-      setShodowDom: false,
+      setShadowDom: false,
       keepAlive: false,
       data: {
         host: this.apmHost,
-        baseroute: '/apm/',
+        parentRoute: '/apm/',
         $baseStore: this.$store,
         showDetailSlider: this.handleShowDetail,
       },
     });
     activated(this.appkey, this.$refs.apmPageWrap as HTMLElement);
-    window.requestIdleCallback(() => (this.loading = false));
+    window.requestIdleCallback(() => {
+      this.loading = false;
+    });
   }
-  beforeRouteLeave(to, from, next) {
+  beforeRouteLeave(_to, _fromm, next) {
     next();
   }
   async activated() {
@@ -129,7 +131,9 @@ export default class ApmPage extends tsc<object> {
           eventId={this.detailInfo.id}
           isShow={this.detailInfo.isShow}
           type={this.detailInfo.type}
-          onShowChange={v => (this.detailInfo.isShow = v)}
+          onShowChange={v => {
+            this.detailInfo.isShow = v;
+          }}
         />
       </div>
     );

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -58,7 +58,7 @@ export default class IncidentDetail extends tsc<{ id: string }> {
   get incidentDetailData() {
     return {
       host: this.incidentDetailHost,
-      baseroute: '/trace/',
+      parentRoute: '/trace/',
       showDetailSlider: this.handleShowDetail,
     };
   }
@@ -77,7 +77,7 @@ export default class IncidentDetail extends tsc<{ id: string }> {
   async mounted() {
     const data = {
       host: this.incidentDetailHost,
-      baseroute: '/trace/',
+      parentRoute: '/trace/',
       showDetailSlider: this.handleShowDetail,
       setUnmountCallback: (callback: () => void) => {
         this.unmountCallback = callback;
@@ -89,7 +89,7 @@ export default class IncidentDetail extends tsc<{ id: string }> {
         container: this.incidentDetailRef.shadowRoot,
         data,
         id: this.randomKey,
-        setShodowDom: true,
+        setShadowDom: true,
         showSourceCode: false,
         url: this.incidentDetailUrl,
       });
@@ -130,7 +130,9 @@ export default class IncidentDetail extends tsc<{ id: string }> {
           eventId={this.detailInfo.id}
           isShow={this.detailInfo.isShow}
           type={this.detailInfo.type}
-          onShowChange={v => (this.detailInfo.isShow = v)}
+          onShowChange={v => {
+            this.detailInfo.isShow = v;
+          }}
         />
       </div>
     );

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -255,7 +255,6 @@ export default class AlarmHandlingNew extends tsc<IAlarmHandlingNewProps, IAlarm
           title={this.$t('处理套餐')}
           show-semicolon
         >
-          <span>{this.$t('当告警触发时执行')}</span>
           <GroupSelect
             ref='selectMeal'
             class='select-warp'
@@ -359,6 +358,7 @@ export default class AlarmHandlingNew extends tsc<IAlarmHandlingNewProps, IAlarm
                 clearable={false}
                 popover-min-width={140}
                 readonly={this.readonly}
+                search-placeholder={this.$tc('请输入 关键字')}
                 size='small'
                 searchable
                 on-change={this.handleChange}

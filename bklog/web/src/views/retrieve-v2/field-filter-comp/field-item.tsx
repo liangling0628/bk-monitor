@@ -24,16 +24,16 @@
  * IN THE SOFTWARE.
  */
 
-import { Component, Prop, Emit, Watch, Ref } from 'vue-property-decorator';
+import { Component, Emit, Prop, Ref, Watch } from 'vue-property-decorator';
 import { Component as tsc } from 'vue-tsx-support';
 
 import { blobDownload } from '@/common/util';
-import { debounce } from 'lodash';
+import { debounce } from 'lodash-es';
 
+import { axiosInstance } from '@/api';
 import { BK_LOG_STORAGE } from '../../../store/store.type';
 import AggChart from './agg-chart';
 import FieldAnalysis from './field-analysis';
-import { axiosInstance } from '@/api';
 
 import './field-item.scss';
 @Component
@@ -42,10 +42,10 @@ export default class FieldItem extends tsc<object> {
   @Prop({ type: Object, default: () => ({}) }) fieldItem: any;
   @Prop({ type: Object, default: () => ({}) }) fieldAliasMap: object;
   @Prop({ type: Boolean, default: false }) showFieldAlias: boolean;
-  @Prop({ type: Array, default: () => [] }) datePickerValue: Array<any>;
+  @Prop({ type: Array, default: () => [] }) datePickerValue: any[];
   @Prop({ type: Number, default: 0 }) retrieveSearchNumber: number;
-  @Prop({ type: Object, required: true }) retrieveParams: object;
-  @Prop({ type: Array, default: () => [] }) visibleFields: Array<any>;
+  @Prop({ type: Object, required: true }) retrieveParams: any;
+  @Prop({ type: Array, default: () => [] }) visibleFields: any[];
   @Prop({ type: Object, default: () => ({}) }) statisticalFieldData: object;
   @Prop({ type: Boolean, required: true }) isFrontStatistics: boolean;
   @Prop({ type: Boolean, default: false }) isFieldObject: boolean;
@@ -58,9 +58,23 @@ export default class FieldItem extends tsc<object> {
   distinctCount = 0;
   btnLoading = false;
   expandIconShow = false;
-  queryParams = {};
 
   fieldIconCache: Record<string, { icon: string; color: string; textColor: string }> = {};
+
+  get queryParams() {
+    const indexSetIDs = this.isUnionSearch
+      ? this.unionIndexList
+      : [window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId];
+
+    return {
+      ...this.retrieveParams,
+      index_set_ids: indexSetIDs,
+      field_type: this.fieldItem.field_type,
+      agg_field: this.agg_field,
+      statisticalFieldData: this.statisticalFieldData,
+      isFrontStatisticsL: this.isFrontStatistics,
+    };
+  }
 
   get fieldTypeMap() {
     return this.$store.state.globals.fieldTypeMap;
@@ -78,12 +92,16 @@ export default class FieldItem extends tsc<object> {
     return this.$store.state.retrieve?.indexSetList ?? [];
   }
   get gatherFieldsCount() {
-    if (this.isFrontStatistics) return Object.keys(this.statisticalFieldData).length;
+    if (this.isFrontStatistics) {
+      return Object.keys(this.statisticalFieldData).length;
+    }
     return 0;
   }
   // 显示融合字段统计比例图表
   get showFieldsChart() {
-    if (this.fieldItem.field_type === 'text') return false;
+    if (this.fieldItem.field_type === 'text') {
+      return false;
+    }
     return this.isFrontStatistics ? !!this.gatherFieldsCount : this.isShowFieldsAnalysis;
   }
   get isShowFieldsCount() {
@@ -92,9 +110,9 @@ export default class FieldItem extends tsc<object> {
   get isShowFieldsAnalysis() {
     const validTypes = ['keyword', 'integer', 'long', 'double', 'bool', 'conflict'];
     return (
-      validTypes.includes(this.fieldItem.field_type) &&
-      this.fieldItem.es_doc_values &&
-      !/^__dist_/.test(this.fieldItem.field_name)
+      validTypes.includes(this.fieldItem.field_type)
+      && this.fieldItem.es_doc_values
+      && !/^__dist_/.test(this.fieldItem.field_name)
     );
   }
   /** 冲突字段索引集名称*/
@@ -104,6 +122,11 @@ export default class FieldItem extends tsc<object> {
       .map(item => item.indexName);
   }
 
+  get agg_field() {
+    const fieldName = this.fieldItem.field_name;
+    return this.retrieveParams.showFieldAlias ? (this.fieldAliasMap[fieldName] ?? fieldName) : fieldName;
+  }
+
   get computedFieldName() {
     let name = this.$store.state.storage[BK_LOG_STORAGE.SHOW_FIELD_ALIAS]
       ? this.fieldItem.query_alias || this.fieldItem.alias_name || this.fieldItem.field_name
@@ -111,7 +134,7 @@ export default class FieldItem extends tsc<object> {
 
     if (this.isFieldObject) {
       const parts = name.split('.');
-      name = parts[parts.length - 1] || parts[0];
+      name = parts.at(-1) || parts[0];
     }
     return name;
   }
@@ -160,26 +183,31 @@ export default class FieldItem extends tsc<object> {
   }
   /** 点击查看图表分析 */
   handleClickAnalysisItem() {
-    if (!this.isShowFieldsAnalysis || this.isUnionSearch || this.isFrontStatistics) return;
+    if (!this.isShowFieldsAnalysis || this.isFrontStatistics) {
+      return;
+    }
 
     this.instanceDestroy();
     this.analysisActive = true;
 
-    const indexSetIDs = this.isUnionSearch
-      ? this.unionIndexList
-      : [window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId];
-    this.queryParams = {
-      ...this.retrieveParams,
-      index_set_ids: indexSetIDs,
-      field_type: this.fieldItem.field_type,
-      agg_field: this.fieldItem.field_name,
-      statisticalFieldData: this.statisticalFieldData,
-      isFrontStatisticsL: this.isFrontStatistics,
-    };
+    // const indexSetIDs = this.isUnionSearch
+    //   ? this.unionIndexList
+    //   : [window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId];
+
+    // this.queryParams = {
+    //   ...this.retrieveParams,
+    //   index_set_ids: indexSetIDs,
+    //   field_type: this.fieldItem.field_type,
+    //   agg_field: this.agg_field,
+    //   statisticalFieldData: this.statisticalFieldData,
+    //   isFrontStatisticsL: this.isFrontStatistics,
+    // };
 
     // 使用nextTick确保DOM更新
     this.$nextTick(() => {
-      if (!this.fieldChartRef) return;
+      if (!this.fieldChartRef) {
+        return;
+      }
 
       this.operationInstance = this.$bkPopover(this.$refs.operationRef, {
         content: this.fieldChartRef,
@@ -213,11 +241,11 @@ export default class FieldItem extends tsc<object> {
     return this.isUnionSearch && fieldType === 'conflict';
   }
 
-  getFieldIconColor = type => {
+  getFieldIconColor = (type) => {
     return this.fieldTypeMap?.[type] ? this.fieldTypeMap?.[type]?.color : '#EAEBF0';
   };
 
-  getFieldIconTextColor = type => {
+  getFieldIconTextColor = (type) => {
     return this.fieldTypeMap?.[type]?.textColor;
   };
   /** 下载 */
@@ -231,12 +259,12 @@ export default class FieldItem extends tsc<object> {
       ...this.retrieveParams,
       index_set_ids: indexSetIDs,
       field_type: this.fieldItem.field_type,
-      agg_field: this.fieldItem.field_name,
+      agg_field: this.agg_field,
       limit: this.fieldData?.distinct_count,
     };
     axiosInstance
       .post(downRequestUrl, data)
-      .then(res => {
+      .then((res) => {
         if (typeof res !== 'string') {
           this.$bkMessage({
             theme: 'error',
@@ -315,11 +343,11 @@ export default class FieldItem extends tsc<object> {
             ref='operationRef'
             class={['operation-text', { 'analysis-active': this.analysisActive }]}
           >
-            {this.isShowFieldsAnalysis && (
+            {this.isShowFieldsAnalysis && !this.isFrontStatistics && (
               <div
                 class='operation-icon-box'
                 v-bk-tooltips={{ content: this.$t('图表分析') }}
-                onClick={e => {
+                onClick={(e) => {
                   e.stopPropagation();
                   this.handleClickAnalysisItem();
                 }}
@@ -332,7 +360,7 @@ export default class FieldItem extends tsc<object> {
               v-bk-tooltips={{
                 content: this.type === 'visible' ? this.$t('隐藏') : this.$t('显示'),
               }}
-              onClick={e => {
+              onClick={(e) => {
                 e.stopPropagation();
                 this.handleShowOrHiddenItem();
               }}
@@ -377,7 +405,7 @@ export default class FieldItem extends tsc<object> {
                     loading={this.btnLoading}
                     size='small'
                     text
-                    onClick={e => {
+                    onClick={(e) => {
                       e.stopPropagation();
                       this.downloadFieldStatistics();
                     }}
@@ -394,13 +422,14 @@ export default class FieldItem extends tsc<object> {
             <template slot='content'>
               <div class='agg-sides-content slider-content'>
                 <AggChart
-                  field-name={this.fieldItem.field_name}
+                  field-name={this.agg_field}
                   field-type={this.fieldItem.field_type}
                   is-front-statistics={this.isFrontStatistics}
                   limit={this.fieldData?.distinct_count}
                   parent-expand={this.isExpand}
                   retrieve-params={this.retrieveParams}
                   statistical-field-data={this.statisticalFieldData}
+                  show-search-keyword={true}
                   onDistinctCount={this.getDistinctCount}
                 />
               </div>

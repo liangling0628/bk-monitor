@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2024 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -9,6 +9,7 @@ specific language governing permissions and limitations under the License.
 """
 
 import copy
+import logging
 import itertools
 from collections import defaultdict
 from typing import Any
@@ -38,6 +39,9 @@ from monitor_web.plugin.constant import ParamMode, PluginType
 from monitor_web.plugin.manager import PluginManagerFactory
 
 from .base import BaseInstaller
+
+
+logger = logging.getLogger(__name__)
 
 
 class NodeManInstaller(BaseInstaller):
@@ -89,10 +93,12 @@ class NodeManInstaller(BaseInstaller):
                 param_value = config_params["plugin"].get(param["name"])
                 for dms_key, dms_value in list(param_value.items()):
                     if param["type"] == "host":
-                        dms_insert_params[dms_key] = "{{ " + f"cmdb_instance.host.{dms_value} or '-'" + " }}"
+                        dms_insert_params[dms_key] = (
+                            "{{ " + f"cmdb_instance.host.{dms_value} or '{dms_value}' or '-'" + " }}"
+                        )
                     elif param["type"] == "service":
                         dms_insert_params[dms_key] = (
-                            "{{ " + f"cmdb_instance.service.labels['{dms_value}'] or '-'" + " }}"
+                            "{{ " + f"cmdb_instance.service.labels['{dms_value}']  or '{dms_value}' or '-'" + " }}"
                         )
                     elif param["type"] == "custom":
                         # 自定义维度k， v 注入
@@ -273,9 +279,8 @@ class NodeManInstaller(BaseInstaller):
             api.node_man.switch_subscription(subscription_id=last_version.subscription_id, action="disable")
             api.node_man.run_subscription(
                 subscription_id=last_version.subscription_id,
-                actions={step["id"]: "UNINSTALL" for step in subscription_params["steps"]},
+                actions={step["id"]: "UNINSTALL_AND_DELETE" for step in subscription_params["steps"]},
             )
-            api.node_man.delete_subscription(subscription_id=last_version.subscription_id)
 
         # 启动自动巡检
         if settings.IS_SUBSCRIPTION_ENABLED:
@@ -441,9 +446,8 @@ class NodeManInstaller(BaseInstaller):
             subscription_params = self._get_deploy_params(self.collect_config.deployment_config)
             api.node_man.run_subscription(
                 subscription_id=subscription_id,
-                actions={step["id"]: "UNINSTALL" for step in subscription_params["steps"]},
+                actions={step["id"]: "UNINSTALL_AND_DELETE" for step in subscription_params["steps"]},
             )
-            api.node_man.delete_subscription(subscription_id=subscription_id)
 
         # 删除部署记录及采集配置
         DeploymentConfigVersion.objects.filter(config_meta_id=self.collect_config.id).delete()
@@ -777,7 +781,12 @@ class NodeManInstaller(BaseInstaller):
         subscription_id = self.collect_config.deployment_config.subscription_id
         if not subscription_id:
             return []
-        result = api.node_man.batch_task_result(subscription_id=subscription_id, need_detail=True)
+        try:
+            result = api.node_man.batch_task_result(subscription_id=subscription_id, need_detail=True)
+        except BKAPIError as e:
+            # 记录警告日志并返回空结果，避免因订阅没有关联任务导致整个接口失败
+            logger.warning(f"获取订阅任务结果失败，订阅ID: {subscription_id}，错误: {e}")
+            result = []
         instance_statuses = self._process_nodeman_task_result(result)
 
         # 差异比对/不比对数据结构

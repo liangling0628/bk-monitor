@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -17,10 +17,10 @@ import re
 import time
 from abc import ABCMeta
 from collections import defaultdict, namedtuple
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from functools import reduce
 from io import StringIO
+from itertools import chain
 from typing import Any
 
 from django.conf import settings
@@ -53,6 +53,7 @@ from bkmonitor.models import (
     ActionInstance,
     AlertAssignGroup,
     AlgorithmModel,
+    ItemModel,
     MetricListCache,
     StrategyModel,
 )
@@ -63,6 +64,7 @@ from bkmonitor.utils.common_utils import count_md5
 from bkmonitor.utils.event_related_info import get_alert_relation_info
 from bkmonitor.utils.range import load_agg_condition_instance
 from bkmonitor.utils.request import get_request, get_request_tenant_id
+from bkmonitor.utils.thread_backend import ThreadPool
 from bkmonitor.utils.time_tools import (
     datetime2timestamp,
     now,
@@ -654,8 +656,15 @@ class AlertDetailResource(Resource):
         topo_info = result["extend_info"].get("topo_info", "")
         result["relation_info"] = f"{topo_info} {relation_info}"
         self.add_project_name(result)
-
+        self.add_graph_extra_info(alert, result)
         return result
+
+    @classmethod
+    def add_graph_extra_info(cls, alert, data):
+        """
+        丰富图表额外信息(v2版本接口hook)
+        """
+        return data
 
     @classmethod
     def add_project_name(cls, data):
@@ -982,7 +991,8 @@ class AlertRelatedInfoResource(Resource):
         environment_template = _(" 环境类型({})")
         environment_mapping = {"1": _("测试"), "2": _("体验"), "3": _("正式")}
 
-        def enrich_related_infos(bk_biz_id, instances):
+        def enrich_related_infos(params_tuple: tuple) -> None:
+            bk_biz_id, instances = params_tuple
             ips = instances["ips"]
             service_instance_ids = instances["service_instance_ids"]
             host_ids = instances["host_ids"]
@@ -1064,8 +1074,8 @@ class AlertRelatedInfoResource(Resource):
                 related_infos[alert_id]["topo_info"] = topo_info
 
         # 多线程处理每个业务的主机和服务实例信息
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            executor.map(enrich_related_infos, instances_by_biz.keys(), instances_by_biz.values())
+        with ThreadPool(8) as executor:
+            executor.map(enrich_related_infos, list(instances_by_biz.items()))
 
         return related_infos
 
@@ -1272,63 +1282,6 @@ class AckAlertResource(Resource):
         }
 
 
-class CloseAlertResource(Resource):
-    """
-    告警关闭
-    """
-
-    class RequestSerializer(serializers.Serializer):
-        bk_biz_id = serializers.IntegerField(label="业务ID")
-        ids = serializers.ListField(label="告警ID列表", child=AlertIDField())
-        message = serializers.CharField(allow_blank=True, label="确认信息", default="")
-
-    def perform_request(self, validated_request_data: dict[str, Any]):
-        alert_ids = validated_request_data["ids"]
-
-        # 需要关闭的告警
-        alerts_should_close = set()
-        # 已经结束的告警
-        alerts_already_end = set()
-
-        alerts = AlertDocument.mget(alert_ids)
-
-        for alert in alerts:
-            # 告警状态为异常且未确认，则需要关闭
-            if alert.status == EventStatus.ABNORMAL and not alert.is_ack:
-                alerts_should_close.add(alert.id)
-            else:
-                alerts_already_end.add(alert.id)
-
-        # 不存在的告警
-        alerts_not_exist = set(alert_ids) - alerts_should_close - alerts_already_end
-
-        now_time = int(time.time())
-        # 保存流水日志
-        AlertLog(
-            alert_id=list(alerts_should_close),
-            op_type=AlertLog.OpType.CLOSE,
-            create_time=now_time,
-            description=validated_request_data["message"],
-            operator=get_request_username(),
-        ).save()
-
-        # 更新告警确认状态
-        alert_documents = [
-            AlertDocument(
-                id=alert_id,
-                status=EventStatus.CLOSED,
-                update_time=now_time,
-            )
-            for alert_id in alerts_should_close
-        ]
-        AlertDocument.bulk_create(alert_documents, action=BulkActionType.UPDATE)
-        return {
-            "alerts_close_success": list(alerts_should_close),
-            "alerts_not_exist": list(alerts_not_exist),
-            "alerts_already_end": list(alerts_already_end),
-        }
-
-
 class AlertGraphQueryResource(ApiAuthResource):
     """
     告警图表接口
@@ -1364,10 +1317,25 @@ class AlertGraphQueryResource(ApiAuthResource):
             def validate(self, attrs: dict) -> dict:
                 if attrs["data_source_label"] == DataSourceLabel.BK_LOG_SEARCH and not attrs.get("index_set_id"):
                     raise ValidationError("index_set_id can not be empty.")
-                for condition in attrs["where"]:
-                    if isinstance(condition["value"], list):
-                        if len(condition["value"]) == 1 and None in condition["value"]:
-                            condition["value"].remove(None)
+
+                # 过滤掉无效的 where 条件
+                validated_where = []
+                for condition in attrs.get("where", []):
+                    if not isinstance(condition, dict):
+                        continue
+                    value = condition.get("value")
+                    # 过滤掉 value 为 None、空列表或只包含 None 的列表
+                    if value is None:
+                        continue
+                    if isinstance(value, list):
+                        # 移除列表中的 None，如果移除后列表为空则跳过该条件
+                        filtered_value = [v for v in value if v is not None]
+                        if not filtered_value:
+                            continue
+                        condition["value"] = filtered_value
+                    validated_where.append(condition)
+
+                attrs["where"] = validated_where
                 return attrs
 
         id = serializers.IntegerField(label="事件ID")
@@ -1547,26 +1515,146 @@ class SearchAlertResource(Resource):
         show_aggs = validated_request_data.pop("show_aggs")
         show_dsl = validated_request_data.pop("show_dsl")
         record_history = validated_request_data.pop("record_history")
+        origin_request_data = copy.deepcopy(validated_request_data)
+        # 检测处理记录ID查询并调整时间范围
+        has_action_id, detect_result = self.detect_action_id_query(validated_request_data)
+        if has_action_id:
+            validated_request_data = self.adjust_time_range_for_action_id(validated_request_data, detect_result)
 
         # 替换时间范围
         if validated_request_data.get("replace_time_range"):
-            validated_request_data = self.replace_time(validated_request_data)
+            validated_request_data = self.replace_time_for_alert_id(validated_request_data)
 
         handler = AlertQueryHandler(**validated_request_data)
 
         with SearchHistory.record(
             SearchType.ALERT,
-            validated_request_data,
-            enabled=record_history and validated_request_data.get("query_string"),
+            origin_request_data,
+            enabled=record_history and origin_request_data.get("query_string"),
         ):
             result = handler.search(show_overview=show_overview, show_aggs=show_aggs, show_dsl=show_dsl)
 
         return result
 
     @staticmethod
-    def replace_time(request_data: dict) -> dict:
+    def detect_action_id_query(request_data: dict) -> tuple:
         """
-        根据查询字符串中的告警ID/处理记录ID，动态调整时间范围
+        检测查询是否涉及处理记录ID
+
+        Args:
+            request_data: 请求数据
+
+        Returns:
+            tuple: (是否包含 action_id 查询, 处理记录 ID 列表)
+        """
+        action_ids_in_query = set()
+        action_ids_in_conditions = set()
+
+        has_action_id = False
+
+        # 检查 query_string 中的处理记录ID
+        query_string = request_data.get("query_string", "")
+        if query_string:
+            action_id_matches = re.findall(r"处理记录ID\s*:\s*(\d+)", query_string)
+            if action_id_matches:
+                action_ids_in_query.update(set(action_id_matches))
+
+        # 检查 conditions 中的 action_id 条件
+        conditions = request_data.get("conditions", [])
+        for condition in conditions:
+            if condition.get("key") == "action_id":
+                condition_values = condition.get("value", [])
+                if isinstance(condition_values, list):
+                    action_ids_in_conditions.update([str(val) for val in condition_values])
+                else:
+                    action_ids_in_conditions.add(str(condition_values))
+
+        if action_ids_in_query or action_ids_in_conditions:
+            has_action_id = True
+
+        result = {
+            "action_ids_in_query": list(action_ids_in_query),
+            "action_ids_in_conditions": list(action_ids_in_conditions),
+        }
+
+        return has_action_id, result
+
+    @staticmethod
+    def adjust_time_range_for_action_id(request_data: dict, detect_result: dict) -> dict:
+        """
+        根据处理记录ID调整查询时间范围并替换查询条件
+
+        该方法不仅调整时间范围，还会将处理记录ID查询转换为直接的告警ID查询，
+        避免后续查询中的重复处理，提高查询效率。
+
+        Args:
+            request_data: 原始请求数据
+            detect_result: 检测结果
+
+        Returns:
+            dict: 调整后的请求数据，包含新的时间范围和告警ID查询条件
+        """
+        from fta_web.alert.handlers.alert import get_alert_ids_by_action_id
+
+        action_ids_in_query = detect_result["action_ids_in_query"]
+        action_ids_in_conditions = detect_result["action_ids_in_conditions"]
+
+        alert_ids = set()
+
+        # 通过处理记录ID获取告警ID
+        if action_ids_in_query:
+            temp_ids_in_query, action_alert_map = get_alert_ids_by_action_id(action_ids_in_query)
+            alert_ids.update(temp_ids_in_query)
+            # 增加到上下文信息中，便于后续处理query string时，进行精准替换
+            request_data["context"] = {"action_alert_map": action_alert_map}
+
+        if action_ids_in_conditions:
+            temp_ids_conditions, action_alert_map = get_alert_ids_by_action_id(action_ids_in_conditions)
+            alert_ids.update(temp_ids_conditions)
+            if temp_ids_conditions:
+                # 将对应的action_id条件转换为id条件，值为对应的告警ID
+                for condition in request_data.get("conditions", []):
+                    if condition["key"] == "action_id":
+                        condition["key"] = "id"
+                        # 不存在的action_id，告警ID设置为0
+                        condition["value"] = chain.from_iterable(
+                            [action_alert_map.get(value, ["0"]) for value in condition["value"]]
+                        )
+                        condition["value"] = list(set(condition["value"]))
+
+        if not alert_ids:
+            return request_data
+
+        # 提取告警ID前10位作为时间戳
+        timestamps = set()
+        for alert_id in alert_ids:
+            try:
+                timestamp = int(str(alert_id)[:10])
+                timestamps.add(timestamp)
+            except (ValueError, IndexError):
+                logger.warning(f"告警ID {alert_id} 时间戳解析失败")
+                continue
+
+        if not timestamps:
+            return request_data
+
+        # 计算时间范围（前后扩展1小时）
+        one_hour_in_seconds = 3600
+        min_timestamp = min(timestamps)
+        max_timestamp = max(timestamps)
+
+        # 与原时间范围合并，确保能够覆盖所有情况
+        request_data["start_time"] = min(
+            min_timestamp - one_hour_in_seconds, request_data.get("start_time", min_timestamp)
+        )
+        request_data["end_time"] = max(max_timestamp + one_hour_in_seconds, request_data.get("end_time", max_timestamp))
+
+        return request_data
+
+    @staticmethod
+    def replace_time_for_alert_id(request_data: dict) -> dict:
+        """
+        根据查询字符串中的告警ID，动态调整时间范围
         规则：提取所有ID的前10位作为基准时间戳，前后扩展1小时
         """
 
@@ -1576,7 +1664,7 @@ class SearchAlertResource(Resource):
         query_string = request_data.get("query_string", "")
 
         # 匹配所有告警ID/处理记录ID
-        id_matches = re.findall(r"(告警ID|处理记录ID)\s*:\s*(\d+)", query_string)
+        id_matches = re.findall(r"告警ID\s*:\s*(\d+)", query_string)
         if not id_matches:
             return request_data
 
@@ -1856,10 +1944,14 @@ class ExportActionResource(Resource):
 
     class RequestSerializer(ActionSearchSerializer):
         ordering = serializers.ListField(label="排序", child=serializers.CharField(), default=[])
+        bk_biz_id = serializers.IntegerField(label="业务ID", required=True)
 
     def perform_request(self, validated_request_data):
         handler = ActionQueryHandler(**validated_request_data)
-        return resource.export_import.export_package(list_data=handler.export())
+        return resource.export_import.export_package(
+            list_data=handler.export(),
+            bk_biz_id=validated_request_data["bk_biz_id"],
+        )
 
 
 class AlertExtendFields(Resource):
@@ -2002,8 +2094,8 @@ class AlertTopNResource(Resource):
         if not need_time_partition:
             return resource.alert.alert_top_n_result(**validated_request_data)
 
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self.get_bucket_count, validated_request_data)
+        executor = ThreadPool(processes=1)
+        future = executor.apply_async(self.get_bucket_count, [validated_request_data])
 
         start_time = validated_request_data.pop("start_time")
         end_time = validated_request_data.pop("end_time")
@@ -2066,8 +2158,8 @@ class AlertTopNResource(Resource):
             result["fields"].append(field)
 
         # 补充bucket_count值，以及限制buckets长度与size一致
-        field_bucket_count_map = future.result()
-        executor.shutdown(wait=True)
+        field_bucket_count_map = future.get()
+        executor.close()
         # 对每个字段的桶按count降序排序，并截取前size个
         for field_data in result["fields"]:
             field = field_data["field"]
@@ -3140,3 +3232,54 @@ class GetAlertDataRetrievalResource(Resource):
             result = {}
 
         return result
+
+
+class EditDataMeaningResource(Resource):
+    class RequestSerializer(serializers.Serializer):
+        alert_id = serializers.CharField(required=True, label="告警ID")
+        data_meaning = serializers.CharField(required=True, label="数据含义")
+
+    def perform_request(self, request_data):
+        alert_id = request_data["alert_id"]
+        data_meaning = request_data["data_meaning"]
+
+        alert = AlertDocument.get(alert_id)
+
+        alert_dict = alert.to_dict()
+        extra_info = alert_dict.setdefault("extra_info", {})
+        strategy = extra_info.setdefault("strategy", {})
+        items = strategy.setdefault("items", [])
+
+        item_id = None
+        if not items:
+            # items为空,创建新的item
+            strategy["items"] = [{"name": data_meaning}]
+        else:
+            name = items[0].get("name")
+            item_id = items[0].get("id")
+
+            if name == data_meaning:
+                return {"alert_id": alert_id, "data_meaning": data_meaning}
+
+            items[0]["name"] = data_meaning
+
+        # 执行ES文档更新
+        AlertDocument.bulk_create(
+            [AlertDocument(id=alert_id, extra_info=extra_info)],
+            action=BulkActionType.UPDATE,
+        )
+
+        # 同步更新ItemModel(如果存在)
+        if item_id:
+            # 使用原子性update避免并发覆盖
+            updated_count = ItemModel.objects.filter(id=item_id).update(name=data_meaning)
+            if updated_count == 0:
+                logger.error(f"ItemModel with id {item_id} does not exist for alert {alert_id}")
+        else:
+            # ES中的strategy.items[0]缺少id字段
+            logger.warning(f"alert {alert_id}: extra_info.strategy.items[0].id does not exist")
+
+        return {
+            "alert_id": alert_id,
+            "data_meaning": data_meaning,
+        }

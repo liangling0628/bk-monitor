@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -151,7 +151,7 @@ export default class DimensionTableSlide extends tsc<any> {
           <div class='slider-search'>
             <bk-input
               v-model={this.search}
-              placeholder={this.$t('搜索维度')}
+              placeholder={this.$t('搜索')}
               right-icon='bk-icon icon-search'
               on-change={this.handleSearchChange}
             />
@@ -631,6 +631,7 @@ export default class DimensionTableSlide extends tsc<any> {
       disabled: false,
       common: false,
       isNew: true,
+      type: 'dimension',
       selection: false,
     });
   }

@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -11,10 +11,15 @@ specific language governing permissions and limitations under the License.
 import datetime
 import itertools
 import logging
+from collections import defaultdict
+from typing import Any
 
+import elasticsearch
+import elasticsearch5
+import elasticsearch6
 from curator import utils
 from django.db import models
-from django.db.models import Count, Sum
+from django.db.models import Count, Sum, Q
 from django.db.transaction import atomic, on_commit
 from django.forms import model_to_dict
 from django.utils import timezone
@@ -31,6 +36,12 @@ from metadata.utils.es_tools import (
 )
 
 logger = logging.getLogger("metadata")
+
+
+class EsSearchCodes:
+    SUCCESS = "success"
+    NOT_FOUND = "not_found"
+    FAIL = "fail"
 
 
 class EsSnapshot(models.Model):
@@ -139,7 +150,32 @@ class EsSnapshot(models.Model):
         snapshot.delete()
 
     @classmethod
-    def batch_get_state(cls, table_ids: list, bk_tenant_id=DEFAULT_TENANT_ID):
+    @atomic(config.DATABASE_CONNECTION_NAME)
+    def retry_snapshot(cls, table_id, is_sync: bool | None = False, bk_tenant_id=DEFAULT_TENANT_ID):
+        from metadata.task.tasks import retry_es_result_table_snapshot
+
+        try:
+            snapshot = cls.objects.get(table_id=table_id, bk_tenant_id=bk_tenant_id)
+        except cls.DoesNotExist:
+            logger.exception("ES SnapShot does not exists, table_id(%s)", table_id)
+            raise ValueError(_("快照配置不存在或已经被删除"))
+
+        if is_sync:
+            logger.info("table_id %s sync to retry snapshot %s", table_id, snapshot.target_snapshot_repository_name)
+            retry_es_result_table_snapshot(
+                table_id=table_id,
+                target_snapshot_repository_name=snapshot.target_snapshot_repository_name,
+                bk_tenant_id=bk_tenant_id, )
+        else:
+            logger.info("table_id %s async to retry snapshot %s", table_id, snapshot.target_snapshot_repository_name)
+            retry_es_result_table_snapshot.delay(
+                table_id=table_id,
+                target_snapshot_repository_name=snapshot.target_snapshot_repository_name,
+                bk_tenant_id=bk_tenant_id,
+            )
+
+    @classmethod
+    def batch_get_state(cls, bk_tenant_id: str, table_ids: list):
         from metadata.models import ESStorage
 
         es_storages = ESStorage.objects.filter(table_id__in=table_ids, bk_tenant_id=bk_tenant_id)
@@ -167,6 +203,47 @@ class EsSnapshot(models.Model):
                 )
         return result
 
+    @classmethod
+    def batch_get_recent_state(cls, bk_tenant_id: str, table_ids: list):
+        """批量获取最近一次的状态"""
+        from metadata.models import ESStorage
+
+        es_storages = ESStorage.objects.filter(table_id__in=table_ids, bk_tenant_id=bk_tenant_id)
+        result = []
+
+        for es_storage in es_storages:
+            snapshots = []
+            failures = []
+            search_code = EsSearchCodes.SUCCESS
+            try:
+                snapshots = es_storage.es_client.snapshot.get(
+                    es_storage.snapshot_obj.target_snapshot_repository_name, es_storage.search_snapshot
+                ).get("snapshots", [])
+            except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
+                search_code = EsSearchCodes.NOT_FOUND
+            except Exception as e:  # noqa
+                logger.exception(
+                    "batch get es snapshots error, target_snapshot_repository_name({}), search_snapshot({})".format(
+                        es_storage.snapshot_obj.target_snapshot_repository_name, es_storage.search_snapshot
+                    )
+                )
+                search_code = EsSearchCodes.FAIL
+                failures.append(str(e))
+
+            max_datetime, max_snapshot = es_storage.get_max_snapshot(snapshots)
+            result.append(
+                {
+                    "table_id": es_storage.table_id,
+                    "snapshot_name": max_snapshot.get("snapshot"),
+                    "state": max_snapshot.get("state"),
+                    "duration": max_snapshot.get("duration_in_millis"),
+                    "failures": max_snapshot.get("failures") or failures,
+                    "code": search_code,
+                }
+            )
+
+        return result
+
     def is_permanent(self):
         return self.snapshot_days == self.PERMANENT_PRESERVATION
 
@@ -185,7 +262,7 @@ class EsSnapshot(models.Model):
     def to_json(self):
         from metadata.models import ESStorage
 
-        all_snapshots = []
+        all_snapshots: list[dict[str, Any]] = []
         es_storage = ESStorage.objects.get(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id)
         try:
             all_snapshots = es_storage.es_client.snapshot.get(
@@ -198,11 +275,13 @@ class EsSnapshot(models.Model):
 
         return [
             {
-                "snapshot_name": snapshot.get("snapshot"),
+                "snapshot_name": snapshot.get("snapshot", ""),
                 "state": snapshot.get("state"),
                 "table_id": self.table_id,
-                "expired_time": es_storage.expired_date_timestamp(snapshot.get("snapshot")),
-                "indices": EsSnapshotIndice.batch_to_json(self.table_id, snapshot.get("snapshot")),
+                "expired_time": es_storage.expired_date_timestamp(snapshot.get("snapshot", "")),
+                "indices": EsSnapshotIndice.batch_to_json(
+                    bk_tenant_id=self.bk_tenant_id, table_id=self.table_id, snapshot_name=snapshot.get("snapshot", "")
+                ),
             }
             for snapshot in all_snapshots
         ]
@@ -226,11 +305,13 @@ class EsSnapshotRepository(models.Model):
     @classmethod
     @atomic(config.DATABASE_CONNECTION_NAME)
     def create_repository(
-        cls, cluster_id, snapshot_repository_name, es_config, alias, operator, bk_tenant_id=DEFAULT_TENANT_ID
+        cls, bk_tenant_id: str, cluster_id: int, snapshot_repository_name, es_config, alias, operator
     ):
         from metadata.models import ClusterInfo
 
-        cluster: ClusterInfo = ClusterInfo.objects.filter(cluster_id=cluster_id).first()
+        cluster: ClusterInfo | None = ClusterInfo.objects.filter(
+            bk_tenant_id=bk_tenant_id, cluster_id=cluster_id
+        ).first()
         if not cluster:
             raise ValueError(_("集群不存在"))
         if cluster.cluster_type != cluster.TYPE_ES:
@@ -238,7 +319,7 @@ class EsSnapshotRepository(models.Model):
         if cls.objects.filter(repository_name=snapshot_repository_name).exists():
             raise ValueError(_("仓库名称已经存在"))
 
-        es_client = get_client(cluster)
+        es_client = get_client(bk_tenant_id=bk_tenant_id, cluster_id=cluster_id)
         new_rep = cls.objects.create(
             cluster_id=cluster_id,
             repository_name=snapshot_repository_name,
@@ -270,7 +351,9 @@ class EsSnapshotRepository(models.Model):
         cls.objects.filter(
             cluster_id=cluster_id, repository_name=snapshot_repository_name, bk_tenant_id=bk_tenant_id
         ).update(is_deleted=True, last_modify_user=operator)
-        get_client(cluster_id).snapshot.delete_repository(snapshot_repository_name)
+        get_client(bk_tenant_id=bk_tenant_id, cluster_id=cluster_id).snapshot.delete_repository(
+            snapshot_repository_name
+        )
 
     @classmethod
     def verify_repository(cls, cluster_id, snapshot_repository_name, bk_tenant_id=DEFAULT_TENANT_ID):
@@ -278,7 +361,9 @@ class EsSnapshotRepository(models.Model):
             cluster_id=cluster_id, repository_name=snapshot_repository_name, is_deleted=False, bk_tenant_id=bk_tenant_id
         ).exists():
             raise ValueError(_("仓库不存在"))
-        return get_client(cluster_id).snapshot.verify_repository(snapshot_repository_name)
+        return get_client(bk_tenant_id=bk_tenant_id, cluster_id=cluster_id).snapshot.verify_repository(
+            snapshot_repository_name
+        )
 
     def to_json(self):
         result = {
@@ -293,7 +378,9 @@ class EsSnapshotRepository(models.Model):
         }
         try:
             result.update(
-                get_client(self.cluster_id).snapshot.get_repository(self.repository_name).get(self.repository_name, {})
+                get_client(bk_tenant_id=self.bk_tenant_id, cluster_id=self.cluster_id)
+                .snapshot.get_repository(self.repository_name)
+                .get(self.repository_name, {})
             )
         except Exception as e:  # noqa
             logger.exception("get repository(%s) cluster_id(%s) error", self.repository_name, self.cluster_id)
@@ -320,12 +407,12 @@ class EsSnapshotIndice(models.Model):
         verbose_name_plural = "快照物理索引记录"
 
     @classmethod
-    def batch_to_json(cls, table_id, snapshot_name, bk_tenant_id=DEFAULT_TENANT_ID):
+    def batch_to_json(cls, bk_tenant_id: str, table_id: str, snapshot_name: str):
         batch_obj = cls.objects.filter(table_id=table_id, snapshot_name=snapshot_name, bk_tenant_id=bk_tenant_id)
         return [obj.to_json() for obj in batch_obj]
 
     @classmethod
-    def all_doc_count_and_store_size(cls, table_ids, bk_tenant_id=DEFAULT_TENANT_ID):
+    def all_doc_count_and_store_size(cls, bk_tenant_id: str, table_ids: list[str]):
         agg_result = (
             cls.objects.filter(table_id__in=table_ids, bk_tenant_id=bk_tenant_id)
             .values("table_id")
@@ -394,13 +481,13 @@ class EsSnapshotRestore(models.Model):
     @atomic(config.DATABASE_CONNECTION_NAME)
     def create_restore(
         cls,
+        bk_tenant_id: str,
         table_id,
         start_time,
         end_time,
         expired_time,
         operator,
         is_sync: bool | None = False,
-        bk_tenant_id=DEFAULT_TENANT_ID,
     ):
         from metadata.models import ESStorage
 
@@ -488,9 +575,9 @@ class EsSnapshotRestore(models.Model):
 
     @classmethod
     @atomic(config.DATABASE_CONNECTION_NAME)
-    def modify_restore(cls, restore_id, expired_time, operator):
+    def modify_restore(cls, bk_tenant_id: str, restore_id, expired_time, operator):
         try:
-            restore = cls.objects.get(restore_id=restore_id)
+            restore = cls.objects.get(restore_id=restore_id, bk_tenant_id=bk_tenant_id)
         except cls.DoesNotExist:
             raise ValueError(_("结果表回溯不存在"))
         if restore.is_deleted:
@@ -504,9 +591,9 @@ class EsSnapshotRestore(models.Model):
 
     @classmethod
     @atomic(config.DATABASE_CONNECTION_NAME)
-    def delete_restore(cls, restore_id, operator, is_sync: bool | None = False):
+    def delete_restore(cls, bk_tenant_id: str, restore_id, operator, is_sync: bool | None = False):
         try:
-            restore = cls.objects.get(restore_id=restore_id)
+            restore = cls.objects.get(restore_id=restore_id, bk_tenant_id=bk_tenant_id)
         except cls.DoesNotExist:
             raise ValueError(_("回溯不存在"))
         if restore.is_deleted:
@@ -525,6 +612,136 @@ class EsSnapshotRestore(models.Model):
         restore.is_deleted = True
         restore.last_modify_user = operator
         restore.save()
+
+    @classmethod
+    @atomic(config.DATABASE_CONNECTION_NAME)
+    def retry_restore(
+            cls,
+            bk_tenant_id: str,
+            restore_id,
+            operator,
+            indices: list = None,
+            is_sync: bool | None = False,
+            is_force: bool | None = False,
+    ):
+        try:
+            restore = cls.objects.get(restore_id=restore_id, bk_tenant_id=bk_tenant_id)
+        except cls.DoesNotExist:
+            raise ValueError(_("回溯不存在"))
+        if restore.is_deleted:
+            raise ValueError(_("回溯已经删除"))
+        if restore.is_expired():
+            raise ValueError(_("回溯已经过期"))
+
+        from metadata.models import ESStorage
+
+        es_storage = ESStorage.objects.filter(
+            table_id=restore.table_id, bk_tenant_id=restore.bk_tenant_id
+        ).first()
+        if not es_storage:
+            raise ValueError(_("结果表不存在"))
+        if not es_storage.have_snapshot_conf:
+            raise ValueError(_("结果表不存在快照配置"))
+
+        restore_indices = restore.indices.split(",")
+        indices = indices or []
+        # 判断索引是否属于该回溯任务
+        if not set(indices).issubset(set(restore_indices)):
+            raise ValueError(_("索引不属于该回溯"))
+
+        each_complete_doc_count = restore.get_each_complete_doc_count(filter_indices=indices)
+        retry_snapshot_indices = []
+        pre_delete_indices = []
+        completed_indices = []
+        incomplete_indices = []
+
+        for restore_index, complete_info in each_complete_doc_count.items():
+            snapshot_index = complete_info.get("snapshot_index")
+            # 快照已不存在，无法重试
+            if not snapshot_index:
+                raise ValueError(_("部分索引的快照已不存在，无法重试"))
+
+            is_restored = complete_info.get("is_restored")
+            # 快照已经完成，无需重试
+            if is_restored and snapshot_index.doc_count == complete_info.get("complete_doc_count"):
+                completed_indices.append(model_to_dict(snapshot_index))
+                continue
+            # 已经回溯的，需先删除
+            if is_restored:
+                # 非强制模式，跳过重试回溯中的索引
+                incomplete_indices.append({
+                    **model_to_dict(snapshot_index),
+                    "complete_doc_count": complete_info.get("complete_doc_count", 0)
+                })
+                if not is_force:
+                    continue
+                pre_delete_indices.append(restore_index)
+            retry_snapshot_indices.append(snapshot_index)
+
+        retry_details = {
+            "completed": completed_indices,
+            "incomplete": incomplete_indices,
+            "pre_delete": pre_delete_indices,
+            "retry": [model_to_dict(snapshot_index) for snapshot_index in retry_snapshot_indices]
+        }
+        if not retry_snapshot_indices:
+            return {
+                "restore_id": restore.restore_id,
+                "retry_store_size": 0,
+                "retry_doc_count": 0,
+                "retry_details": retry_details
+            }
+
+        # 存在回溯中的索引
+        if pre_delete_indices:
+            es_client = get_client(bk_tenant_id=restore.bk_tenant_id, cluster_id=es_storage.storage_cluster_id)
+            # es index 删除是通过url带参数 防止索引太多超过url长度限制 所以进行多批删除
+            indices_chunks = utils.chunk_index_list(pre_delete_indices)
+            for indices_chunk in indices_chunks:
+                try:
+                    # 静默跳过不存在的索引，因indices每次操作可能是不幂等的，含有实际已删除的索引时将一直异常
+                    es_client.indices.delete(utils.to_csv(indices_chunk), ignore_unavailable=True)
+                except Exception as e:
+                    logger.error(
+                        "retry restore -> [%s] delete indices [%s] failed -> %s",
+                        restore.restore_id, ",".join(indices_chunk), e
+                    )
+                    raise ValueError(_("回溯索引删除失败"))
+                logger.info(
+                    "retry restore -> [%s] has delete indices [%s]",
+                    restore.restore_id, ",".join(indices_chunk)
+                )
+
+        retry_store_size = sum([snapshot_index.store_size for snapshot_index in retry_snapshot_indices])
+        cluster_total_size = get_cluster_disk_size(es_storage.es_client, kind="total")
+        cluster_used_size = get_cluster_disk_size(es_storage.es_client, kind="used")
+        if cluster_used_size + retry_store_size > cluster_total_size * cls.NOT_OVER_ES_CLUSTER_SIZE_PERCENT:
+            raise ValueError(_("重试回溯的索引大小加集群已经使用的容量已经超过了集群总容量的{}").format(
+                cls.NOT_OVER_ES_CLUSTER_SIZE_PERCENT))
+
+        # 异步任务执行创建操作 需要多次调用es请求
+        indices_group_by_snapshot = array_group(
+            [model_to_dict(snapshot_index) for snapshot_index in retry_snapshot_indices], "snapshot_name"
+        )
+        from metadata.task.tasks import restore_result_table_snapshot
+
+        # 根据参数进行同步或者异步操作的处理
+        if is_sync:
+            logger.info("restore id %s sync to retry restore %s", restore.restore_id, indices_group_by_snapshot)
+            restore_result_table_snapshot(indices_group_by_snapshot, restore.restore_id)
+        else:
+            logger.info("restore id %s async to retry restore %s", restore.restore_id, indices_group_by_snapshot)
+            on_commit(lambda: restore_result_table_snapshot.delay(indices_group_by_snapshot, restore.restore_id))
+
+        restore.last_modify_user = operator
+        restore.save()
+
+        return {
+            "restore_id": restore.restore_id,
+            "retry_store_size": retry_store_size,
+            "retry_doc_count": sum([snapshot_index.doc_count for snapshot_index in retry_snapshot_indices]),
+            "retry_details": retry_details,
+        }
 
     @classmethod
     def clean_expired_restore(cls):
@@ -546,8 +763,8 @@ class EsSnapshotRestore(models.Model):
             logger.info("restore ->[%s] has expired, has be clean", expired_restore.restore_id)
 
     @classmethod
-    def batch_get_state(cls, restore_ids: list):
-        restores = cls.objects.filter(restore_id__in=restore_ids)
+    def batch_get_state(cls, bk_tenant_id: str, restore_ids: list):
+        restores = cls.objects.filter(restore_id__in=restore_ids, bk_tenant_id=bk_tenant_id)
         return [
             {
                 "table_id": restore.table_id,
@@ -559,6 +776,56 @@ class EsSnapshotRestore(models.Model):
             }
             for restore in restores
         ]
+
+    @classmethod
+    def batch_get_indices(cls, bk_tenant_id: str, restore_ids: list):
+        # 过滤掉已删除和过期的回溯
+        restores = cls.objects.filter(
+            restore_id__in=restore_ids,
+            is_deleted=False,
+            expired_delete=False,
+            bk_tenant_id=bk_tenant_id,
+        )
+        rt_restore_mappings = defaultdict(list)
+        es_storage_query = Q()
+        for _restore in restores:
+            rt_restore_mappings[(_restore.table_id, _restore.bk_tenant_id)].append(_restore)
+            es_storage_query |= Q(table_id=_restore.table_id, bk_tenant_id=_restore.bk_tenant_id)
+
+        from metadata.models import ESStorage
+        es_storages = ESStorage.objects.filter(es_storage_query)
+        storage_rt_mappings = defaultdict(list)
+        for _storage in es_storages:
+            storage_rt_mappings[(_storage.storage_cluster_id, _storage.bk_tenant_id)].extend(
+                rt_restore_mappings.get((_storage.table_id, _storage.bk_tenant_id), [])
+            )
+
+        data = []
+        # 根据集群查询回溯索引
+        for (storage_cluster_id, bk_tenant_id), restores in storage_rt_mappings.items():
+            es_client = get_client(bk_tenant_id=bk_tenant_id, cluster_id=storage_cluster_id)
+            if not restores:
+                continue
+            try:
+                es_indices = es_client.cat.indices(f"{cls.RESTORE_INDEX_PREFIX}*", format="json")
+            except Exception as e:
+                logger.error("restore get complete doc count cat indices error as [%s]", e)
+                raise ValueError(_("获取elasticsearch回溯索引失败"))
+            for restore in restores:
+                restore_indices = restore.get_each_complete_doc_count(cat_indices=es_indices)
+                indices_details = []
+                for restore_index, complete_info in restore_indices.items():
+                    snapshot_index = complete_info.pop("snapshot_index", None)
+                    indices_details.append({
+                        **complete_info, **(model_to_dict(snapshot_index) if snapshot_index else {})
+                    })
+                data.append({
+                    **model_to_dict(restore),
+                    "indices_details": indices_details,
+                })
+
+        data.sort(key=lambda x: x['restore_id'], reverse=True)
+        return data
 
     @classmethod
     def is_restored_index(cls, index, now, restore_id=None, bk_tenant_id=DEFAULT_TENANT_ID):
@@ -578,8 +845,7 @@ class EsSnapshotRestore(models.Model):
                 cluster_id = EsSnapshotRepository.objects.get(
                     repository_name=repository_name, bk_tenant_id=self.bk_tenant_id
                 ).cluster_id
-                es_client = get_client(cluster_id)
-
+                es_client = get_client(bk_tenant_id=self.bk_tenant_id, cluster_id=cluster_id)
                 es_client.snapshot.restore(
                     repository_name,
                     snapshot,
@@ -612,19 +878,22 @@ class EsSnapshotRestore(models.Model):
         from metadata.models import ESStorage
 
         es_storage = ESStorage.objects.get(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id)
-        es_client = get_client(es_storage.storage_cluster_id)
+        es_client = get_client(bk_tenant_id=self.bk_tenant_id, cluster_id=es_storage.storage_cluster_id)
 
         # es index 删除是通过url带参数 防止索引太多超过url长度限制 所以进行多批删除
-        indices_chunks = utils.chunk_index_list([self.build_restore_index_name(indice) for indice in indices])
+        indices_chunks = utils.chunk_index_list(
+            [self.build_restore_index_name(indice) for indice in indices]
+        ) if indices else []
         logger.info("restore -> [%s] need delete indices [%s]", self.restore_id, ",".join(indices))
         for indices_chunk in indices_chunks:
             try:
-                es_client.indices.delete(utils.to_csv(indices_chunk))
+                # 静默跳过不存在的索引，因indices每次操作可能是不幂等的，含有实际已删除的索引时将一直异常
+                es_client.indices.delete(utils.to_csv(indices_chunk), ignore_unavailable=True)
             except Exception as e:
                 logger.error(
                     "restore -> [%s] delete indices [%s] failed -> %s", self.restore_id, ",".join(indices_chunk), e
                 )
-                continue
+                raise ValueError(_("回溯索引删除失败"))
             logger.info("restore -> [%s] has delete indices [%s]", self.restore_id, ",".join(indices_chunk))
 
         logger.info("restore -> [%s] has clean complete maybe expired or delete", self.restore_id)
@@ -655,6 +924,49 @@ class EsSnapshotRestore(models.Model):
         self.complete_doc_count = complete_doc_count
         self.save()
         return self.complete_doc_count
+
+    def get_each_complete_doc_count(self, filter_indices: list = None, cat_indices: list = None):
+        """获取每个回溯索引的完成量"""
+        indices = filter_indices or self.indices.split(",")
+        snapshot_indices = EsSnapshotIndice.objects.filter(
+            start_time__lt=self.end_time,
+            end_time__gte=self.start_time,
+            table_id=self.table_id,
+            index_name__in=indices,
+            bk_tenant_id=self.bk_tenant_id,
+        )
+
+        is_completed = self.complete_doc_count >= self.total_doc_count
+
+        restore_indices_mapping = {
+            self.build_restore_index_name(snapshot_index.index_name): {
+                "index_name": snapshot_index.index_name,
+                "snapshot_index": snapshot_index,
+                "is_restored": True if is_completed else False,
+                "complete_doc_count": snapshot_index.doc_count if is_completed else 0,
+            } for snapshot_index in snapshot_indices
+        }
+
+        if is_completed:
+            return restore_indices_mapping
+
+        # 如果未查询索引，需查询索引
+        if not cat_indices:
+            from metadata.models import ESStorage
+            es_storage = ESStorage.objects.get(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id)
+            try:
+                cat_indices = es_storage.get_client().cat.indices(f"{self.RESTORE_INDEX_PREFIX}*", format="json")
+            except Exception as e:
+                logger.error("restore get complete doc count cat indices error as [%s]", e)
+                raise ValueError(_("获取elasticsearch回溯索引失败"))
+
+        for es_index in cat_indices:
+            if es_index["index"] in restore_indices_mapping:
+                restore_indices_mapping[es_index["index"]].update({
+                    "is_restored": True,
+                    "complete_doc_count": int(get_value_if_not_none(es_index["docs.count"], 0)),
+                })
+        return restore_indices_mapping
 
     def is_expired(self) -> bool:
         return timezone.now() > self.expired_time

@@ -23,18 +23,20 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-import { computed, defineComponent, ref, watch, h, Ref, onBeforeUnmount, nextTick } from 'vue';
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, ref, watch, type Ref } from 'vue';
 
-import { parseTableRowData, setDefaultTableWidth, TABLE_LOG_FIELDS_SORT_REGULAR, xssFilter } from '@/common/util';
+import { getRowFieldValue, setDefaultTableWidth, TABLE_LOG_FIELDS_SORT_REGULAR, xssFilter } from '@/common/util';
+// import { perfStart, perfEnd } from '@/utils/performance-monitor';
 import JsonFormatter from '@/global/json-formatter.vue';
 import useLocale from '@/hooks/use-locale';
 import useResizeObserve from '@/hooks/use-resize-observe';
+import useRetrieveEvent from '@/hooks/use-retrieve-event';
 import { UseSegmentProp } from '@/hooks/use-segment-pop';
 import useStore from '@/hooks/use-store';
 import useWheel from '@/hooks/use-wheel';
 
-import PopInstanceUtil from '../../../../global/pop-instance-util';
-import { BK_LOG_STORAGE } from '../../../../store/store.type';
+import PopInstanceUtil from '@/global/pop-instance-util';
+import { BK_LOG_STORAGE } from '@/store/store.type';
 import RetrieveHelper, { RetrieveEvent } from '../../../retrieve-helper';
 import ExpandView from '../../components/result-cell-element/expand-view.vue';
 import OperatorTools from '../../components/result-cell-element/operator-tools.vue';
@@ -50,11 +52,11 @@ import {
   ROW_F_ORIGIN_TIME,
   ROW_INDEX,
   ROW_KEY,
-  SECTION_SEARCH_INPUT,
   ROW_SOURCE,
+  SECTION_SEARCH_INPUT,
 } from './log-row-attributes';
 import RowRender from './row-render';
-import ScrollXBar from './scroll-x-bar';
+import ScrollXBar from '../../components/scroll-x-bar';
 import useLazyRender from './use-lazy-render';
 import useHeaderRender from './use-render-header';
 
@@ -74,7 +76,10 @@ export default defineComponent({
       type: String,
       default: 'table',
     },
-    handleClickTools: Function,
+    handleClickTools: {
+      type: Function,
+      default: undefined,
+    },
   },
   setup(props, { emit }) {
     const store = useStore();
@@ -85,7 +90,7 @@ export default defineComponent({
     const refLoadMoreElement: Ref<HTMLElement> = ref();
     const refResultRowBox: Ref<HTMLElement> = ref();
     const refSegmentContent: Ref<HTMLElement> = ref();
-    const { handleOperation } = useTextAction(emit, 'origin');
+    const { handleOperation, getObjectValue } = useTextAction(emit, 'origin');
 
     let savedSelection: Range = null;
 
@@ -101,10 +106,16 @@ export default defineComponent({
 
     const useSegmentPop = new UseSegmentProp({
       delineate: true,
+      aiBluekingEnabled: store.state.features.isAiAssistantActive,
       stopPropagation: true,
-      onclick: (e, ...args) => {
-        const [type] = args;
-        handleOperation(type, { value: savedSelection?.toString() ?? '', operation: type });
+      highlightEnabled: true,
+      onclick: (...args) => {
+        const type = args[1];
+        if (type === 'add-to-ai') {
+          props.handleClickTools(type, savedSelection?.toString() ?? '');
+        } else {
+          handleOperation(type, { value: savedSelection?.toString() ?? '', operation: type });
+        }
         popInstanceUtil.hide();
 
         if (savedSelection) {
@@ -125,31 +136,30 @@ export default defineComponent({
     // 前端本地分页loadmore触发器
     // renderList 没有使用响应式，这里需要手动触发更新，所以这里使用一个计数器来触发更新
     const localUpdateCounter = ref(0);
-
+    const hasMoreList = ref(true);
     let renderList = Object.freeze([]);
     const indexFieldInfo = computed(() => store.state.indexFieldInfo);
+    const filteredFieldList = computed(() => store.getters.filteredFieldList);
     const indexSetQueryResult = computed(() => store.state.indexSetQueryResult);
-    const visibleFields = computed(() => store.state.visibleFields);
+    const visibleFields = computed(() => store.getters.visibleFields);
     const indexSetOperatorConfig = computed(() => store.state.indexSetOperatorConfig);
     const tableShowRowIndex = computed(() => store.state.storage[BK_LOG_STORAGE.TABLE_SHOW_ROW_INDEX]);
     const unionIndexItemList = computed(() => store.getters.unionIndexItemList);
     const timeField = computed(() => indexFieldInfo.value.time_field);
     const timeFieldType = computed(() => indexFieldInfo.value.time_field_type);
     const isLoading = computed(() => indexSetQueryResult.value.is_loading || indexFieldInfo.value.is_loading);
-    const kvShowFieldsList = computed(() => indexFieldInfo.value?.fields.map(f => f.field_name));
+    const kvShowFieldsList = computed(() => filteredFieldList.value?.map(f => f.field_name));
     const userSettingConfig = computed(() => store.state.retrieve.catchFieldCustomConfig);
     const tableDataSize = computed(() => indexSetQueryResult.value?.list?.length ?? 0);
     const isUnionSearch = computed(() => store.getters.isUnionSearch);
-    const tableList = computed<Array<any>>(() => Object.freeze(indexSetQueryResult.value?.list ?? []));
+    const tableList = computed<any[]>(() => Object.freeze(indexSetQueryResult.value?.list ?? []));
     const gradeOption = computed(() => store.state.indexFieldInfo.custom_config?.grade_options ?? { disabled: false });
     const indexSetType = computed(() => store.state.indexItem.isUnionIndex);
+    const limitRow = computed(() => store.state.storage[BK_LOG_STORAGE.RESULT_DISPLAY_LINES]);
 
     // 检索第一页数据时，loading状态
     const isFirstPageLoading = computed(() => isLoading.value && !isRequesting.value);
 
-    const hasMoreList = computed(() => {
-      return indexSetQueryResult.value.total > tableDataSize.value;
-    });
     const exceptionMsg = computed(() => {
       if (/^cancel$/gi.test(indexSetQueryResult.value?.exception_msg)) {
         return $t('检索结果为空');
@@ -161,14 +171,35 @@ export default defineComponent({
     const fullColumns = ref([]);
     const showCtxType = ref(props.contentType);
 
-    const handleSearchingChange = isSearching => {
-      isPageLoading.value = isSearching;
+    /**
+     * 重置分页状态
+     */
+    const resetPageState = () => {
+      pageIndex.value = 1;
+      hasMoreList.value = true;
     };
 
-    RetrieveHelper.on(RetrieveEvent.SEARCHING_CHANGE, handleSearchingChange);
+    const { addEvent } = useRetrieveEvent();
+    addEvent(RetrieveEvent.SEARCHING_CHANGE, (isSearching) => {
+      isPageLoading.value = isSearching;
+    });
 
-    const setRenderList = (length?) => {
-      const arr = [];
+    addEvent([
+      RetrieveEvent.SEARCH_VALUE_CHANGE,
+      RetrieveEvent.SEARCH_TIME_CHANGE,
+      RetrieveEvent.TREND_GRAPH_SEARCH,
+      RetrieveEvent.SORT_LIST_CHANGED,
+    ], () => {
+      resetPageState();
+    });
+
+    addEvent(RetrieveEvent.AUTO_REFRESH, () => {
+      resetPageState();
+      store.dispatch('requestIndexSetQuery', { from: 'auto_refresh' });
+    });
+
+    const setRenderList = (length?: number) => {
+      const arr: Record<string, any>[] = [];
       const endIndex = length ?? tableDataSize.value;
       const lastIndex = endIndex <= tableList.value.length ? endIndex : tableList.value.length;
       for (let i = 0; i < lastIndex; i++) {
@@ -226,16 +257,16 @@ export default defineComponent({
                 class='bklog-column-wrapper'
                 fields={visibleFields.value}
                 jsonValue={row}
-                limitRow={null}
+                limitRow={limitRow.value}
                 onMenu-click={({ option, isLink }) => handleMenuClick(option, isLink)}
-              ></JsonFormatter>
+              />
             );
           },
         },
       ];
     });
 
-    const formatColumn = field => {
+    const formatColumn = (field) => {
       return {
         field: field.field_name,
         key: field.field_name,
@@ -249,26 +280,29 @@ export default defineComponent({
             <JsonFormatter
               class='bklog-column-wrapper'
               fields={field}
-              jsonValue={parseTableRowData(row, field.field_name, field.field_type, false) as any}
+              jsonValue={getRowFieldValue(row, field)}
+              limitRow={limitRow.value}
               onMenu-click={({ option, isLink }) => handleMenuClick(option, isLink, { row, field })}
-            ></JsonFormatter>
+            />
           );
         },
         renderHeaderCell: () => {
           const sortable = field.es_doc_values && field.tag !== 'union-source' && field.field_type !== 'flattened';
-          return renderHead(field, order => {
+          return renderHead(field, (order) => {
             if (sortable) {
               const sortList = order ? [[field.field_name, order]] : [];
-              const updatedSortList = store.state.indexFieldInfo.sort_list.map(item => {
+              const updatedSortList = store.state.indexFieldInfo.sort_list.map((item) => {
                 if (sortList.length > 0 && item[0] === field.field_name) {
                   return sortList[0];
-                } else if (sortList.length === 0 && item[0] === field.field_name) {
+                }
+                if (sortList.length === 0 && item[0] === field.field_name) {
                   return [field.field_name, 'desc'];
                 }
                 return item;
               });
               const temporarySortList = syncSpecifiedFieldSort(field.field_name, sortList);
-              store.commit('updateLocalSort', true);
+              resetPageState();
+              store.commit('updateState', { localSort: true });
               store.commit('updateIndexFieldInfo', { sort_list: updatedSortList });
               store.commit('updateIndexItemParams', { sort_list: temporarySortList });
               store.dispatch('requestIndexSetQuery');
@@ -278,19 +312,22 @@ export default defineComponent({
       };
     };
 
-    const setColWidth = col => {
+    const setColWidth = (col) => {
       col.minWidth = col.width - 4;
       col.width = '100%';
     };
 
-    const getFieldColumns = () => {
+    // 性能优化：使用 computed 缓存列配置，避免每次渲染都重新计算
+    const getFieldColumns = computed(() => {
       if (showCtxType.value === 'table') {
-        const columnList = [];
+        const columnList: Record<string, any>[] = [];
         const columns = visibleFields.value.length > 0 ? visibleFields.value : fullColumns.value;
         let maxColWidth = operatorToolsWidth.value + 40;
-        let logField = null;
+        let logField: Record<string, any> | null = null;
 
-        columns.forEach(col => {
+        // 性能优化：当字段数量很大时，使用 for 循环比 forEach 性能更好
+        for (let i = 0; i < columns.length; i++) {
+          const col = columns[i];
           const formatValue = formatColumn(col);
           if (col.field_name === 'log') {
             logField = formatValue;
@@ -298,7 +335,7 @@ export default defineComponent({
 
           columnList.push(formatValue);
           maxColWidth += formatValue.width;
-        });
+        }
 
         if (!logField && columnList.length > 0) {
           logField = columnList[columnList.length - 1];
@@ -312,7 +349,7 @@ export default defineComponent({
       }
 
       return originalColumns.value;
-    };
+    });
 
     const hanldeAfterExpandClick = (target: HTMLElement) => {
       const expandTarget = target
@@ -341,7 +378,7 @@ export default defineComponent({
               <i
                 style={{ color: '#4D4F56', fontSize: '9px' }}
                 class='bk-icon icon-play-shape'
-              ></i>
+              />
             </span>
           );
         },
@@ -367,12 +404,12 @@ export default defineComponent({
         align: 'left',
         resize: false,
         fixed: 'left',
-        disabled: !isShowSourceField.value || !indexSetType.value,
+        disabled: !(isShowSourceField.value && indexSetType.value),
         renderBodyCell: ({ row }) => {
-          const indeSetName =
-            unionIndexItemList.value.find(item => item.index_set_id === String(row.__index_set_id__))?.index_set_name ??
-            '';
-          const hanldeSoureClick = event => {
+          const indeSetName = unionIndexItemList.value.find(
+            item => item.index_set_id === String(row.__index_set_id__),
+          )?.index_set_name ?? '';
+          const hanldeSoureClick = (event) => {
             event.stopPropagation();
             event.preventDefault();
             event.stopImmediatePropagation();
@@ -408,7 +445,7 @@ export default defineComponent({
           resize: false,
           renderBodyCell: ({ row }) => {
             return (
-              // @ts-ignore
+              // @ts-expect-error
               <OperatorTools
                 handle-click={(type, event) => {
                   if (type === 'ai') {
@@ -444,10 +481,11 @@ export default defineComponent({
       handleOperation(option.operation, {
         ...option,
         value: timeTypes.includes(fieldOption?.field.field_type ?? null)
-          ? `${fieldOption?.row[fieldOption?.field.field_name]}`.replace(/<\/?mark>/gim, '')
+          ? `${getObjectValue(fieldOption?.row, fieldOption?.field)}`.replace(/<\/?mark>/gim, '')
           : option.value,
         fieldName: option.fieldName,
         operation: option.operation,
+        field: fieldOption?.field,
         isLink,
         depth: option.depth,
         displayFieldNames: option.displayFieldNames,
@@ -455,12 +493,17 @@ export default defineComponent({
     };
 
     const { renderHead } = useHeaderRender();
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: reason
     const setFullColumns = () => {
       /** 清空所有字段后所展示的默认字段  顺序: 时间字段，log字段，索引字段 */
-      const dataFields = [];
-      const indexSetFields = [];
-      const logFields = [];
-      indexFieldInfo.value.fields.forEach(item => {
+      const dataFields: Record<string, any>[] = [];
+      const indexSetFields: Record<string, any>[] = [];
+      const logFields: Record<string, any>[] = [];
+
+      // 性能优化：使用 for 循环替代 for...of，当字段数量很大时性能更好
+      const filteredFields = filteredFieldList.value;
+      for (let i = 0; i < filteredFields.length; i++) {
+        const item = filteredFields[i];
         if (item.field_type === 'date') {
           dataFields.push(item);
         } else if (item.field_name === 'log' || item.field_alias === 'original_text') {
@@ -468,7 +511,9 @@ export default defineComponent({
         } else if (!(item.field_type === '__virtual__' || item.is_built_in)) {
           indexSetFields.push(item);
         }
-      });
+      }
+
+      // 性能优化：缓存正则替换结果，避免重复计算
       const sortIndexSetFieldsList = indexSetFields.sort((a, b) => {
         const sortA = a.field_name.replace(TABLE_LOG_FIELDS_SORT_REGULAR, 'z');
         const sortB = b.field_name.replace(TABLE_LOG_FIELDS_SORT_REGULAR, 'z');
@@ -484,10 +529,10 @@ export default defineComponent({
     };
 
     const getRowConfigWithCache = () => {
-      return [['expand', false]].reduce(
-        (cfg, item: [keyof RowConfig, any]) => Object.assign(cfg, { [item[0]]: item[1] }),
-        {},
-      );
+      return [['expand', false]].reduce((cfg, item: [keyof RowConfig, any]) => {
+        cfg[item[0]] = item[1];
+        return cfg;
+      }, {});
     };
 
     const updateTableRowConfig = (nextIdx = 0) => {
@@ -517,7 +562,7 @@ export default defineComponent({
     };
 
     const isRequesting = ref(false);
-    let requestingTimer = null;
+    let requestingTimer: any = null;
 
     const debounceSetLoading = (delay = 120) => {
       requestingTimer && clearTimeout(requestingTimer);
@@ -529,16 +574,32 @@ export default defineComponent({
     const expandOption = {
       render: ({ row }) => {
         const config = tableRowConfig.get(row);
+        const rowIndex = config.value[ROW_INDEX];
+
+        // // 性能监控：记录展开渲染耗时
+        // perfStart('log-rows:expand-render', {
+        //   rowIndex,
+        //   fieldCount: kvShowFieldsList.value.length,
+        // });
+
+        // // 使用 nextTick 确保性能监控在渲染完成后执行
+        // nextTick(() => {
+        //   perfEnd('log-rows:expand-render', {
+        //     rowIndex,
+        //     fieldCount: kvShowFieldsList.value.length,
+        //   });
+        // });
+
         return (
           <ExpandView
             data={row}
             kv-show-fields-list={kvShowFieldsList.value}
             list-data={row}
-            row-index={config.value[ROW_INDEX]}
-            onValue-click={(type, content, isLink, field, depth, isNestedField) =>
-              handleIconClick(type, content, field, row, isLink, depth, isNestedField)
-            }
-          ></ExpandView>
+            row-index={rowIndex}
+            onValue-click={(type, content, isLink, field, depth, isNestedField) => {
+              return handleIconClick(type, content, field, row, isLink, depth, isNestedField);
+            }}
+          />
         );
       },
     };
@@ -553,16 +614,24 @@ export default defineComponent({
       }
     };
 
-    const syncSpecifiedFieldSort = (field_name, updatedSortList) => {
+    /**
+     * 同步指定字段的排序状态
+     * @param fieldName 字段名
+     * @param updatedSortList 排序列表
+     * @returns 更新后的排序列表
+     */
+    const syncSpecifiedFieldSort = (fieldName, updatedSortList) => {
       const requiredFields = ['gseIndex', 'iterationIndex', 'dtEventTimeStamp'];
-      if (!requiredFields.includes(field_name) || !updatedSortList.length) {
+      if (!(requiredFields.includes(fieldName) && updatedSortList.length)) {
         return updatedSortList;
       }
-      const fields = store.state.indexFieldInfo.fields.map(item => item.field_name);
-      const currentSort = updatedSortList.find(([key]) => key === field_name)[1];
+      const fields = filteredFieldList.value.map(item => item.field_name);
+      const currentSort = updatedSortList.find(([key]) => key === fieldName)[1];
 
-      requiredFields.forEach(field => {
-        if (field === field_name) return;
+      for (const field of requiredFields) {
+        if (field === fieldName) {
+          continue;
+        }
         if (fields.includes(field)) {
           const index = updatedSortList.findIndex(([key]) => key === field);
           const sortItem = [field, currentSort];
@@ -573,9 +642,11 @@ export default defineComponent({
             updatedSortList.push(sortItem);
           }
         }
-      });
+      }
       return updatedSortList;
     };
+
+
     watch(
       () => [tableShowRowIndex.value],
       () => {
@@ -583,9 +654,18 @@ export default defineComponent({
       },
     );
 
-    const handleResultBoxResize = () => {
-      scrollXOffsetLeft = 0;
-      refScrollXBar.value?.scrollLeft(0);
+    /**
+     * 处理结果框的resize
+     * @param resetScroll 是否重置滚动条
+     */
+    const handleResultBoxResize = (resetScroll = true) => {
+      if (!RetrieveHelper.jsonFormatter.isExpandNodeClick) {
+        if (resetScroll) {
+          scrollXOffsetLeft = 0;
+          refScrollXBar.value?.scrollLeft(0);
+        }
+      }
+
       computeRect(refResultRowBox.value);
     };
 
@@ -629,7 +709,7 @@ export default defineComponent({
       60,
     );
 
-    RetrieveHelper.on(
+    addEvent(
       [
         RetrieveEvent.FAVORITE_WIDTH_CHANGE,
         RetrieveEvent.LEFT_FIELD_SETTING_WIDTH_CHANGE,
@@ -638,6 +718,10 @@ export default defineComponent({
       ],
       handleResultBoxResize,
     );
+
+    addEvent(RetrieveEvent.AI_CLOSE, () => {
+      refResultRowBox.value?.querySelector('.ai-active')?.classList.remove('ai-active');
+    });
 
     const handleColumnWidthChange = (w, col) => {
       const width = w > 40 ? w : 40;
@@ -651,19 +735,19 @@ export default defineComponent({
 
       if (width < col.width && targetField.length) {
         if (logField) {
-          logField.width = logField.width + width;
+          logField.width += width;
         } else {
           const avgWidth = (col.width - width) / targetField.length;
-          targetField.forEach(field => {
-            field.width = field.width + avgWidth;
-          });
+          for (const field of targetField) {
+            field.width += avgWidth;
+          }
         }
       }
 
-      const sourceObj = visibleFields.value.reduce(
-        (acc, field) => Object.assign(acc, { [field.field_name]: field.width }),
-        {},
-      );
+      const sourceObj = visibleFields.value.reduce((acc, curField) => {
+        acc[curField.field_name] = curField.width;
+        return acc;
+      }, {});
       const { fieldsWidth } = userSettingConfig.value;
       const newFieldsWidthObj = Object.assign(fieldsWidth, sourceObj, {
         [col.field]: Math.ceil(width),
@@ -683,30 +767,32 @@ export default defineComponent({
       // tableDataSize.value === 0 用于判定是否是第一次渲染导致触发的请求
       // visibleFields.value 在字段重置时会清空，所以需要判断
       if (isRequesting.value || tableDataSize.value === 0 || visibleFields.value.length === 0) {
-        return;
+        return Promise.resolve(false);
       }
 
       if (pageIndex.value * pageSize.value < tableDataSize.value) {
+        hasMoreList.value = true;
         isRequesting.value = true;
-        pageIndex.value++;
+        pageIndex.value += 1;
         const maxLength = Math.min(pageSize.value * pageIndex.value, tableDataSize.value);
         setRenderList(maxLength);
         debounceSetLoading(0);
         nextTick(RetrieveHelper.updateMarkElement.bind(RetrieveHelper));
-        localUpdateCounter.value++;
-        return;
+        localUpdateCounter.value += 1;
+        return Promise.resolve(false);
       }
 
       if (hasMoreList.value) {
         isRequesting.value = true;
         return store
           .dispatch('requestIndexSetQuery', { isPagination: true })
-          .then(resp => {
-            if (resp?.size === 50) {
-              pageIndex.value++;
-            }
+          .then((resp) => {
+            pageIndex.value += 1;
+            handleResultBoxResize(false);
 
-            handleResultBoxResize();
+            if (resp?.length !== pageSize.value) {
+              hasMoreList.value = false;
+            }
           })
           .finally(() => {
             debounceSetLoading(0);
@@ -717,7 +803,7 @@ export default defineComponent({
       return Promise.resolve(false);
     };
 
-    useResizeObserve(SECTION_SEARCH_INPUT, entry => {
+    useResizeObserve(SECTION_SEARCH_INPUT, (entry) => {
       searchContainerHeight.value = entry.contentRect.height;
     });
 
@@ -728,11 +814,12 @@ export default defineComponent({
       pageIndex.value = 1;
       const maxLength = Math.min(pageSize.value * pageIndex.value, tableDataSize.value);
       renderList = renderList.slice(0, maxLength);
+      localUpdateCounter.value += 1;
     };
 
     // 监听滚动条滚动位置
     // 判定是否需要拉取更多数据
-    const { offsetWidth, scrollWidth, computeRect } = useLazyRender({
+    const { offsetWidth, scrollWidth, computeRect, getScrollElement } = useLazyRender({
       loadMoreFn: loadMoreTableData,
       container: resultContainerIdSelector,
       rootElement: refRootElement,
@@ -759,11 +846,44 @@ export default defineComponent({
       return showCtxType.value === 'table' && scrollWidth.value > offsetWidth.value;
     });
 
+    const isPreloading = ref(false);     // 是否正在预加载
+    const preloadThreshold = 32 * 50;        // 距离底部多少 px 开始预加载
+    let lastPreloadTime = 0;
+    const preloadCooldown = 300;         // ms
+
+    const shouldPreloadOnScrollDown = (event: WheelEvent) => {
+
+      if (!hasMoreList.value) return false;
+      if (isPreloading.value) return false;
+
+      // 1️⃣ 判定向下滚动
+      if (event.deltaY <= 0) return false;
+
+      const now = Date.now();
+      if (now - lastPreloadTime < preloadCooldown) return false;
+
+      const scrollElement = getScrollElement();
+      // 2️⃣ 判定是否接近底部
+      const scrollTop = scrollElement?.scrollTop ?? 0;
+      const clientHeight = scrollElement?.clientHeight ?? 0;
+      const scrollHeight = scrollElement?.scrollHeight ?? 0;
+      const distanceToBottom = scrollHeight - (scrollTop + clientHeight);
+
+      return distanceToBottom <= preloadThreshold;
+    }
+
     let isAnimating = false;
 
     useWheel({
       target: refRootElement,
       callback: (event: WheelEvent) => {
+        if (shouldPreloadOnScrollDown(event)) {
+          isPreloading.value = true;
+          loadMoreTableData().finally(() => {
+            isPreloading.value = false;
+          });
+        }
+
         const maxOffset = scrollWidth.value - offsetWidth.value;
 
         // 检查是否按住 shift 键
@@ -850,13 +970,13 @@ export default defineComponent({
                 <LogCell
                   key={column.key}
                   width={column.width}
-                  class={[column.class ?? '', 'bklog-row-cell header-cell', column.fixed]}
+                  class={[(column as any).class ?? '', 'bklog-row-cell header-cell', (column as any).fixed]}
                   customStyle={cellStyle}
-                  minWidth={column.minWidth > 0 ? column.minWidth : column.width}
+                  minWidth={(column as any).minWidth > 0 ? (column as any).minWidth : column.width}
                   resize={column.resize}
                   onResize-width={w => handleColumnWidthChange(w, column)}
                 >
-                  {column.renderHeaderCell?.({ column }, h) ?? column.title}
+                  {(column as any).renderHeaderCell?.({ column }, h) ?? column.title}
                 </LogCell>
               );
             })}
@@ -866,7 +986,7 @@ export default defineComponent({
     };
 
     const renderScrollTop = () => {
-      return <ScrollTop on-scroll-top={afterScrollTop}></ScrollTop>;
+      return <ScrollTop on-scroll-top={afterScrollTop} />;
     };
 
     const getColumnWidth = (column, fullWidth = false) => {
@@ -890,9 +1010,11 @@ export default defineComponent({
       };
     };
 
-    const allColumns = computed(() =>
-      [...leftColumns.value, ...getFieldColumns(), ...rightColumns.value].filter(item => !item.disabled),
-    );
+    const allColumns = computed(() => {
+      return [...leftColumns.value, ...getFieldColumns.value, ...rightColumns.value].filter(
+        item => !(item as any).disabled,
+      );
+    });
 
     const renderRowCells = (row, rowIndex) => {
       const { expand } = tableRowConfig.get(row).value;
@@ -901,6 +1023,7 @@ export default defineComponent({
 
       return [
         <div
+          key={`${rowIndex}-row`}
           class='bklog-list-row'
           data-row-index={rowIndex}
           data-row-click
@@ -916,7 +1039,7 @@ export default defineComponent({
               <div
                 key={`${rowIndex}-${column.key}`}
                 style={cellStyle}
-                class={[column.class ?? '', 'bklog-row-cell', column.fixed]}
+                class={[(column as any).class ?? '', 'bklog-row-cell', (column as any).fixed]}
               >
                 {column.renderBodyCell?.({ row, column, rowIndex }, h) ?? column.title}
               </div>
@@ -957,10 +1080,25 @@ export default defineComponent({
       }
 
       const config: RowConfig = tableRowConfig.get(item).value;
-      config.expand = !config.expand;
+      const isExpanding = !config.expand;
+      config.expand = isExpanding;
+
+      // 性能监控：记录展开/收起操作的耗时
+      // if (isExpanding) {
+      //   perfStart('log-rows:expand-click', {
+      //     rowIndex: config[ROW_INDEX],
+      //     fieldCount: kvShowFieldsList.value.length,
+      //   });
+      // }
+
       nextTick(() => {
         if (config.expand) {
           hanldeAfterExpandClick(target);
+          // 展开完成后记录耗时
+          // perfEnd('log-rows:expand-click', {
+          //   rowIndex: config[ROW_INDEX],
+          //   fieldCount: kvShowFieldsList.value.length,
+          // });
         }
       });
     };
@@ -999,7 +1137,7 @@ export default defineComponent({
           innerWidth={scrollWidth.value}
           outerWidth={offsetWidth.value}
           onScroll-change={handleScrollXChanged}
-        ></ScrollXBar>
+        />
       );
     };
 
@@ -1012,8 +1150,10 @@ export default defineComponent({
         return 'Loading ...';
       }
 
-      if (!isRequesting.value && !hasMoreList.value && tableDataSize.value > 0) {
-        return ` - 已加载所有数据: 共计 ${tableDataSize.value} 条 - `;
+      if (!(isRequesting.value || hasMoreList.value) || tableDataSize.value < pageSize.value) {
+        if (tableDataSize.value > 0) {
+          return ` - 已加载所有数据: 共计 ${tableDataSize.value} 条 - `;
+        }
       }
 
       return '';
@@ -1054,7 +1194,7 @@ export default defineComponent({
           ref={refLoadMoreElement}
           class='bklog-requsting-loading'
         >
-          <div style='min-width: 100%'></div>
+          <div style='min-width: 100%' />
         </div>
       );
     };
@@ -1064,7 +1204,7 @@ export default defineComponent({
         return null;
       }
       if (tableDataSize.value > 0 && showCtxType.value === 'table') {
-        return <div class='fixed-right-shadown'></div>;
+        return <div class='fixed-right-shadown' />;
       }
 
       return null;
@@ -1076,6 +1216,7 @@ export default defineComponent({
       );
     });
 
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: reason
     const exceptionType = computed(() => {
       if (tableDataSize.value === 0 || indexFieldInfo.value.is_loading) {
         if (isRequesting.value || isLoading.value || isPageLoading.value) {
@@ -1105,7 +1246,7 @@ export default defineComponent({
         <LogResultException
           message={exceptionMsg.value}
           type={exceptionType.value}
-        ></LogResultException>
+        />
       );
     };
 
@@ -1116,15 +1257,6 @@ export default defineComponent({
     onBeforeUnmount(() => {
       popInstanceUtil.uninstallInstance();
       resetRowListState(-1);
-      RetrieveHelper.off(RetrieveEvent.SEARCHING_CHANGE, handleSearchingChange);
-      [
-        RetrieveEvent.FAVORITE_WIDTH_CHANGE,
-        RetrieveEvent.LEFT_FIELD_SETTING_WIDTH_CHANGE,
-        RetrieveEvent.FAVORITE_SHOWN_CHANGE,
-        RetrieveEvent.LEFT_FIELD_SETTING_SHOWN_CHANGE,
-      ].forEach(event => {
-        RetrieveHelper.off(event, handleResultBoxResize);
-      });
     });
 
     return {
@@ -1169,7 +1301,7 @@ export default defineComponent({
         {this.renderLoader()}
         {this.renderScrollTop()}
         {this.renderDelineatePopContent()}
-        <div class='resize-guide-line'></div>
+        <div class='resize-guide-line' />
       </div>
     );
   },

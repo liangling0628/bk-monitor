@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -35,14 +35,8 @@ from .data_link import (  # noqa
     ESStorageBindingConfig,
     LogDataBusConfig,
     LogResultTableConfig,
-    VMResultTableConfig,
+    ResultTableConfig,
     VMStorageBindingConfig,
-)
-from .data_pipeline import (
-    DataPipeline,
-    DataPipelineDataSource,
-    DataPipelineEtlConfig,
-    DataPipelineSpace,
 )
 from .data_source import DataSource, DataSourceOption, DataSourceResultTable
 from .es_snapshot import (
@@ -59,6 +53,10 @@ from .influxdb_cluster import (
 )
 from .ping_server import PingServerSubscriptionConfig
 from .record_rule import RecordRule, ResultTableFlow
+from .entity_relation import (
+    CustomRelationStatus,
+    EntityMeta,
+)
 from .result_table import (
     CMDBLevelRecord,
     ESFieldQueryAliasOption,
@@ -75,7 +73,6 @@ from .space import (
     SpaceResource,
     SpaceStickyInfo,
     SpaceType,
-    SpaceTypeToResultTableFilterAlias,
 )
 from .storage import (
     ArgusStorage,
@@ -154,12 +151,6 @@ __all__ = [
     "SpaceResource",
     "SpaceStickyInfo",
     "BkAppSpaceRecord",
-    "SpaceTypeToResultTableFilterAlias",
-    # data pipeline
-    "DataPipeline",
-    "DataPipelineSpace",
-    "DataPipelineEtlConfig",
-    "DataPipelineDataSource",
     "AccessVMRecord",
     "SpaceVMInfo",
     "SpaceRelatedStorageInfo",
@@ -167,4 +158,7 @@ __all__ = [
     "RecordRule",
     "ResultTableFlow",
     "BkBaseResultTable",
+    # resource relation
+    "EntityMeta",
+    "CustomRelationStatus",
 ]

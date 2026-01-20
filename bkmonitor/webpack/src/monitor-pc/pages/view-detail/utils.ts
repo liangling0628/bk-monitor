@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -55,11 +55,11 @@ export const transformSrcData = (data: IUnifyQuerySeriesItem[]) => {
         timeMap[time] = new Array(tableThArr.length).fill(null);
         list = timeMap[time];
         list[0] = {
-          value: dayjs.tz(time).format('YYYY-MM-DD HH:mm:ss'),
+          value: dayjs.tz(time).format('YYYY-MM-DD HH:mm:ssZZ'),
           originValue: time,
         };
       }
-      const index = tableThArr.findIndex(target => item.target === target);
+      const index = tableThArr.indexOf(item.target);
       if (index >= 0) {
         const value = typeof v !== 'undefined' ? v : null;
         list[index] = {
@@ -89,15 +89,19 @@ export const transformSrcData = (data: IUnifyQuerySeriesItem[]) => {
     max: null,
     min: null,
   }));
-  tableThArr.forEach((th, index) => {
+  tableThArr.forEach((_th, index) => {
     if (index > 0) {
       const map = maxMinMap[index];
       map.min = tableTdArr[0][index].value;
       map.max = map.min;
       tableTdArr.forEach(td => {
         const cur = td[index]?.value;
-        cur > map.max && cur !== null && (map.max = cur);
-        cur < map.min && cur !== null && (map.min = cur);
+        if (cur > map.max && cur !== null) {
+          map.max = cur;
+        }
+        if (cur < map.min && cur !== null) {
+          map.min = cur;
+        }
       });
     }
   });
@@ -112,7 +116,9 @@ export const transformSrcData = (data: IUnifyQuerySeriesItem[]) => {
           td.min = true;
           maxMinMap[i].min = null;
         }
-        td.min && td.max && (td.max = false);
+        if (td.min && td.max) {
+          td.max = false;
+        }
       }
     });
   });
@@ -166,6 +172,26 @@ export const downJsonFile = (jsonStr: string, name = 'json-file.json') => {
   const blob = new Blob([jsonStr], { type: 'application/json' });
   const href = window.URL.createObjectURL(blob);
   downFile(href, name);
+};
+
+export const uploadJsonFile = <T>(file: File): Promise<T> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = (event: any) => {
+      try {
+        const result = JSON.parse(event.target.result);
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    reader.onerror = () => {
+      reject(reader.error);
+    };
+    reader.readAsText(file);
+  });
 };
 
 export const refreshList = [

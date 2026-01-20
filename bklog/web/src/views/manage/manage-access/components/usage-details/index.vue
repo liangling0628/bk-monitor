@@ -79,14 +79,18 @@
           min-width="10"
         >
           <template #default="{ row }">
-            {{ utcFormatDate(row.created_at) }}
+            {{ utcFormatDate(row.created_at, true) }}
           </template>
         </bk-table-column>
         <bk-table-column
           :label="$t('执行人')"
           min-width="10"
           prop="created_by"
-        ></bk-table-column>
+        >
+          <template #default="{ row }">
+            <bk-user-display-name :user-id="row.created_by"></bk-user-display-name>
+          </template>
+        </bk-table-column>
         <bk-table-column
           :label="$t('查询语句')"
           min-width="20"
@@ -128,6 +132,7 @@
 
   import { utcFormatDate } from '../../../../../common/util';
   import { updateTimezone } from '../../../../../language/dayjs';
+  import useUtils from '@/hooks/use-utils';
   import ChartComponent from './chart-component';
 
   export default {
@@ -261,8 +266,9 @@
               pagesize: this.pagination.limit,
             },
           });
+          const { formatResponseListTimeZoneString } = useUtils();
           this.pagination.count = res.data.total;
-          this.tableData = res.data.list;
+          this.tableData = formatResponseListTimeZoneString(res.data.list || [], {}, ['created_at', 'updated_at']);
         } catch (e) {
           console.warn(e);
           this.pagination.current = 1;

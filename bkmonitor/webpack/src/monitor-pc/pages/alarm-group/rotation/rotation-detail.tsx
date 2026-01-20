@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -28,6 +28,7 @@ import { Component as tsc } from 'vue-tsx-support';
 
 import { retrieveDutyRule } from 'monitor-api/modules/model';
 import { previewDutyRulePlan } from 'monitor-api/modules/user_groups';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 
 import {
   getAutoOrderList,
@@ -63,9 +64,9 @@ export default class RotationDetail extends tsc<IProps> {
   get historyList() {
     return [
       { label: this.$t('创建人'), value: this.detailData?.create_user || '--' },
-      { label: this.$t('创建时间'), value: this.detailData?.create_time || '--' },
+      { label: this.$t('创建时间'), value: formatWithTimezone(this.detailData?.create_time) || '--' },
       { label: this.$t('最近更新人'), value: this.detailData?.update_user || '--' },
-      { label: this.$t('修改时间'), value: this.detailData?.update_time || '--' },
+      { label: this.$t('修改时间'), value: formatWithTimezone(this.detailData?.update_time) || '--' },
     ];
   }
 

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -108,6 +108,7 @@ export default class EventDetail extends Mixins(authorityMixinCreate(eventAuth))
     dimension_message: '',
     overview: {}, // 处理状态数据
     assignee: [],
+    bk_host_id: '',
   };
   actions = []; // 处理记录数据
   total = 0; // 记录数据总条数
@@ -174,7 +175,7 @@ export default class EventDetail extends Mixins(authorityMixinCreate(eventAuth))
     this.scrollInit();
     this.logRetrieval.isMounted = true;
   }
-  beforeRouteLeave(to, from, next) {
+  beforeRouteLeave(_to, _from, next) {
     next(() => {
       destroyTimezone();
     });
@@ -247,7 +248,7 @@ export default class EventDetail extends Mixins(authorityMixinCreate(eventAuth))
       page: 1,
       page_size: 100,
       alert_ids: [this.id],
-      status: ['failure', 'success', 'partial_failure'],
+      status: ['failure', 'success', 'partial_failure', 'blocked'],
       ordering: ['-create_time'],
       conditions: [{ key: 'parent_action_id', value: [0], method: 'eq' }], // 处理状态数据写死条件
     };
@@ -434,7 +435,7 @@ export default class EventDetail extends Mixins(authorityMixinCreate(eventAuth))
       const traceIdSet = new Set();
       if (data.series?.length) {
         for (const item of data.series) {
-          const idIndex = item.columns.findIndex(c => c === 'bk_trace_id');
+          const idIndex = item.columns.indexOf('bk_trace_id');
           for (const d of item.data_points) {
             if (d[idIndex]) {
               traceIdSet.add(d[idIndex]);
@@ -491,6 +492,7 @@ export default class EventDetail extends Mixins(authorityMixinCreate(eventAuth))
           id: this.basicInfo?.extra_info?.strategy?.id,
           name: this.basicInfo?.extra_info?.strategy?.name,
         },
+        bkHostId: this.basicInfo?.bk_host_id || '',
       },
     ];
     // EventModuleStore.setDimensionList(this.basicInfo?.dimensions || []);

@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -14,7 +13,6 @@ import logging
 
 import arrow
 from django.utils.translation import gettext as _
-from six import string_types
 
 from alarm_backends.core.cache.cmdb.dynamic_group import DynamicGroupManager
 from alarm_backends.core.cache.key import NOTICE_SHIELD_KEY_LOCK
@@ -31,13 +29,14 @@ from bkmonitor.utils.range import (
 from bkmonitor.utils.range.conditions import AndCondition, EqualCondition, OrCondition
 from bkmonitor.utils.range.period import TimeMatch, TimeMatchBySingle
 from bkmonitor.utils.send import Sender
+from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id
 from constants.shield import ScopeType, ShieldCategory
 from core.errors.alarm_backends import StrategyNotFound
 
 logger = logging.getLogger("fta_action")
 
 
-class ShieldObj(object):
+class ShieldObj:
     """
     每条屏蔽配置对应的obj
     """
@@ -126,14 +125,17 @@ class ShieldObj(object):
             # 查询动态分组所属的主机
             dynamic_groups = []
             if dynamic_group_ids:
-                dynamic_groups = DynamicGroupManager.multi_get(dynamic_group_ids)
+                bk_tenant_id = bk_biz_id_to_bk_tenant_id(self.config["bk_biz_id"])
+                dynamic_groups = list(
+                    DynamicGroupManager.mget(bk_tenant_id=bk_tenant_id, dynamic_group_ids=dynamic_group_ids).values()
+                )
 
-            bk_host_ids = set()
+            bk_host_ids: set = {0}
             for dynamic_group in dynamic_groups:
-                if dynamic_group and dynamic_group.get("bk_obj_id") == "host":
+                if dynamic_group.get("bk_obj_id") == "host":
                     bk_host_ids.update(dynamic_group["bk_inst_ids"])
-            if bk_host_ids:
-                clean_dimension["bk_host_id"] = list(bk_host_ids)
+            # 动态分组所属的主机为空，则表示屏蔽规则失效，依然需要将bk_host_id: [0] 设置到待匹配维度中
+            clean_dimension["bk_host_id"] = list(bk_host_ids)
 
         for k, v in list(clean_dimension.items()):
             field = load_field_instance(k, v)
@@ -151,7 +153,7 @@ class ShieldObj(object):
             :param : str|list
             :return: bool
             """
-            if isinstance(para, string_types):
+            if isinstance(para, str):
                 return "00" == para
             elif isinstance(para, list):
                 return "00" in para
@@ -163,7 +165,7 @@ class ShieldObj(object):
             :param parm:str
             :return: bool
             """
-            if isinstance(parm, string_types):
+            if isinstance(parm, str):
                 return parm[0] == "_"
             return False
 
@@ -174,7 +176,7 @@ class ShieldObj(object):
             :return: bool
             """
             category = parm.get("category")
-            if isinstance(category, string_types):
+            if isinstance(category, str):
                 return category == "all"
             elif isinstance(category, list):
                 return "all" in category
@@ -316,15 +318,14 @@ class ShieldObj(object):
 
         for notice_way in self.config["notice_config"]["notice_way"]:
             sender = Sender(
-                title_template_path="notice/shield/{notice_way}_title.jinja".format(
-                    notice_way=notice_way,
-                ),
-                content_template_path="notice/shield/{notice_way}_content.jinja".format(
-                    notice_way=notice_way,
-                ),
+                bk_tenant_id=bk_biz_id_to_bk_tenant_id(self.config["bk_biz_id"]),
+                title_template_path=f"notice/shield/{notice_way}_title.jinja",
+                content_template_path=f"notice/shield/{notice_way}_content.jinja",
                 context=context,
             )
-            logger.debug("[屏蔽通知] shield({}) 通知方式：{}, 内容：{}".format(self.config["id"], notice_way, sender.content))
+            logger.debug(
+                "[屏蔽通知] shield({}) 通知方式：{}, 内容：{}".format(self.config["id"], notice_way, sender.content)
+            )
             notice_result = sender.send(notice_way, notice_receivers)
             all_notice_result[notice_way] = notice_result
 
@@ -380,13 +381,52 @@ class ShieldObj(object):
 
 
 class AlertShieldObj(ShieldObj):
-    def get_dimension(self, alert: AlertDocument):
+    # 类级别的缓存，用于存储告警维度信息
+    _alert_dimension_cache = {}
+
+    @classmethod
+    def _get_cached_alert_dimension(cls, alert: AlertDocument):
+        """获取缓存的告警维度信息，避免重复计算
+
+        :param alert: 告警文档对象
+        :return: 告警维度字典
+        """
+        cache_key = f"{alert.id}_{alert.strategy_id}"
+
+        if cache_key in cls._alert_dimension_cache:
+            return cls._alert_dimension_cache[cache_key]
+
+        # 计算告警维度
+        dimension = cls._calculate_alert_dimension(alert)
+
+        # 缓存结果，限制缓存大小避免内存泄漏
+        if len(cls._alert_dimension_cache) > 1000:
+            # 简单的缓存清理策略：删除最旧的一半缓存
+            keys_to_remove = list(cls._alert_dimension_cache.keys())[:500]
+            for key in keys_to_remove:
+                cls._alert_dimension_cache.pop(key, None)
+
+        cls._alert_dimension_cache[cache_key] = dimension
+        return dimension
+
+    @staticmethod
+    def _calculate_alert_dimension(alert: AlertDocument):
+        """计算告警维度信息
+
+        :param alert: 告警文档对象
+        :return: 告警维度字典
+        """
+        dimension = {}
         try:
-            dimension = copy.deepcopy(alert.origin_alarm["data"]["dimensions"])
-        except BaseException as error:
+            # 检查 origin_alarm 是否为空，避免重复的异常日志
+            if alert.origin_alarm and alert.origin_alarm.get("data"):
+                dimension = copy.deepcopy(alert.origin_alarm["data"]["dimensions"])
+        except (TypeError, KeyError):
             # 有可能第三方告警没有维度信息
-            dimension = {}
-            logger.info("Get origin alarm dimensions  of alert(%s) error, %s", alert.id, str(error))
+            pass
+        except BaseException as error:
+            logger.exception("get origin alarm dimensions of alert(%s) error, %s", alert.id, str(error))
+
         alert_dimensions = [d.to_dict() for d in alert.dimensions]
         dimension.update({d["key"]: d.get("value", "") for d in alert_dimensions})
         dimension["strategy_id"] = alert.strategy_id
@@ -442,6 +482,14 @@ class AlertShieldObj(ShieldObj):
                 # 将带tags前缀的维度转换为不带前缀，扩大搜索维度  (tags.device_name => device_name)
                 new_dimensions[key[len(tag_prefix) :]] = value
         return new_dimensions
+
+    def get_dimension(self, alert: AlertDocument):
+        """获取告警维度信息（使用缓存优化）
+
+        :param alert: 告警文档对象
+        :return: 告警维度字典
+        """
+        return self._get_cached_alert_dimension(alert)
 
     def is_match(self, alert: AlertDocument):
         source_time = arrow.now()

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -43,13 +43,13 @@ export class TimeRange {
   }
 
   /** 格式化时间范围 */
-  format(str = 'YYYY-MM-DD HH:mm:ss'): TimeRangeType {
+  format(str = 'YYYY-MM-DD HH:mm:ssZZ'): TimeRangeType {
     return this.value.map(item => item?.format?.(str) || null) as TimeRangeType;
   }
 
   /** 初始化时间对象 */
   init(times: TimeRangeType) {
-    const dateRange = new DateRange(times as DateValue, 'YYYY-MM-DD HH:mm:ss', window.timezone);
+    const dateRange = new DateRange(times as DateValue, 'YYYY-MM-DD HH:mm:ssZZ', window.timezone);
     this.value = [dateRange.startDate, dateRange.endDate];
   }
   /** 格式化成秒 */
@@ -64,10 +64,10 @@ export const intTimestampStr = (str): null | number => {
   return isTimestamp ? Number.parseInt(str, 10) : str;
 };
 
-/** 将格式为 ['now-1d', 'now'] 转换为 ['YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DD HH:mm:ss'] */
+/** 将格式为 ['now-1d', 'now'] 转换为 ['YYYY-MM-DD HH:mm:ssZZ', 'YYYY-MM-DD HH:mm:ssZZ'] */
 export const handleTransformTime = (value: TimeRangeType): TimeRangeType => {
   const timeRange = new TimeRange(value);
-  return timeRange.format('YYYY-MM-DD HH:mm:ss');
+  return timeRange.format('YYYY-MM-DD HH:mm:ssZZ');
 };
 
 /** 转换成秒 */

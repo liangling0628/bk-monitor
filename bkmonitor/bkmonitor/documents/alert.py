@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import time
-from typing import List
 
 from django.utils.functional import cached_property
 from django.utils.translation import gettext as _
@@ -18,11 +17,12 @@ from elasticsearch_dsl import InnerDoc, Search, field
 
 from bkmonitor.documents import EventDocument
 from bkmonitor.documents.base import BaseDocument, Date
+from bkmonitor.documents.constants import ES_INDEX_SETTINGS
 from bkmonitor.models import NO_DATA_TAG_DIMENSION
 from constants.alert import (
     EVENT_SEVERITY,
     HANDLE_STAGE_DICT,
-    TARGET_DIMENSIONS,
+    CMDB_TARGET_DIMENSIONS,
     EventStatus,
 )
 from constants.data_source import DataSourceLabel, DataTypeLabel
@@ -34,6 +34,7 @@ class AlertDocument(BaseDocument):
     REINDEX_ENABLED = True
     REINDEX_QUERY = Search().filter("term", status=EventStatus.ABNORMAL).to_dict()
 
+    bk_tenant_id = field.Keyword()
     id = field.Keyword(required=True)
     seq_id = field.Long()
 
@@ -108,7 +109,7 @@ class AlertDocument(BaseDocument):
         display_key = field.Keyword()
         display_value = field.Keyword()
 
-        def to_dict(self):
+        def to_dict(self) -> dict:
             return super().to_dict(skip_empty=False)
 
     dimensions = field.Object(enabled=False, multi=True, doc_class=Dimension)
@@ -118,7 +119,7 @@ class AlertDocument(BaseDocument):
 
     class Index:
         name = "bkfta_alert"
-        settings = {"number_of_shards": 3, "number_of_replicas": 1, "refresh_interval": "1s"}
+        settings = ES_INDEX_SETTINGS.copy()
 
     def get_index_time(self):
         return self.parse_timestamp_by_id(self.id)
@@ -145,14 +146,14 @@ class AlertDocument(BaseDocument):
         try:
             ts = cls.parse_timestamp_by_id(id)
         except Exception:
-            raise ValueError("invalid alert_id: {}".format(id))
+            raise ValueError(f"invalid alert_id: {id}")
         hits = cls.search(start_time=ts, end_time=ts).filter("term", id=id).execute().hits
         if not hits:
             raise AlertNotFoundError({"alert_id": id})
         return cls(**hits[0].to_dict())
 
     @classmethod
-    def mget(cls, ids, fields: List = None) -> List["AlertDocument"]:
+    def mget(cls, ids, fields: list = None) -> list["AlertDocument"]:
         """
         获取多条告警
         """
@@ -260,12 +261,12 @@ class AlertDocument(BaseDocument):
     @property
     def target_dimensions(self):
         # 目标维度
-        return [d.to_dict() for d in self.dimensions if d.key in TARGET_DIMENSIONS]
+        return [d.to_dict() for d in self.dimensions if d.key in CMDB_TARGET_DIMENSIONS]
 
     @property
     def common_dimensions(self):
         # 非目标维度
-        return [d.to_dict() for d in self.dimensions if d.key not in TARGET_DIMENSIONS]
+        return [d.to_dict() for d in self.dimensions if d.key not in CMDB_TARGET_DIMENSIONS]
 
     @property
     def common_dimension_tuple(self) -> tuple:

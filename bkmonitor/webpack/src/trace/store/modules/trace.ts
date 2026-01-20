@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -85,6 +85,8 @@ export const useTraceStore = defineStore('trace', () => {
   const originCrossAppSpanMaps = shallowRef<OriginCrossAppSpanMap>({}); // 跨应用场景下 条件搜索跨应用名称的映射
   const ellipsisDirection = ref<DirectionType>('ltr'); // 省略号头部/尾部显示
   const traceViewFilters = ref<string[]>(['duration']); // 工具栏过滤 span 条件
+  // 用于span视角表格打开trace侧滑后,定位到指定span
+  const externalLocateSpan = shallowRef<null | { spanId: string; traceId: string }>(null);
   // Trace / Span list 切换标志
   const listType = ref<ListType>('trace');
   const traceType = ref([]);
@@ -112,6 +114,18 @@ export const useTraceStore = defineStore('trace', () => {
   /** 展开/收起 trace 弹窗 */
   function setTraceDetail(isShow: boolean) {
     showTraceDetail.value = isShow;
+  }
+  /** 更新当前需要高亮的span id所在行 */
+  function setExternalLocateSpan(traceId: string, spanId: string) {
+    if (!traceId || !spanId) {
+      externalLocateSpan.value = null;
+      return;
+    }
+    externalLocateSpan.value = { traceId, spanId };
+  }
+  /** 清除span id高亮行数据 */
+  function clearExternalLocateSpan() {
+    externalLocateSpan.value = null;
   }
   /** 更新当前展示的 trace 数据 */
   function setTraceData(data: ITraceData) {
@@ -368,6 +382,9 @@ export const useTraceStore = defineStore('trace', () => {
     resetTable,
     traceViewFilters,
     updateTraceViewFilters,
+    externalLocateSpan,
+    setExternalLocateSpan,
+    clearExternalLocateSpan,
     setSpanKindFilters,
     listType,
     setListType,

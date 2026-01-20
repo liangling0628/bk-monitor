@@ -17,6 +17,7 @@ from bkm_space.define import SpaceTypeEnum
 from bkm_space.errors import NoRelatedResourceError
 from bkmonitor.models import MetricListCache, QueryConfigModel, StrategyModel
 from bkmonitor.utils.request import get_request_tenant_id, get_request_username
+from bkmonitor.utils.user import get_admin_username
 from constants.data_source import DataSourceLabel, DataTypeLabel
 from core.drf_resource import api, resource
 from core.drf_resource.base import Resource
@@ -50,6 +51,45 @@ def get_label_display_dict():
     except Exception:
         pass
     return label_display_dict
+
+
+def count_rt_bound_strategies(table_ids, data_source_label, data_type_label, bk_biz_id: int | None = None):
+    """
+    统计与结果表绑定的策略数量
+    """
+    if not table_ids:
+        return {}
+
+    # 先查询策略ID（当有业务过滤条件时）
+    strategy_ids = None
+    if bk_biz_id:
+        strategy_ids = set(StrategyModel.objects.filter(bk_biz_id=bk_biz_id).values_list("pk", flat=True))
+
+    # 查询自定义时间序列类型的查询配置
+    query_configs_queryset = (
+        QueryConfigModel.objects.annotate(result_table_id=models.F("config__result_table_id"))
+        .filter(
+            data_source_label=data_source_label,
+            data_type_label=data_type_label,
+        )
+        .values("result_table_id", "strategy_id")
+    )
+
+    # 如果有业务过滤条件，进一步筛选query_configs
+    if strategy_ids:
+        query_configs_queryset = query_configs_queryset.filter(strategy_id__in=strategy_ids)
+
+    query_configs = list(query_configs_queryset)
+
+    # 构建结果表ID到策略ID的映射关系
+    table_id_strategy_mapping = defaultdict(set)
+    table_ids = set(table_ids)
+    for query_config in query_configs:
+        result_table_id = query_config["result_table_id"]
+        if result_table_id in table_ids:
+            table_id_strategy_mapping[query_config["result_table_id"]].add(query_config["strategy_id"])
+
+    return {key: len(value) for key, value in table_id_strategy_mapping.items()}
 
 
 class ProxyHostInfo(Resource):
@@ -200,7 +240,7 @@ class CreateCustomTimeSeries(Resource):
         # 当前业务为关联的平台级业务id，内置到data_id的data_name里面
         # data_id有个业务归属，而对应的table可以在各业务下使用
         input_bk_biz_id = 0 if validated_request_data["is_platform"] else validated_request_data["bk_biz_id"]
-        operator = get_request_username() or settings.COMMON_USERNAME
+        operator = get_request_username() or get_admin_username(bk_tenant_id=get_request_tenant_id())
 
         # 当前业务
         data_name = self.data_name(validated_request_data["bk_biz_id"], validated_request_data["name"])
@@ -414,43 +454,6 @@ class CustomTimeSeriesList(Resource):
         # 新增参数用以判定是否需要查询平台级 dataid
         is_platform = serializers.BooleanField(required=False)
 
-    @staticmethod
-    def get_strategy_count(table_ids, request_bk_biz_id: int | None = None):
-        """
-        获取绑定的策略数
-        """
-        if not table_ids:
-            return {}
-
-        # 先查询策略ID（当有业务过滤条件时）
-        strategy_ids = None
-        if request_bk_biz_id:
-            strategy_ids = set(StrategyModel.objects.filter(bk_biz_id=request_bk_biz_id).values_list("pk", flat=True))
-
-        # 查询自定义时间序列类型的查询配置
-        query_configs_queryset = (
-            QueryConfigModel.objects.annotate(result_table_id=models.F("config__result_table_id"))
-            .filter(
-                reduce(lambda x, y: x | y, (Q(result_table_id=table_id) for table_id in table_ids)),
-                data_source_label=DataSourceLabel.CUSTOM,
-                data_type_label=DataTypeLabel.TIME_SERIES,
-            )
-            .values("result_table_id", "strategy_id")
-        )
-
-        # 如果有业务过滤条件，进一步筛选query_configs
-        if strategy_ids:
-            query_configs_queryset = query_configs_queryset.filter(strategy_id__in=strategy_ids)
-
-        query_configs = list(query_configs_queryset)
-
-        # 构建结果表ID到策略ID的映射关系
-        table_id_strategy_mapping = defaultdict(set)
-        for query_config in query_configs:
-            table_id_strategy_mapping[query_config["result_table_id"]].add(query_config["strategy_id"])
-
-        return {key: len(value) for key, value in table_id_strategy_mapping.items()}
-
     def perform_request(self, validated_request_data):
         queryset = CustomTSTable.objects.filter(bk_tenant_id=get_request_tenant_id()).order_by("-update_time")
         context = {"request_bk_biz_id": validated_request_data["bk_biz_id"]}
@@ -478,7 +481,12 @@ class CustomTimeSeriesList(Resource):
         tables = serializer.data
 
         table_ids = [table["table_id"] for table in tables]
-        strategy_count_mapping = self.get_strategy_count(table_ids, validated_request_data.get("bk_biz_id"))
+        strategy_count_mapping = count_rt_bound_strategies(
+            table_ids,
+            data_source_label=DataSourceLabel.CUSTOM,
+            data_type_label=DataTypeLabel.TIME_SERIES,
+            bk_biz_id=validated_request_data.get("bk_biz_id"),
+        )
 
         label_display_dict = get_label_display_dict()
         for table in tables:

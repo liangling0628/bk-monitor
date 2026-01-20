@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -48,10 +48,10 @@ export default class FTA extends tsc<object> {
   get ftaData() {
     return JSON.stringify({
       host: this.ftaHost,
-      baseroute: '/fta/',
+      parentRoute: '/fta/',
     });
   }
-  beforeRouteLeave(to, from, next) {
+  beforeRouteLeave(_to,_fromm, next) {
     next();
   }
   mounted() {

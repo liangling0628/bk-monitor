@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2022 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -21,10 +21,15 @@ from apm_web.service.resources import (
     UriregularVerifyResource,
     PipelineOverviewResource,
     ListPipelineResource,
+    ListCodeRedefinedRuleResource,
+    SetCodeRedefinedRuleResource,
+    DeleteCodeRedefinedRuleResource,
+    GetCodeRemarksResource,
+    SetCodeRemarkResource,
 )
 
 from bkmonitor.iam import ActionEnum, ResourceEnum
-from bkmonitor.iam.drf import InstanceActionForDataPermission, ViewBusinessPermission
+from bkmonitor.iam.drf import InstanceActionForDataPermission, ViewBusinessPermission, insert_permission_field
 from core.drf_resource.viewsets import ResourceRoute, ResourceViewSet
 
 
@@ -48,7 +53,26 @@ class ServiceViewSet(ResourceViewSet):
         # 修改服务配置
         ResourceRoute("POST", ServiceConfigResource, "service_config"),
         # 获取服务配置
-        ResourceRoute("POST", ServiceInfoResource, "service_info"),
+        ResourceRoute(
+            "POST",
+            ServiceInfoResource,
+            "service_info",
+            decorators=[
+                insert_permission_field(
+                    actions=[ActionEnum.MANAGE_APM_APPLICATION, ActionEnum.VIEW_APM_APPLICATION],
+                    resource_meta=ResourceEnum.APM_APPLICATION,
+                    id_field=lambda d: d["application_id"],
+                    many=False,
+                )
+            ],
+        ),
+        # 返回码重定义：查询/设置/删除
+        ResourceRoute("POST", ListCodeRedefinedRuleResource, "list_code_redefined_rule"),
+        ResourceRoute("POST", SetCodeRedefinedRuleResource, "set_code_redefined_rule"),
+        ResourceRoute("POST", DeleteCodeRedefinedRuleResource, "delete_code_redefined_rule"),
+        # 返回码备注：获取/设置
+        ResourceRoute("POST", GetCodeRemarksResource, "get_code_remarks"),
+        ResourceRoute("POST", SetCodeRemarkResource, "set_code_remark"),
         ResourceRoute("POST", CMDBServiceTemplateResource, "cmdb_service_template"),
         ResourceRoute("POST", LogServiceChoiceListResource, "log_service_relation_choices"),
         ResourceRoute("POST", AppQueryByIndexSetResource, "app_query_by_index_set"),

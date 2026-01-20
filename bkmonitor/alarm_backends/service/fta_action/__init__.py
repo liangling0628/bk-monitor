@@ -1,13 +1,13 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import copy
 import inspect
 import json
@@ -31,10 +31,12 @@ from api.itsm.default import (
     TicketApproveResultResource,
     TicketRevokeResource,
 )
+from bkmonitor.db_routers import backend_alert_router
 from bkmonitor.documents import AlertDocument, AlertLog, EventDocument
 from bkmonitor.models.fta import ActionInstance, ActionInstanceLog
 from bkmonitor.utils.send import ChannelBkchatSender, Sender
 from bkmonitor.utils.template import AlarmNoticeTemplate, Jinja2Renderer
+from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id
 from constants.action import (
     ACTION_DISPLAY_STATUS_DICT,
     ACTION_STATUS_DICT,
@@ -58,6 +60,8 @@ from .utils import (
     get_notice_display_mapping,
     need_poll,
 )
+from alarm_backends.core.circuit_breaking.manager import ActionCircuitBreakingManager
+from ...core.cache.circuit_breaking import NOTICE_PLUGIN_TYPES
 
 logger = logging.getLogger("fta_action.run")
 
@@ -71,7 +75,7 @@ class ActionAlreadyFinishedError(BaseException):
         pass
 
 
-class BaseActionProcessor(object):
+class BaseActionProcessor:
     """
     Action 处理器
     {
@@ -87,6 +91,7 @@ class BaseActionProcessor(object):
     def __init__(self, action_id, alerts=None):
         self.action = ActionInstance.objects.get(id=action_id)
         i18n.set_biz(self.action.bk_biz_id)
+        self.bk_tenant_id = bk_biz_id_to_bk_tenant_id(self.action.bk_biz_id)
         self.alerts = alerts
         self.retry_times = 0
         self.max_retry_times = 0
@@ -108,12 +113,14 @@ class BaseActionProcessor(object):
             # 当处理套餐被禁用或者删除之后，对于之前已经处理中的任务，用快照来替代
             self.action_config = self.action.action_config
 
-        self.notify_config = self.action.strategy.get("notice")
+        # todo 非策略产生的告警(告警来源非监控) 支持通过告警分派进行通知
+        if self.action.strategy:
+            self.notify_config = self.action.strategy.get("notice")
         self.execute_config = self.action_config.get("execute_config", {})
         self.timeout_setting = self.execute_config.get("timeout")
         self.failed_retry = self.execute_config.get("failed_retry", {})
-        self.max_retry_times = self.failed_retry.get("max_retry_times", -1)
-        self.retry_interval = self.failed_retry.get("retry_interval", 0)
+        self.max_retry_times = int(self.failed_retry.get("max_retry_times", -1))
+        self.retry_interval = int(self.failed_retry.get("retry_interval", 0))
 
         # 当前的重试次数
         self.retry_times = self.action.outputs.get("retry_times", 0)
@@ -169,6 +176,182 @@ class BaseActionProcessor(object):
         """
         raise NotImplementedError
 
+    @property
+    def plugin_key(self):
+        """
+        获取plugin_key(plugin_type)
+        """
+        plugin_key = self.action.action_plugin.get("plugin_key")
+        if not plugin_key:
+            plugin_key = self.action.action_plugin.get("plugin_type")
+        return plugin_key
+
+    def can_func_call(self):
+        """
+        检查是否可以调用
+        """
+        plugin_type = self.plugin_key
+        # 检查是否命中熔断规则
+        logger.debug(
+            f"[circuit breaking] [{plugin_type}] begin action({self.action.id}) strategy({self.action.strategy_id})"
+        )
+        can_continue = not self._check_circuit_breaking()
+        logger.debug(
+            f"[circuit breaking] [{plugin_type}] end action({self.action.id}) strategy({self.action.strategy_id})"
+        )
+
+        return can_continue
+
+    def _check_circuit_breaking(self, plugin_type=None, skip_notice_check=True):
+        """
+        检查是否命中熔断规则
+
+        :param plugin_type: 插件类型，默认使用 action 的插件类型
+        :param skip_notice_check: 是否跳过通知类型检查，默认 True（执行阶段），False（通知阶段）
+        :return: True 表示命中熔断规则，False 表示未命中
+        """
+        plugin_type = plugin_type or self.plugin_key
+
+        # message_queue 类型在创建阶段已经检查过熔断，这里跳过
+        if plugin_type == ActionPluginType.MESSAGE_QUEUE:
+            return False
+
+        # 通知在后续消息发送阶段进行熔断判断（仅在执行阶段跳过）
+        if skip_notice_check and plugin_type in NOTICE_PLUGIN_TYPES:
+            return False
+
+        # 执行熔断检查
+        try:
+            is_circuit_breaking = self._do_circuit_breaking_check(plugin_type)
+
+            if is_circuit_breaking:
+                # 执行阶段熔断处理
+                try:
+                    self._handle_execution_circuit_breaking(plugin_type)
+                    logger.info(
+                        f"[circuit breaking] [{plugin_type}] action({self.action.id}) strategy({self.action.strategy_id}) "
+                        f"execution circuit breaking"
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"[circuit breaking] [{plugin_type}] handle execution circuit breaking failed for "
+                        f"action({self.action.id}) strategy({self.action.strategy_id}): {e}"
+                    )
+                return True
+
+            return False
+        except Exception as e:
+            logger.exception(
+                f"[circuit breaking] [{plugin_type}] circuit breaking check failed for "
+                f"action({self.action.id}) strategy({self.action.strategy_id}): {e}"
+            )
+            return False
+
+    def _do_circuit_breaking_check(self, plugin_type=None):
+        """
+        执行纯粹的熔断检查逻辑（不包含执行阶段处理）
+
+        :param plugin_type: 插件类型，默认使用 action 的插件类型
+        :return: True 表示命中熔断规则，False 表示未命中
+        """
+        plugin_type = plugin_type or self.plugin_key
+
+        # 创建熔断管理器实例
+        circuit_breaking_manager = ActionCircuitBreakingManager()
+
+        if not circuit_breaking_manager:
+            return False
+
+        # 构建熔断检查的上下文信息
+        context = {
+            "strategy_id": self.action.strategy_id,
+            "bk_biz_id": self.action.bk_biz_id,
+            "plugin_type": plugin_type,
+        }
+
+        data_source_label = ""
+        data_type_label = ""
+        # 从策略配置中获取数据源信息
+        if self.action.strategy and self.action.strategy.get("items"):
+            query_config = self.action.strategy["items"][0]["query_configs"][0]
+            data_source_label = query_config.get("data_source_label", "")
+            data_type_label = query_config.get("data_type_label", "")
+        context["data_source_label"] = data_source_label
+        context["data_type_label"] = data_type_label
+
+        # 检查是否命中熔断规则
+        return circuit_breaking_manager.is_circuit_breaking(**context)
+
+    def check_circuit_breaking_for_notice(self):
+        """
+        检查是否命中熔断规则（通知阶段）
+
+        :return: True 表示命中熔断规则，False 表示未命中
+        """
+        plugin_type = self.plugin_key
+
+        # message_queue 类型在创建阶段已经检查过熔断，这里跳过
+        if plugin_type == ActionPluginType.MESSAGE_QUEUE:
+            return False
+
+        try:
+            is_circuit_breaking = self._do_circuit_breaking_check(plugin_type)
+
+            if is_circuit_breaking:
+                logger.info(
+                    f"[circuit breaking] [{plugin_type}] action({self.action.id}) strategy({self.action.strategy_id}) "
+                    f"notice circuit breaking"
+                )
+
+            return is_circuit_breaking
+        except Exception as e:
+            logger.exception(
+                f"[circuit breaking] [{plugin_type}] circuit breaking check failed for "
+                f"action({self.action.id}) strategy({self.action.strategy_id}): {e}"
+            )
+            return False
+
+    def _handle_execution_circuit_breaking(self, plugin_type: str):
+        """
+        处理执行阶段的熔断
+        除去 message_queue, notice, collect 外，其他插件熔断处理流程
+        :param plugin_type: 动作插件类型
+        """
+
+        # 更新动作状态为熔断
+        self.is_finished = True
+        self.update_action_status(
+            to_status=ActionStatus.BLOCKED,
+            end_time=datetime.now(tz=timezone.utc),
+            need_poll=False,
+            ex_data={
+                "message": "套餐执行被熔断",
+                "circuit_breaking": True,
+            },
+        )
+
+        # 记录 action 执行日志
+        self.insert_action_log(
+            step_name=_("套餐执行熔断"),
+            action_log=_("执行被熔断: 套餐执行被熔断"),
+            level=ActionLogLevel.INFO,
+        )
+
+        # 插入熔断告警流水记录
+        try:
+            action_name = self.action_config.get("name", "")
+            plugin_type = self.action.action_plugin.get("plugin_type", "")
+            self.action.insert_alert_log(description=f"处理套餐{action_name}执行被熔断")
+            logger.info(
+                f"[circuit breaking] [{plugin_type}] created alert log for circuit breaking: "
+                f"action({self.action.id}) strategy({self.action.strategy_id})"
+            )
+        except Exception as e:
+            logger.exception(
+                f"[circuit breaking] [{plugin_type}] create circuit breaking alert log failed: "
+                f"action({self.action.id}) strategy({self.action.strategy_id}): {e}"
+            )
+
     def wait_callback(self, callback_func, kwargs=None, delta_seconds=0):
         """
         等待回调或者轮询
@@ -209,7 +392,9 @@ class BaseActionProcessor(object):
         try:
             approve_info = CreateFastApprovalTicketResource().request(**ticket_data)
         except BaseException as error:
-            self.set_finished(ActionStatus.FAILURE, message=_("创建异常防御审批单据失败,错误信息：{}").format(str(error)))
+            self.set_finished(
+                ActionStatus.FAILURE, message=_("创建异常防御审批单据失败,错误信息：{}").format(str(error))
+            )
             return
         # 创建快速审批单据并且记录审批信息
         self.update_action_outputs({"approve_info": approve_info})
@@ -235,7 +420,9 @@ class BaseActionProcessor(object):
             approve_result = TicketApproveResultResource().request(**{"sn": [sn]})[0]
         except BaseException as error:
             logger.exception("get approve result error : %s, request sn: %s", error, sn)
-            self.set_finished(ActionStatus.FAILURE, message=_("获取异常防御审批结果出错，错误信息：{}").format(str(error)))
+            self.set_finished(
+                ActionStatus.FAILURE, message=_("获取异常防御审批结果出错，错误信息：{}").format(str(error))
+            )
         else:
             self.approve_callback(**approve_result)
 
@@ -261,7 +448,9 @@ class BaseActionProcessor(object):
                 level=ActionLogLevel.INFO,
             )
             return
-        self.set_finished(ActionStatus.SKIPPED, message=_("审批不通过，忽略执行，审批人{}").format(approve_result["updated_by"]))
+        self.set_finished(
+            ActionStatus.SKIPPED, message=_("审批不通过，忽略执行，审批人{}").format(approve_result["updated_by"])
+        )
 
     def get_action_info(self, callback_module, callback_func, kwargs):
         return {
@@ -305,7 +494,7 @@ class BaseActionProcessor(object):
             description=description,
             time=int(time.time()),
             create_time=int(time.time()),
-            event_id="{}{}".format(int(self.action.create_time.timestamp()), self.action.id),
+            event_id=f"{int(self.action.create_time.timestamp())}{self.action.id}",
         )
         AlertLog.bulk_create([AlertLog(**action_log)])
 
@@ -323,7 +512,7 @@ class BaseActionProcessor(object):
             # 开始执行任务的通知，仅在开始执行的时候发送
             try:
                 if (
-                    self.action.action_plugin.get("plugin_type")
+                    self.plugin_key
                     not in [
                         ActionPluginType.NOTICE,
                         ActionPluginType.WEBHOOK,
@@ -345,7 +534,7 @@ class BaseActionProcessor(object):
                     "execute_notify_result": execute_notify_result if execute_notify_result else {},
                     "target_info": self.get_target_info_from_ctx(),
                 },
-            }
+            },
         )
 
     def get_target_info_from_ctx(self):
@@ -409,13 +598,12 @@ class BaseActionProcessor(object):
 
         return self.business_rule_validate(outputs, success_rule)
 
-    @staticmethod
-    def business_rule_validate(params, rule):
-        """ "
+    def business_rule_validate(self, params, rule):
+        """
         条件判断
         """
 
-        logger.info("business rule validate params %s, rule %s", params, rule)
+        logger.info("[action(%s)] business rule validate params %s, rule %s", self.action.id, params, rule)
 
         if rule["method"] == "equal":
             return jmespath.search(rule["key"], params) == rule["value"]
@@ -482,14 +670,14 @@ class BaseActionProcessor(object):
         # 更新任务数据(插入日志)
         level = ActionLogLevel.ERROR if to_status == ActionStatus.FAILURE else ActionLogLevel.INFO
         self.insert_action_log(
-            step_name=_("第%s次任务执行结束" % self.retry_times),
+            step_name=_("第{}次任务执行结束".format(self.retry_times)),
             action_log=_("执行{}: {}").format(ACTION_STATUS_DICT.get(to_status), message),
             level=level,
         )
 
         self.action.insert_alert_log(notice_way_display=getattr(self, "notice_way_display", ""))
 
-        if self.action.action_plugin.get("plugin_type") != ActionPluginType.NOTICE:
+        if self.plugin_key != ActionPluginType.NOTICE:
             notify_result = self.notify(STATUS_NOTIFY_DICT.get(to_status), need_update_context=True)
             if notify_result:
                 execute_notify_result = self.action.outputs.get("execute_notify_result") or {}
@@ -504,7 +692,7 @@ class BaseActionProcessor(object):
         :param failure_type:失败类型
         :return:
         """
-        with transaction.atomic(using=settings.BACKEND_DATABASE_NAME):
+        with transaction.atomic(using=backend_alert_router):
             try:
                 locked_action = ActionInstance.objects.select_for_update().get(pk=self.action.id)
             except ActionInstance.DoesNotExist:
@@ -514,7 +702,7 @@ class BaseActionProcessor(object):
             for key, value in kwargs.items():
                 # 其他需要跟新的参数，直接刷新
                 setattr(locked_action, key, value)
-            locked_action.save(using=settings.BACKEND_DATABASE_NAME)
+            locked_action.save(using=backend_alert_router)
             # 刷新当前的事件记录
             self.action = locked_action
 
@@ -528,7 +716,7 @@ class BaseActionProcessor(object):
             # 没有输出参数列表，直接返回
             return
 
-        with transaction.atomic(using=settings.BACKEND_DATABASE_NAME):
+        with transaction.atomic(using=backend_alert_router):
             try:
                 locked_action = ActionInstance.objects.select_for_update().get(pk=self.action.id)
             except ActionInstance.DoesNotExist:
@@ -538,7 +726,7 @@ class BaseActionProcessor(object):
             else:
                 locked_action.outputs = outputs
             outputs.update(locked_action.outputs)
-            locked_action.save(using=settings.BACKEND_DATABASE_NAME)
+            locked_action.save(using=backend_alert_router)
             self.action = locked_action
 
     def notify(self, notify_step, need_update_context=False):
@@ -567,7 +755,7 @@ class BaseActionProcessor(object):
                 # 如果解析不出来的，表示是以前的通知方式，可以直接忽略
                 channel = ""
                 notice_way = notice_way
-            title_template_path = "notice/fta_action/{notice_way}_title.jinja".format(notice_way=notice_way)
+            title_template_path = f"notice/fta_action/{notice_way}_title.jinja"
             content_template_path = "notice/fta_action/{notice_way}_content.jinja".format(
                 notice_way="markdown" if notice_way in settings.MD_SUPPORTED_NOTICE_WAYS else notice_way
             )
@@ -577,6 +765,7 @@ class BaseActionProcessor(object):
                 title_template_path=title_template_path,
                 content_template_path=content_template_path,
                 notice_type=NoticeType.ACTION_NOTICE,
+                bk_tenant_id=self.bk_tenant_id,
             )
             # 将通知提醒人员更新为当前获取的账户信息
             notify_sender.mentioned_users = wxbot_mention_users
@@ -644,8 +833,15 @@ class BaseActionProcessor(object):
         sn = kwargs.get("sn") or self.action.outputs.get("approve_info", {}).get("sn")
         try:
             TicketRevokeResource().request(
-                {"sn": sn, "operator": "fta-system", "action_message": _("异常防御审批执行时间套餐配置30分钟, 按忽略处理")}
+                {
+                    "sn": sn,
+                    "operator": "fta-system",
+                    "action_message": _("异常防御审批执行时间套餐配置30分钟, 按忽略处理"),
+                }
             )
             self.set_finished(ActionStatus.SKIPPED, message=_("异常防御审批执行时间套餐配置30分钟, 按忽略处理"))
         except BaseException as error:
-            self.set_finished(ActionStatus.FAILURE, message=_("异常防御审批执行时间套餐配置30分钟, 撤回单据失败，错误信息：{}").format(str(error)))
+            self.set_finished(
+                ActionStatus.FAILURE,
+                message=_("异常防御审批执行时间套餐配置30分钟, 撤回单据失败，错误信息：{}").format(str(error)),
+            )

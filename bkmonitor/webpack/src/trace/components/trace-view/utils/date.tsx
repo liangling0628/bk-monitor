@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -199,7 +199,7 @@ export function formatTime(duration: number, isMs = false) {
 export function formatTraceTableDate(duration: number | string) {
   return dayjs
     .tz(+duration.toString().slice(0, 13).padEnd(13, '0'))
-    .format(duration.toString().length > 13 ? 'YYYY-MM-DD HH:mm:ss.SSS' : 'YYYY-MM-DD HH:mm:ss');
+    .format(duration.toString().length > 13 ? 'YYYY-MM-DD HH:mm:ss.SSSZZ' : 'YYYY-MM-DD HH:mm:ssZZ');
 }
 
 export const getSuitableTimeUnit = (microseconds: number): string => {

@@ -3,7 +3,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -62,17 +62,16 @@ interface INavToolsProps {
   mixins: [LogVersionMixin],
   // #if APP !== 'external'
   components: {
-    GlobalConfig: () => import(/* webpackChunkName: "global-config" */ '../pages/global-config') as any,
-    HealthZ: () => import(/* webpackChunkName: "healthz" */ '../pages/healthz-new/healthz-alarm') as any,
+    GlobalConfig: () => import(/* webpackChunkName: "global-config" */ '../pages/global-config'),
+    HealthZ: () => import(/* webpackChunkName: "healthz" */ '../pages/healthz-new/healthz-alarm'),
     MigrateDashboard: () =>
-      import(/* webpackChunkName: 'MigrateDashboard' */ '../pages/migrate-dashboard/migrate-dashboard.vue') as any,
+      import(/* webpackChunkName: 'MigrateDashboard' */ '../pages/migrate-dashboard/migrate-dashboard.vue'),
     ResourceRegister: () =>
-      import(/* webpackChunkName: 'ResourceRegister' */ '../pages/resource-register/resource-register') as any,
-    DataPipeline: () => import(/* webpackChunkName: 'DataPipeline' */ '../pages/data-pipeline/data-pipeline') as any,
-    SpaceManage: () => import(/* webpackChunkName: 'SpaceManage' */ './space-manage/space-manage') as any,
-    GlobalCalendar: () => import(/* webpackChunkName: 'calendar' */ './calendar/calendar') as any,
-    MyApply: () => import(/* webpackChunkName: 'MyApply' */ './my-apply/my-apply') as any,
-    MySubscription: () => import(/* webpackChunkName: 'MySubscription' */ './my-subscription/my-subscription') as any,
+      import(/* webpackChunkName: 'ResourceRegister' */ '../pages/resource-register/resource-register'),
+    SpaceManage: () => import(/* webpackChunkName: 'SpaceManage' */ './space-manage/space-manage'),
+    GlobalCalendar: () => import(/* webpackChunkName: 'calendar' */ './calendar/calendar'),
+    MyApply: () => import(/* webpackChunkName: 'MyApply' */ './my-apply/my-apply'),
+    MySubscription: () => import(/* webpackChunkName: 'MySubscription' */ './my-subscription/my-subscription'),
   },
   // #endif
 } as any)
@@ -131,7 +130,9 @@ class NavTools extends DocumentLinkMixin {
         href: window.ce_url,
       },
     ];
-    this.setList = GLOBAL_FEATURE_LIST.map(({ name, ...args }) => ({
+    this.setList = GLOBAL_FEATURE_LIST.filter(item =>
+      window.bk_tenant_id === 'system' ? true : !['healthz', 'global-config'].includes(item.id)
+    ).map(({ name, ...args }) => ({
       name: `route-${name}`,
       ...args,
     }));
@@ -256,11 +257,22 @@ class NavTools extends DocumentLinkMixin {
       useJSONP(
         `${window.bk_component_api_url
           .replace(/\/$/, '')
-          .replace(/^http:/, location.protocol)}/api/c/compapi/v2/usermanage/fe_update_user_language`,
+          .replace(
+            /^http:/,
+            location.protocol
+          )}${window.enable_multi_tenant_mode ? '/docs/api-docs/gateway/bk-user-web' : '/api/c/compapi/v2/usermanage/update_user_language'}`,
         {
-          data: {
-            language: item.id,
-          },
+          data: Object.assign(
+            {},
+            {
+              language: item.id,
+            },
+            window.enable_multi_tenant_mode
+              ? {
+                  apiName: 'update_current_user_language',
+                }
+              : {}
+          ),
         }
       ).finally(() => {
         location.reload();
@@ -289,9 +301,6 @@ class NavTools extends DocumentLinkMixin {
     if (this.activeSetting === 'resource-register') {
       return <resource-register />;
     }
-    if (this.activeSetting === 'data-pipeline') {
-      return <data-pipeline />;
-    }
     return <health-z />;
   }
   /**
@@ -312,8 +321,14 @@ class NavTools extends DocumentLinkMixin {
    * 退出登录
    * 跳转到paas-host登录页面会自动清除登录cookie
    */
+  handleGoToPersonalCenter() {
+    const base = (window.bk_user_site_url || '').replace(/\/$/, '');
+    if (!base) return;
+    this.hidePopoverSetOrHelp();
+    window.open(`${base}/personal-center`, '_blank');
+  }
   handleQuit() {
-    location.href = `${location.origin}/logout`;
+    location.href = `${site_url}logout`;
   }
   render() {
     return (
@@ -471,6 +486,14 @@ class NavTools extends DocumentLinkMixin {
             <div slot='content'>
               {process.env.APP !== 'external' && (
                 <ul class='monitor-navigation-help'>
+                  {!!window.bk_user_site_url && (
+                    <li
+                      class='nav-item'
+                      onClick={this.handleGoToPersonalCenter}
+                    >
+                      {this.$t('个人中心')}
+                    </li>
+                  )}
                   {/* <li
                     class='nav-item'
                     onClick={() => {
@@ -507,8 +530,12 @@ class NavTools extends DocumentLinkMixin {
           </bk-popover>
         </div>
         <LogVersion
+          on={{
+            'update:dialogShow': v => {
+              this.logShow = v;
+            },
+          }}
           dialogShow={this.logShow}
-          on={{ 'update:dialogShow': v => (this.logShow = v) }}
         />
         {
           // #if APP !== 'external'

@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -92,6 +92,11 @@ export default class ApmServiceCallerCallee extends tsc<IApmServiceCallerCalleeP
     return this.panel?.options?.common || {};
   }
 
+  @ProvideReactive('variablesData')
+  get variablesData() {
+    return this.commonOptions?.variables?.data || {};
+  }
+
   get supportedCalculationTypes() {
     return this.commonOptions?.group_by?.supported_calculation_types || [];
   }
@@ -141,7 +146,6 @@ export default class ApmServiceCallerCallee extends tsc<IApmServiceCallerCalleeP
         routeCallOptions = {};
       }
     }
-    console.info('routeCallOptions', routeCallOptions);
     this.callType = routeCallOptions.kind || getRecordCallOptionKind(this.viewOptions.filters) || EKind.callee;
     const groupBy = this.groupByKindReset(this.callType, routeCallOptions.group_by || []);
     this.callOptions = {
@@ -217,7 +221,7 @@ export default class ApmServiceCallerCallee extends tsc<IApmServiceCallerCalleeP
     for (const item of data) {
       if (item.key === 'time') {
         this.chartPointOption = {
-          time: item.value[0] ? dayjs(+item.value[0] * 1000).format('YYYY-MM-DD HH:mm:ss') : '',
+          time: item.value[0] ? dayjs(+item.value[0] * 1000).format('YYYY-MM-DD HH:mm:ssZZ') : '',
           interval: 0,
           dimensions: {},
         };
@@ -305,7 +309,7 @@ export default class ApmServiceCallerCallee extends tsc<IApmServiceCallerCalleeP
   /** 点击选中图表里的某个点 */
   handleZrClick(event: ZrClickEvent) {
     if (!event.xAxis) return;
-    const date = dayjs.tz(event.xAxis).format('YYYY-MM-DD HH:mm:ss');
+    const date = dayjs.tz(event.xAxis).format('YYYY-MM-DD HH:mm:ssZZ');
     this.chartPointOption = {
       dimensions: event?.dimensions || {},
       time: date,

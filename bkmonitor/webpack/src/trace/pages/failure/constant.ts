@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -23,6 +23,7 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
+const { i18n } = window;
 // 是否中文
 export const isZh = () => ['zh', 'zhCN', 'zh-cn'].includes(window.i18n.locale);
 /** 节点icon映射 */
@@ -59,8 +60,9 @@ export const dialogConfig = {
     details: [
       {
         severity: 1,
-        dimension: '',
+        dimension: [],
         trigger: '',
+        alertId: '',
         strategy: {
           id: '',
           name: '',
@@ -149,6 +151,12 @@ export const STATUS_LIST = {
     label: '已解决',
     icon: 'mc-solved',
   },
+  merged: {
+    color: '#979ba5',
+    bgColor: '#f0f1f5',
+    label: '已合并',
+    icon: 'yihebing',
+  },
   RECOVERED: {
     color: '#14A568',
     bgColor: '#E4FAF0',
@@ -174,7 +182,7 @@ export const STATUS_LIST = {
     label: '观察中',
     key: 'recovering',
     icon: 'mc-visual',
-  },
+  }, 
   已恢复: {
     color: '#1CAB88',
     bgColor: '#E8FFF5',
@@ -187,5 +195,43 @@ export const STATUS_LIST = {
     bgColor: '#F5F7FA',
     label: '已解决',
     icon: 'mc-solved',
+  },
+};
+
+export const EVENTS_TYPE_MAP = {
+  k8s_warning_events: {
+    iconType: 'bcs',
+    keypath: '（共 {0} 个{1}，展示 {2} 如下）',
+    keypath2: '（共 {0} 个{1}）',
+  },
+  deployment_events: {
+    iconType: 'bkci',
+    keypath: '（共 {0} 个{1}，展示 {2} 如下）',
+    keypath2: '（共 {0} 个{1}）',
+  },
+  alert_system_events: {
+    iconType: 'host',
+    keypath: '（共 {0} 个{1}，展示 {2} 如下）',
+    keypath2: '（共 {0} 个{1}）',
+  },
+  tmp_events: {
+    iconType: 'tmp',
+    keypath: '（共 {0} 个{1}，展示 {2} 如下）',
+    keypath2: '（共 {0} 个{1}）',
+  },
+  incident_manage_events: {
+    iconType: 'manage',
+    keypath: '（共 {0} 个{1}）',
+    keypath2: '（共 {0} 个{1}）',
+  },
+  incident_ticket_events: {
+    iconType: 'ticket',
+    keypath: '（共 {0} 个{1}）',
+    keypath2: '（共 {0} 个{1}）',
+  },
+  tencent_cloud_notice_events: {
+    iconType: 'tencent_cloud',
+    keypath: '（共 {0} 个{1}）',
+    keypath2: '（共 {0} 个{1}）',
   },
 };

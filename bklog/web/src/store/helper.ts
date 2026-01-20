@@ -23,6 +23,8 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
+import { BK_LOG_STORAGE } from "./store.type";
+
 export const isFeatureToggleOn = (key: string, value: string | string[]) => {
   const featureToggle = window.FEATURE_TOGGLE?.[key];
   if (featureToggle === 'debug') {
@@ -62,7 +64,7 @@ export const getStorageCommonFilterAddition = () => {
     jsonValue = JSON.parse(value || '[]');
 
     if (!Array.isArray(jsonValue) && 'indexId' in jsonValue && 'value' in jsonValue) {
-      jsonValue = [{ indexSetIdList: [jsonValue.indexId], filterAddition: [jsonValue.value], t: new Date().getTime() }];
+      jsonValue = [{ indexSetIdList: [jsonValue.indexId], filterAddition: [jsonValue.value], t: Date.now() }];
     }
   } catch (e) {
     console.error('Failed to parse common filter addition:', e);
@@ -72,7 +74,7 @@ export const getStorageCommonFilterAddition = () => {
 };
 
 export const filterCommontAdditionByIndexSetId = (indexSetIdList: string[], list?: FilterAdditionStorageItem[]) => {
-  let jsonValue: FilterAdditionStorageItem[] = list ?? getStorageCommonFilterAddition();
+  const jsonValue: FilterAdditionStorageItem[] = list ?? getStorageCommonFilterAddition();
   const formatList = indexSetIdList.map(id => `${id}`);
   return jsonValue?.find(
     item =>
@@ -133,9 +135,9 @@ export const setStorageCommonFilterAddition = (state, filterAddition: Record<str
   const allStorage = getStorageCommonFilterAddition();
   const currentItem: FilterAdditionStorageItem = filterCommontAdditionByIndexSetId(state.indexItem.ids, allStorage);
 
-  if (currentItem) {
+  if (currentItem !== undefined) {
     currentItem.filterAddition = filterAddition;
-    currentItem.t = new Date().getTime();
+    currentItem.t = Date.now();
     sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(allStorage));
     return;
   }
@@ -143,7 +145,7 @@ export const setStorageCommonFilterAddition = (state, filterAddition: Record<str
   allStorage.push({
     indexSetIdList: state.indexItem.ids.map(id => `${id}`),
     filterAddition,
-    t: new Date().getTime(),
+    t: Date.now(),
   });
 
   /**
@@ -160,11 +162,31 @@ export const setStorageCommonFilterAddition = (state, filterAddition: Record<str
 export const clearStorageCommonFilterAddition = state => {
   const allStorage = getStorageCommonFilterAddition();
   const currentItem: FilterAdditionStorageItem = filterCommontAdditionByIndexSetId(state.indexItem.ids, allStorage);
-  if (currentItem) {
+  if (currentItem !== undefined) {
     const index = allStorage.indexOf(currentItem);
     if (index > -1) {
       allStorage.splice(index, 1);
       sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(allStorage));
     }
   }
+};
+
+/**
+ * 格式化 addition 字段
+ * 如果 showFieldAlias 为 true，则将 addition 字段替换为 query_alias
+ * @param state
+ * @returns addition
+ */
+export const formatAdditionalFields = (state: any, addition: Record<string, any>[]) => {
+  const copyAddition = structuredClone(addition);
+  if (state.storage[BK_LOG_STORAGE.SHOW_FIELD_ALIAS]) {
+    copyAddition.forEach((item) => {
+      const result = (state.indexFieldInfo?.fields ?? []).find(f => f.field_name === item.field);
+      if (result?.query_alias) {
+        item.field = result.query_alias;
+      }
+    });
+  }
+
+  return copyAddition;
 };

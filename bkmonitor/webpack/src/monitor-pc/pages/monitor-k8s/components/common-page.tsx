@@ -3,7 +3,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -1363,7 +1363,7 @@ export default class CommonPage extends tsc<ICommonPageProps, ICommonPageEvent> 
   /** 处理跳转视图详情 */
   handleLinkToDetail(data: ITableItem<'link'>) {
     this.$router.replace({
-      path: `${window.__BK_WEWEB_DATA__?.baseroute || ''}${data.url}`.replace(/\/\//g, '/'),
+      path: `${window.__BK_WEWEB_DATA__?.parentRoute || ''}${data.url}`.replace(/\/\//g, '/'),
     });
     this.handleSetDefaultParams();
     this.handleTabChange(this.dashboardId);

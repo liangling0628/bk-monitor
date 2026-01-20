@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -120,7 +120,7 @@ export default class TimeRange extends tsc<IProps, IEvents> {
   formatTime(value: TimeRangeType) {
     return value.map(item => {
       const m = dayjs(intTimestampStr(item));
-      return m.isValid() ? m.format('YYYY-MM-DD HH:mm:ss') : item;
+      return m.isValid() ? m.format('YYYY-MM-DD HH:mm:ssZZ') : item;
     });
   }
 
@@ -180,7 +180,7 @@ export default class TimeRange extends tsc<IProps, IEvents> {
   handleCustomInput(index: number) {
     this.isPanelTimeRange = false;
     if (!this.localValue[index]) {
-      this.$set(this.localValue, index, dayjs().format('YYYY-MM-DD HH:mm:ss'));
+      this.$set(this.localValue, index, dayjs().format('YYYY-MM-DD HH:mm:ssZZ'));
     }
   }
 
@@ -192,7 +192,7 @@ export default class TimeRange extends tsc<IProps, IEvents> {
           id={id}
           class='time-range-desc-wrap'
         >
-          <div class='desc-row'>{`${this.$t('完整格式')}: ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`}</div>
+          <div class='desc-row'>{`${this.$t('完整格式')}: ${dayjs().format('YYYY-MM-DD HH:mm:ssZZ')}`}</div>
           <div class='desc-row'>
             {`${this.$t('快捷格式')}: m ${this.$t('分钟')}, h ${this.$t('小时')}, d ${this.$t('天')}, w ${this.$t(
               '周'

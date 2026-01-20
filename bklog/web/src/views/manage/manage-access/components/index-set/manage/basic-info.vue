@@ -59,7 +59,9 @@
             {{ categoryMap[indexSetData.category_id] || '--' }}
           </dd>
           <dt class="description-term">{{ $t('创建人') }}</dt>
-          <dd class="description-definition">{{ indexSetData.created_by || '--' }}</dd>
+          <dd class="description-definition">
+            <bk-user-display-name :user-id="indexSetData.created_by"></bk-user-display-name>
+          </dd>
         </div>
         <div class="description-row">
           <dt class="description-term">{{ $t('数据源') }}</dt>
@@ -70,7 +72,7 @@
             {{ scenarioMap[indexSetData.scenario_id] || '--' }}
           </dd>
           <dt class="description-term">{{ $t('创建时间') }}</dt>
-          <dd class="description-definition">{{ indexSetData.created_at.slice(0, 19) || '--' }}</dd>
+          <dd class="description-definition">{{ indexSetData.created_at || '--' }}</dd>
         </div>
       </dl>
     </section>
@@ -157,7 +159,7 @@
           :label="$t('操作日期')"
         >
           <template #default="{ row }">
-            {{ row.created_at.slice(0, 19) }}
+            {{ row.created_at }}
           </template>
         </bk-table-column>
         <bk-table-column
@@ -168,7 +170,11 @@
           width="160"
           :label="$t('操作人')"
           prop="created_by"
-        ></bk-table-column>
+        >
+        <template #default="{ row }">
+          <bk-user-display-name :user-id="row.created_by"></bk-user-display-name>
+        </template>
+        </bk-table-column>
         <bk-table-column
           width="140"
           :label="$t('操作结果')"
@@ -187,6 +193,7 @@
 <script>
   import { formatFileSize } from '@/common/util';
   import { mapState } from 'vuex';
+  import useUtils from '@/hooks/use-utils';
 
   export default {
     props: {
@@ -327,7 +334,8 @@
               pagesize: this.recordsPagination.limit,
             },
           });
-          this.recordsData = res.data.list;
+          const { formatResponseListTimeZoneString } = useUtils();
+          this.recordsData = formatResponseListTimeZoneString(res.data.list || [], {}, ['created_at', 'updated_at']);
           this.recordsPagination.count = res.data.total;
         } catch (e) {
           console.warn(e);

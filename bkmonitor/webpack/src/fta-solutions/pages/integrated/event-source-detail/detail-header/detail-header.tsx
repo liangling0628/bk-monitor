@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -23,6 +23,8 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
+
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 
 import type { IBaseInfo, TPluginTypeObj, TScenaris } from '../types';
 
@@ -136,7 +138,7 @@ const HeaderFunctional = ctx => {
                 <bk-user-display-name user-id={updateUser} />
               </td>
               <td class='label right'>{i18n.t('最近更新时间')}</td>
-              <td class='value'>{updateTime}</td>
+              <td class='value'>{formatWithTimezone(updateTime)}</td>
             </tr>
             <tr>
               <td

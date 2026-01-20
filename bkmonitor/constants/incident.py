@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -25,6 +25,7 @@ class IncidentStatus(CustomEnum):
     RECOVERING = "recovering"
     RECOVERED = "recovered"
     CLOSED = "closed"
+    MERGED = "merged"
 
     @property
     def alias(self) -> str:
@@ -33,6 +34,7 @@ class IncidentStatus(CustomEnum):
             "recovered": _lazy("已恢复"),
             "recovering": _lazy("观察中"),
             "closed": _lazy("已解决"),
+            "merged": _lazy("已合并"),
         }
         return incident_status_map[self.value]
 
@@ -43,6 +45,7 @@ class IncidentStatus(CustomEnum):
             "recovered": 2,
             "recovering": 1,
             "closed": 3,
+            "merged": 4,
         }
         return incident_status_order_map[self.value]
 

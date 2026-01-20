@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -28,7 +28,7 @@ import { Component, Emit, InjectReactive, Prop, Ref, Watch } from 'vue-property-
 import { Component as tsc } from 'vue-tsx-support';
 
 import { addListener, removeListener } from '@blueking/fork-resize-detector';
-import { getTopoList } from 'monitor-api/modules/alert';
+import { getTopoList } from 'monitor-api/modules/commons';
 import { docCookies, LANGUAGE_COOKIE_KEY } from 'monitor-common/utils';
 import { Debounce } from 'monitor-common/utils/utils';
 import { getEventPaths } from 'monitor-pc/utils';
@@ -190,23 +190,59 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
     set_id: [],
     module_id: [],
   };
+  searchText = ''; //  菜单搜索框绑定值
+  needSearch = false; // 是否需要搜索框
+
+  get searchPlaceholder() {
+    if (this.searchType === 'alert') {
+      return this.$t('搜索 告警ID、告警名称、状态、告警内容、级别') as string;
+    }
+    if (this.searchType === 'incident') {
+      return this.$t('搜索 故障ID、故障名称、故障原因、业务ID、故障状态') as string;
+    }
+    if (this.searchType === 'action') {
+      return this.$t('搜索 处理记录ID、套餐名称、套餐ID、策略名称、关联告警') as string;
+    }
+    return '搜索';
+  }
 
   get isTopoList() {
     return ['set_id', 'module_id'].includes(this.focusData?.filedId);
   }
 
   get menuList() {
+    this.needSearch = false;
     if (this.focusData.show === 'condition') return this.conditionList;
     if (this.focusData.show === 'method') return this.methodList;
     // if (this.focusData.show === 'value') return this.valueMap?.[this.focusData.filedId] || [];
     if (this.focusData.show === 'value') {
       // 搜索过滤的集群和模块value从另外接口获取的
+      if (this.isTopoList) {
+        this.needSearch =
+          this.searchTopoList?.[this.focusData.filedId]?.length &&
+          this.searchTopoList[this.focusData.filedId][0].needSearch;
+      } else {
+        this.needSearch =
+          this.valueMap?.[this.focusData.filedId]?.length && this.valueMap[this.focusData.filedId][0].needSearch;
+      }
       return this.isTopoList
         ? this.searchTopoList?.[this.focusData.filedId]
         : this.valueMap?.[this.focusData.filedId] || [];
     }
     return [];
   }
+
+  // 计算过滤后的菜单列表
+  get filteredMenuList() {
+    if (!this.searchText) return this.menuList;
+
+    const searchLower = this.searchText.toLowerCase();
+    return this.menuList.filter(
+      item =>
+        String(item.name).toLowerCase().includes(searchLower) || String(item.id).toLowerCase().includes(searchLower)
+    );
+  }
+
   get fieldList() {
     let list = [];
     switch (this.searchType) {
@@ -545,12 +581,23 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
   }
   mounted() {
     addListener(this.filterSearchRef, this.handleUpdateResizePanel);
+    document.body.addEventListener('click', this.handleBodyClick);
   }
   beforeDestroy() {
     this.destroyPopoverInstance();
     removeListener(this.filterSearchRef, this.handleUpdateResizePanel);
     this.mouseDowncontroller?.abort?.();
+    document.body.removeEventListener('click', this.handleBodyClick);
   }
+
+  handleBodyClick(event: MouseEvent) {
+    const menuEle = document.querySelector('.menu-wrapper');
+    // 当菜单弹窗打开时，点击除菜单弹窗中的搜索框区域，关闭菜单弹窗
+    if (menuEle && !menuEle.contains(event.target as Node) && this.popoverMenuInstance?.state?.isShown) {
+      this.popoverMenuInstance?.hide?.(0);
+    }
+  }
+
   /**
    * @description  只适用于收藏部分的交互
    * @param event
@@ -671,7 +718,7 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
         if (!filterItem) {
           if (textList.length) {
             const item = textList[textList.length - 1];
-            const index = textTypeList.findIndex(t => t === item.dataType) + 1;
+            const index = textTypeList.indexOf(item.dataType) + 1;
             const dataType = textTypeList[index % 4];
             if (dataType === 'value') {
               for (let i = textList.length - 1; i >= 0; i--) {
@@ -878,6 +925,7 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
       this.searchTopoList[key] = list.map(item => ({
         id: item[`${keyType}_id`],
         name: `${item[`${keyType}_name`]}(${item[`${keyType}_id`]})`,
+        needSearch: true,
       }));
     }
   }
@@ -1027,7 +1075,7 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
   handleChange() {
     if (!this.blurInPanel) {
       this.popoverInstance?.hide?.(0);
-      this.popoverMenuInstance?.hide?.(0);
+      this.searchType !== 'incident' && this.popoverMenuInstance?.hide?.(0);
       this.handleGetSearchHistory();
       this.$emit('change', this.inputValue);
     }
@@ -1072,6 +1120,13 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
     e.stopPropagation();
     this.isOnlyInput = false;
     this.handleReplaceInputValue(this.isFillId ? item.id.toString() : item.name.toString());
+
+    this.popoverMenuInstance?.hide?.(0);
+    this.inputRef.focus();
+    if (this.searchText) {
+      // 重置菜单搜索关键字
+      this.searchText = '';
+    }
   }
   /**
    * @description: 点击收藏触发
@@ -1228,7 +1283,7 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
     this.inputRef.focus();
     this.blurInPanel = false;
   }
-  handleFavoriteInputBlur(e: MouseEvent, item: IListItem) {
+  handleFavoriteInputBlur(_e: MouseEvent, item: IListItem) {
     if (item.id === 'favorite') {
       this.blurInPanel = false;
       // this.inputRef.focus();
@@ -1340,7 +1395,7 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
             ref='input'
             class='search-input'
             v-model={this.inputValue}
-            placeholder={String(this.$t('输入搜索条件'))}
+            placeholder={this.searchPlaceholder}
             spellcheck={false}
             onBlur={this.handleBlur}
             onInput={this.handleInput}
@@ -1428,12 +1483,32 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
           </div>
         </div>
         <div style='display: none;'>
-          <ul
+          <div
             ref='menuPanel'
-            class='condition-list'
+            class='menu-wrapper'
           >
-            {this.menuList.length
-              ? this.menuList.map(item => (
+            {/* 菜单搜索框 */}
+            {Boolean(this.needSearch) && (
+              <div class='menu-search-wrapper'>
+                <i class='icon-monitor icon-mc-search menu-search-icon' />
+                <input
+                  class='menu-search-input'
+                  placeholder={String(this.$t('请输入 关键字'))}
+                  type='text'
+                  value={this.searchText}
+                  onInput={e => {
+                    this.searchText = (e.target as HTMLInputElement).value.toLowerCase();
+                  }}
+                  onMousedown={e => {
+                    e.stopPropagation();
+                    this.blurInPanel = true;
+                  }}
+                />
+              </div>
+            )}
+            <ul class='condition-list'>
+              {this.filteredMenuList.length ? (
+                this.filteredMenuList.map(item => (
                   <li
                     key={item.id}
                     class={[
@@ -1447,8 +1522,11 @@ export default class FilerInput extends tsc<IFilterInputProps, IFilterInputEvent
                     {item.name.toString().replace(/"/gm, '')}
                   </li>
                 ))
-              : undefined}
-          </ul>
+              ) : (
+                <div class='condition-list_empty'>{this.$t('无匹配数据')}</div>
+              )}
+            </ul>
+          </div>
         </div>
       </div>
     );

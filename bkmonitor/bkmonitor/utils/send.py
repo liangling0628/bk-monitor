@@ -1,20 +1,20 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import base64
-import copy
 import hashlib
 import json
 import logging
 from os import path
-from typing import Dict
+from typing import Any
+from collections.abc import Callable
 
 import requests
 from django.conf import settings
@@ -42,14 +42,47 @@ except Exception:
 logger = logging.getLogger("fta_action.run")
 
 
-class BaseSender(object):
+class BlockedError(Exception):
+    def __init__(self, message, retry_params):
+        self.message = message
+        if not isinstance(retry_params, list):
+            self.retry_params = [retry_params]
+        else:
+            self.retry_params = retry_params
+
+
+class BaseSender:
     """
     通知发送器
     """
 
+    blocked = False
+
     LengthLimit = {
         "sms": 140,
     }
+
+    def _check_blocked_and_raise(self, notice_type: str, retry_params: dict):
+        """
+        检查是否被熔断，如果是则抛出 BlockedError
+
+        :param notice_type: 通知类型（用于错误消息）
+        :param retry_params: 重试参数，包含 api_module、resource、args、kwargs
+        :raises BlockedError: 如果被熔断则抛出异常
+        """
+        if self.blocked:
+            raise BlockedError(f"{notice_type} 通知被熔断", retry_params)
+
+    @property
+    def _blocked_notice_log_prefix(self) -> str:
+        """
+        获取通知被熔断时的日志前缀
+
+        当通知发送被熔断时，返回 "[blocked]" 前缀用于日志标记；否则返回空字符串。
+
+        :return: 日志前缀字符串，被熔断时返回 "[blocked]"，否则返回 ""
+        """
+        return "[blocked]" if self.blocked else ""
 
     NoticeTemplate = {
         NoticeType.ALERT_NOTICE: AlarmNoticeTemplate,
@@ -60,7 +93,12 @@ class BaseSender(object):
     Utf8Encoding = "utf-8"
 
     def __init__(
-        self, context=None, title_template_path="", content_template_path="", notice_type=NoticeType.ALERT_NOTICE
+        self,
+        context=None,
+        title_template_path="",
+        content_template_path="",
+        notice_type=NoticeType.ALERT_NOTICE,
+        bk_tenant_id=None,
     ):
         """
         :param context: EventContext or dict
@@ -68,6 +106,7 @@ class BaseSender(object):
         :param content_template_path: 通知content的模板路径
         """
         self.context = context
+        self.bk_tenant_id = bk_tenant_id
         try:
             self.bk_biz_id = int(self.context.get("target").business.bk_biz_id)
         except Exception as error:
@@ -82,13 +121,21 @@ class BaseSender(object):
                 title_template_path = self.get_language_template_path(title_template_path, language)
                 content_template_path = self.get_language_template_path(content_template_path, language)
 
+        context_dict = self.get_context_dict()
+        self.notice_way: str | None = context_dict.get("notice_way", None)
+        self.mentioned_users = context_dict.get("mentioned_users", None)
+
+        self._is_wxwork_layouts_enabled: bool = False
+        if self.is_wxwork_layouts_enabled(self.bk_biz_id, self.notice_way, self.context, content_template_path):
+            # 模块化消息通知渲染后是一个 JSON 串。
+            context_dict["is_json"] = True
+            self._is_wxwork_layouts_enabled = True
+            content_template_path = content_template_path.replace("markdown", "layouts")
+
         notice_template_class = self.NoticeTemplate.get(notice_type, AlarmNoticeTemplate)
         # 此处的模板已经在没有的情况下获取到了默认模板，所以不需要带语言后缀渲染
         title_template = notice_template_class(title_template_path)
         content_template = notice_template_class(content_template_path)
-        context_dict = self.get_context_dict()
-        self.notice_way = context_dict.get("notice_way", None)
-        self.mentioned_users = context_dict.get("mentioned_users", None)
         self.encoding = None if self.notice_way in self.NoEncoding else self.Utf8Encoding
         self.context["encoding"] = self.encoding
         self.title = title_template.render(context_dict)
@@ -105,7 +152,7 @@ class BaseSender(object):
         content_limit = self.get_content_limit(self.notice_way)
         # 渲染后的总提长度: self.content（这里做了特殊字符的replace, 一个特殊字符占1个长度)
         content_length = get_content_length(self.content, self.encoding)
-        if not content_limit or content_limit >= content_length:
+        if context_dict.get("is_json") or not content_limit or content_limit >= content_length:
             # 不需要限制长度
             return
         # 计算扣除 user_content 后剩余模板内容的长度（这里user_content的特殊字符 占2个长度）
@@ -120,6 +167,48 @@ class BaseSender(object):
             content_limit - template_content_length - 1 - self.content.count("\n") - self.content.count("\t")
         )
         self.content = content_template.render(self.get_context_dict())
+
+    @classmethod
+    def is_wecom_robot_enabled(cls) -> bool:
+        return settings.IS_WECOM_ROBOT_ENABLED and Platform.te
+
+    @classmethod
+    def get_sender(cls, context: dict[str, Any]) -> str | None:
+        return settings.WECOM_ROBOT_ACCOUNT.get(str(context.get("alert_level")))
+
+    @classmethod
+    def is_wxwork_layouts_enabled(
+        cls, bk_biz_id: int, notice_way: str, context: dict[str, Any], content_template_path: str
+    ) -> bool:
+        """判断是否切换至企业微信卡片通知
+        判断规则：
+        - 业务 ID 在灰度业务列表内。
+        - 通知渠道为企微机器人或 RTX。
+        - RTX 渠道需开启企微机器人功能且配置发送者。
+        - layouts 通知模板 存在。
+        """
+        is_gray: bool = (
+            bk_biz_id in settings.WECOM_LAYOUTS_BIZ_LIST or str(bk_biz_id) in settings.WECOM_LAYOUTS_BIZ_LIST
+        )
+        if not is_gray:
+            # 必须在灰度业务列表内
+            return False
+
+        if notice_way not in [NoticeWay.WX_BOT, "rtx"]:
+            # 必须是企业微信通知渠道
+            return False
+
+        if notice_way == "rtx" and not (cls.is_wecom_robot_enabled() and cls.get_sender(context)):
+            # rtx 通道下，必须开启企业微信机器人功能
+            return False
+
+        try:
+            # 必须存在对应的 layouts 模板文件
+            get_template(content_template_path.replace("markdown", "layouts"))
+        except TemplateDoesNotExist:
+            return False
+
+        return True
 
     @staticmethod
     def get_language_template_path(template_path, language):
@@ -136,9 +225,9 @@ class BaseSender(object):
         try:
             get_template(lang_template_path)
         except TemplateDoesNotExist:
-            logger.info("use default template because language template file %s load fail" % lang_template_path)
+            logger.info(f"use default template because language template file {lang_template_path} load fail")
             return template_path
-        logger.info("use special language template %s for notice" % lang_template_path)
+        logger.info(f"use special language template {lang_template_path} for notice")
         return lang_template_path
 
     def get_context_dict(self):
@@ -161,7 +250,7 @@ class BaseSender(object):
         notice_result = {}
         message: str = api_result.get("message", "")
         msg_id = api_result.get("data", {}).get("msg_id")
-        message_details: Dict[str, str] = api_result.get("message_detail", {})
+        message_details: dict[str, str] = api_result.get("message_detail", {})
         if msg_id:
             # 记录msg_id信息
             message = f"{message} msg_id: {msg_id}"
@@ -202,13 +291,21 @@ class BaseSender(object):
         content_length = get_content_length(content, encoding)
         if content_limit and content_length > content_limit:
             content = cut_str_by_max_bytes(content, content_limit, encoding=encoding)
-            content = f"{content[:len(content) - 3]}..."
+            content = f"{content[: len(content) - 3]}..."
             logger.info(
-                "send.{}: \n actual content: {} \norigin content length({}) is bigger than ({})  ".format(
-                    notice_way, content, content_length, content_limit
-                )
+                f"send.{notice_way}: \n actual content: {content} \n"
+                f"origin content length({content_length}) is bigger than ({content_limit})  "
             )
         return content
+
+    @classmethod
+    def _format_layouts(cls, layouts: list[dict[str, Any]], encoding="utf-8"):
+        """格式化通知结构体"""
+        for layout in layouts:
+            if "text" in layout:
+                # 单个块的内容长度不能超过 2046 字节（utf-8 编码）。
+                layout["text"] = cut_str_by_max_bytes(layout["text"], 2046, encoding=encoding)
+            cls._format_layouts(layout.get("components", []), encoding=encoding)
 
     @staticmethod
     def split_layout_content(msgtype, content, mentioned_users, encoding="utf-8"):
@@ -253,7 +350,10 @@ class BaseSender(object):
             return {
                 notice_receiver: {"message": str(self.content), "result": False} for notice_receiver in notice_receivers
             }
-        self.content = self.get_notice_content(notice_way, self.content)
+
+        if not self._is_wxwork_layouts_enabled:
+            # 模块化消息推送，由 _format_layouts 进行长度限制，无需限制整体长度。
+            self.content = self.get_notice_content(notice_way, self.content)
         method = getattr(self, "send_{}".format(notice_way.replace("-", "_")), None)
         if method:
             notice_results = method(notice_receivers, action_plugin=action_plugin)
@@ -302,15 +402,29 @@ class Sender(BaseSender):
             and (not settings.WECOM_ROBOT_BIZ_WHITE_LIST or self.bk_biz_id in settings.WECOM_ROBOT_BIZ_WHITE_LIST)
         ):
             logger.info(
-                "send.webot_app({}): \ntitle: {}\ncontent: {} \naction_plugin {}".format(
-                    ",".join(notice_receivers), self.title, self.content, action_plugin
-                )
+                f"{self._blocked_notice_log_prefix}send.webot_app({','.join(notice_receivers)}): "
+                f"\ntitle: {self.title}\ncontent: {self.content} \naction_plugin {action_plugin}"
             )
+            retry_params = {
+                "api_module": "api.cmsi.default",
+                "resource": "SendWecomAPP",
+                "args": (),
+                "kwargs": dict(
+                    bk_tenant_id=self.bk_tenant_id,
+                    receiver=notice_receivers,
+                    sender=sender_name,
+                    content=self.content,
+                    type=self.msg_type,
+                ),
+            }
+            self._check_blocked_and_raise("weixin", retry_params)
             # 复用企业微信机器人的配置
             # 如果启用了并且是te环境，可以使用
             # 用白名单控制
             # 需要判断是否有通知人员，才进行通知发送
             api_result = api.cmsi.send_wecom_app(
+                bk_tenant_id=self.bk_tenant_id,
+                # 这里receiver 也是用户名
                 receiver=notice_receivers,
                 sender=sender_name,
                 content=self.content,
@@ -318,11 +432,24 @@ class Sender(BaseSender):
             )
         else:
             logger.info(
-                "send.weixin({}): \ntitle: {}\ncontent: {} \naction_plugin {}".format(
-                    ",".join(notice_receivers), self.title, self.content, action_plugin
-                )
+                f"{self._blocked_notice_log_prefix}send.weixin({','.join(notice_receivers)}): "
+                f"\ntitle: {self.title}\ncontent: {self.content} \naction_plugin {action_plugin}"
             )
+            retry_params = {
+                "api_module": "api.cmsi.default",
+                "resource": "SendWeixin",
+                "args": (),
+                "kwargs": dict(
+                    bk_tenant_id=self.bk_tenant_id,
+                    receiver__username=",".join(notice_receivers),
+                    heading=self.title,
+                    message=self.content,
+                    is_message_base64=True,
+                ),
+            }
+            self._check_blocked_and_raise("weixin", retry_params)
             api_result = api.cmsi.send_weixin(
+                bk_tenant_id=self.bk_tenant_id,
                 receiver__username=",".join(notice_receivers),
                 heading=self.title,
                 message=self.content,
@@ -345,10 +472,15 @@ class Sender(BaseSender):
             "content": self.content,
             "is_content_base64": True,
         }
-        if self.context.get("is_external"):
+        # external_email: 邮件订阅支持直接外部邮件发送
+        # receiver 对应邮箱地址
+        # receiver__username 对应用户名, 使用这个字段，不需要关注用户敏感信息, 邮箱地址由邮件发送网关处理(esb[cmsi]/apigw[bk-cmsi])
+        if self.context.get("external_email"):
             params["receiver"] = ",".join(notice_receivers)
+            params.pop("receiver__username", None)
         else:
             params["receiver__username"] = ",".join(notice_receivers)
+            params.pop("receiver", None)
 
         # 添加附件参数
         if self.context.get("attachments"):
@@ -356,9 +488,16 @@ class Sender(BaseSender):
         elif self.context.get("alarm") and action_plugin == ActionPluginType.NOTICE:
             params["attachments"] = self.context["alarm"].attachments
 
-        logger.info("send.mail({}): \ntitle: {}".format(",".join(notice_receivers), self.title))
+        logger.info(f"{self._blocked_notice_log_prefix}send.mail({','.join(notice_receivers)}): \ntitle: {self.title}")
 
-        api_result = api.cmsi.send_mail(**params)
+        retry_params = {
+            "api_module": "api.cmsi.default",
+            "resource": "SendMail",
+            "args": (),
+            "kwargs": dict(bk_tenant_id=self.bk_tenant_id, **params),
+        }
+        self._check_blocked_and_raise("mail", retry_params)
+        api_result = api.cmsi.send_mail(bk_tenant_id=self.bk_tenant_id, **params)
         return self.handle_api_result(api_result, notice_receivers)
 
     def send_sms(self, notice_receivers, action_plugin=ActionPluginType.NOTICE):
@@ -371,12 +510,24 @@ class Sender(BaseSender):
         :rtype: dict
         """
         logger.info(
-            "send.sms({}): \ncontent: {} \naction_plugin {}".format(
-                ",".join(notice_receivers), self.content, action_plugin
-            )
+            f"{self._blocked_notice_log_prefix}send.sms({','.join(notice_receivers)}): "
+            f"\ncontent: {self.content} \naction_plugin {action_plugin}"
         )
         self.content = self.get_notice_content(NoticeWay.SMS, self.content)
+        retry_params = {
+            "api_module": "api.cmsi.default",
+            "resource": "SendSms",
+            "args": (),
+            "kwargs": dict(
+                bk_tenant_id=self.bk_tenant_id,
+                receiver__username=",".join(notice_receivers),
+                content=self.content,
+                is_content_base64=True,
+            ),
+        }
+        self._check_blocked_and_raise("sms", retry_params)
         api_result = api.cmsi.send_sms(
+            bk_tenant_id=self.bk_tenant_id,
             receiver__username=",".join(notice_receivers),
             content=self.content,
             is_content_base64=True,
@@ -398,11 +549,23 @@ class Sender(BaseSender):
         notice_receivers = ",".join(notice_receivers)
 
         logger.info(
-            "send.voice({}): \ncontent: {}, \n action_plugin {}".format(notice_receivers, self.content, action_plugin)
+            f"{self._blocked_notice_log_prefix}send.voice({notice_receivers}): "
+            f"\ncontent: {self.content}, \n action_plugin {action_plugin}"
         )
+
+        retry_params = {
+            "api_module": "api.cmsi.default",
+            "resource": "SendVoice",
+            "args": (),
+            "kwargs": dict(
+                bk_tenant_id=self.bk_tenant_id, receiver__username=notice_receivers, auto_read_message=self.content
+            ),
+        }
+        self._check_blocked_and_raise("voice", retry_params)
 
         try:
             msg_result = api.cmsi.send_voice(
+                bk_tenant_id=self.bk_tenant_id,
                 receiver__username=notice_receivers,
                 auto_read_message=self.content,
             )
@@ -413,7 +576,7 @@ class Sender(BaseSender):
         except Exception as e:
             result = False
             message = str(e)
-            logger.exception("send.voice failed, {}".format(e))
+            logger.exception(f"send.voice failed, {e}")
 
         notice_result[notice_receivers] = {"message": message, "result": result}
         return notice_result
@@ -429,8 +592,59 @@ class Sender(BaseSender):
         r = requests.post(settings.WXWORK_BOT_WEBHOOK_URL, json=params)
         return r.json()
 
-    @staticmethod
-    def send_wxwork_content(msgtype, content, chat_ids, mentioned_users=None, mentioned_title=None):
+    @classmethod
+    def _call_wxwork_api(cls, send_result: dict[str, Any], params: dict[str, Any], url: str | None = None):
+        chatid: str = params.get("chatid", "")
+        try:
+            response: dict[str, Any] = requests.post(url or settings.WXWORK_BOT_WEBHOOK_URL, json=params).json()
+            if response["errcode"] != 0:
+                send_result["errcode"] = -1
+                send_result["errmsg"].append(f"send to {chatid} failed: {response['errmsg']}")
+        except Exception as error:
+            send_result["errcode"] = -1
+            send_result["errmsg"].append(f"send to {chatid} failed: {str(error)}")
+
+    @classmethod
+    def send_wxwork_layouts(
+        cls,
+        msgtype: str,
+        content: str,
+        chat_ids: list[str],
+        mentioned_users: dict[str, list[str]] = None,
+        mentioned_title: str = None,
+        sender: str | None = None,
+    ):
+        """模块化消息推送"""
+
+        def _construct_params(_content: str, _chat_ids: list[str]) -> dict[str, Any]:
+            _layouts: list[dict[str, Any]] = json.loads(_content)
+            cls._format_layouts(_layouts, encoding=Sender.Utf8Encoding)
+            return {"msgtype": "message", "chatid": "|".join(_chat_ids), "layouts": _layouts}
+
+        url: str = settings.WXWORK_BOT_WEBHOOK_URL
+        if sender:
+            # 进入 send_wxwork_layouts 说明 url 已经存在，这里无需重复检查。
+            if "?key=" in url:
+                url = url.split("?key=", 1)[0] + f"?key={sender}"
+
+        if not mentioned_users:
+            return requests.post(url, json=_construct_params(content, chat_ids)).json()
+
+        send_result: dict[str, Any] = {"errcode": 0, "errmsg": []}
+        for chat_id in chat_ids:
+            send_content: str = content
+            chat_mentioned_users: list[str] = mentioned_users.get(chat_id, [])
+            if chat_mentioned_users:
+                mentioned_users_string: str = "".join([f"<@{user}>" for user in chat_mentioned_users])
+                mentioned_users_string = f"**{mentioned_title or _('告警接收人')}: **{mentioned_users_string}"
+                logger.info("send wxwork to %s, mentioned_users_string %s", chat_id, mentioned_users_string)
+                send_content: str = content.replace("--mention-users--", mentioned_users_string)
+
+            cls._call_wxwork_api(send_result, _construct_params(send_content, [chat_id]), url=url)
+        return send_result
+
+    @classmethod
+    def send_wxwork_content(cls, msgtype, content, chat_ids, mentioned_users=None, mentioned_title=None):
         """
         发送文本类的内容
         """
@@ -470,44 +684,7 @@ class Sender(BaseSender):
             send_content = Sender.get_notice_content(NoticeWay.WX_BOT, send_content, Sender.Utf8Encoding)
             msg_content["content"] = send_content
             params[msgtype] = msg_content
-            try:
-                response = requests.post(settings.WXWORK_BOT_WEBHOOK_URL, json=params).json()
-                if response["errcode"] != 0:
-                    send_result["errcode"] = -1
-                    send_result["errmsg"].append(f"send to {chat_id} failed: {response['errmsg']}")
-            except Exception as error:
-                send_result["errcode"] = -1
-                send_result["errmsg"].append(f"send to {chat_id} failed: {str(error)}")
-        return send_result
-
-    @staticmethod
-    def send_wxwork_layouts(msgtype, content, chat_ids, layouts: list, mentioned_users=None, mentioned_title=None):
-        """
-        模块化消息推送(未启用)
-        """
-        send_result = {"errcode": 0, "errmsg": []}
-        for chat_id in chat_ids:
-            # 每个chatid的通知人员可能不一样，需要根据不同的chatid进行拆分
-            chat_mentioned_users = mentioned_users.get(chat_id, [])
-            mentioned_users_string = ""
-            if chat_mentioned_users:
-                mentioned_users_string = "".join([f"<@{user}>" for user in chat_mentioned_users])
-                mentioned_users_string = f"**{mentioned_title or _('告警关注者')}: **{mentioned_users_string}"
-            chat_layouts = copy.deepcopy(layouts)
-            chat_layouts.insert(0, Sender.split_layout_content(msgtype, content, mentioned_users_string))
-            params = {
-                "msgtype": "message",
-                "chatid": chat_id,
-                "layouts": chat_layouts,
-            }
-            try:
-                response = requests.post(settings.WXWORK_BOT_WEBHOOK_URL, json=params).json()
-                if response["errcode"] != 0:
-                    send_result["errmsg"].append(f"send to {chat_id} failed: {response['errmsg']}")
-            except Exception as error:
-                send_result["errcode"] = -1
-                send_result["errmsg"].append(f"send to {chat_id} failed: {str(error)}")
-        send_result["errmsg"] = ",".join(send_result["errmsg"])
+            cls._call_wxwork_api(send_result, params)
         return send_result
 
     def send_wxwork_bot(self, notice_receivers, action_plugin=ActionPluginType.NOTICE):
@@ -523,9 +700,8 @@ class Sender(BaseSender):
 
         message = _("发送成功")
         logger.info(
-            "send.wxwork_group({}): \ncontent: {} \n action_plugin {}".format(
-                ",".join(notice_receivers), self.content, action_plugin
-            )
+            f"{self._blocked_notice_log_prefix}send.wxwork_group({','.join(notice_receivers)}): "
+            f"\ncontent: {self.content} \n action_plugin {action_plugin}"
         )
 
         result = True
@@ -537,19 +713,28 @@ class Sender(BaseSender):
         if not notice_receivers:
             return finish_send_wxork_bot(_("未配置企业微信群id，请联系管理员"), False)
 
+        send_func: Callable[..., dict[str, Any]] = (
+            self.send_wxwork_layouts if self._is_wxwork_layouts_enabled else self.send_wxwork_content
+        )
+        retry_params = {
+            "api_module": "bkmonitor.utils.send.Sender",
+            "resource": send_func.__name__,
+            "args": (self.msg_type, self.content, notice_receivers, self.mentioned_users),
+            "kwargs": dict(),
+        }
+        self._check_blocked_and_raise("wxwork_group", retry_params)
         try:
-            # 如果不是，保留以前的发送格式
-            response = self.send_wxwork_content(self.msg_type, self.content, notice_receivers, self.mentioned_users)
+            response = send_func(self.msg_type, self.content, notice_receivers, self.mentioned_users)
             if response["errcode"] != 0:
                 result = False
                 message = response["errmsg"]
         except Exception as e:
             result = False
             message = str(e)
-            logger.exception("send.wxwork_group failed, {}".format(e))
+            logger.exception(f"send.wxwork_group failed, {e}")
 
-        if action_plugin == ActionPluginType.NOTICE and settings.WXWORK_BOT_SEND_IMAGE:
-            # 只有告警通知才发送图片，执行不做图片发送
+        if action_plugin == ActionPluginType.NOTICE and settings.WXWORK_BOT_SEND_IMAGE and not self.blocked:
+            # 只有告警通知才发送图片，执行不做图片发送(熔断通知，图片不补发)
             try:
                 image = alarm.chart_image if alarm else None
                 if image:
@@ -564,7 +749,7 @@ class Sender(BaseSender):
                         )
                     )
             except Exception as e:
-                logger.exception("send.wxwork_group image failed, {}".format(e))
+                logger.exception(f"send.wxwork_group image failed, {e}")
 
         return finish_send_wxork_bot(message, result)
 
@@ -576,9 +761,9 @@ class Sender(BaseSender):
         """
         sender = None
         notice_way = "rtx"
-        if settings.IS_WECOM_ROBOT_ENABLED and Platform.te:
+        if self.is_wecom_robot_enabled():
             # 允许进行通知方式切换，才进行通知发送
-            sender = settings.WECOM_ROBOT_ACCOUNT.get(str(self.context.get("alert_level")))
+            sender = self.get_sender(self.context)
             if sender:
                 notice_way = "wecom_robot"
         return self.send_default(notice_way, notice_receivers, sender)
@@ -593,11 +778,24 @@ class Sender(BaseSender):
         :rtype: dict
         """
         logger.info(
-            "send.{}({}): \ntitle: {}\ncontent: {}".format(
-                notice_way, ",".join(notice_receivers), self.title, self.content
-            )
+            f"{self._blocked_notice_log_prefix}send.{notice_way}({','.join(notice_receivers)}): "
+            f"\ntitle: {self.title}\ncontent: {self.content}"
         )
         if notice_way == "wecom_robot":
+            if self._is_wxwork_layouts_enabled:
+                retry_params = {
+                    "api_module": "bkmonitor.utils.send.Sender",
+                    "resource": "send_wxwork_layouts",
+                    "args": (self.msg_type, self.content, notice_receivers),
+                    "kwargs": dict(sender=sender),
+                }
+                self._check_blocked_and_raise("wxwork_group", retry_params)
+                response = self.send_wxwork_layouts(self.msg_type, self.content, notice_receivers, sender=sender)
+                return {
+                    # 适配 send_default 的返回格式。
+                    notice_receiver: {"message": response.get("errmsg") or "", "result": response.get("errcode") == 0}
+                    for notice_receiver in notice_receivers
+                }
             # 企业微信robot发送的内容需要json格式支持
             self.content = json.dumps({"type": self.msg_type, self.msg_type: {"content": self.content}})
 
@@ -606,8 +804,14 @@ class Sender(BaseSender):
         )
         if sender:
             msg_data.update({"sender": sender})
-
-        api_result = api.cmsi.send_msg(**msg_data)
+        retry_params = {
+            "api_module": "api.cmsi.default",
+            "resource": "SendMsg",
+            "args": (),
+            "kwargs": dict(bk_tenant_id=self.bk_tenant_id, **msg_data),
+        }
+        self._check_blocked_and_raise(notice_way, retry_params)
+        api_result = api.cmsi.send_msg(bk_tenant_id=self.bk_tenant_id, **msg_data)
         return self.handle_api_result(api_result, notice_receivers)
 
 
@@ -643,7 +847,7 @@ class ChannelBkchatSender(BaseSender):
 
     def send_mail(self, notice_receivers, action_plugin=ActionPluginType.NOTICE):
         """
-        发送邮件通知
+        通过 bkchat 发送邮件通知
         :return: {
             "1": {"result": true, "message": "OK"},
             "2": {"result": false, "message": "发送失败"}
@@ -703,7 +907,7 @@ class ChannelBkchatSender(BaseSender):
 
         msg_param = {
             "keyword1": {
-                "value": "{level_name}({alert_id})".format(level_name=_(alarm.level_name), alert_id=alarm.id),
+                "value": f"{_(alarm.level_name)}({alarm.id})",
                 "color": "#7092ed",
             },
             "keyword2": {"value": alarm.description, "color": "#173177"},
@@ -713,3 +917,114 @@ class ChannelBkchatSender(BaseSender):
         notice_params = {"notice_group_id_list": notice_receivers, "msg_type": "mini", "msg_param": msg_param}
         api_result = api.bkchat.send_notice_group_msg(**notice_params)
         return self.handle_api_result(api_result, notice_receivers)
+
+
+class IncidentSender(Sender):
+    """
+    故障通知发送器
+    继承自Sender，用于发送故障相关的通知
+    与告警通知的主要区别在于：故障数据中alarm可能是字典类型而非对象
+    """
+
+    def send_mail(self, notice_receivers, action_plugin=ActionPluginType.NOTICE):
+        """
+        发送邮件通知（覆盖父类方法以支持字典类型的alarm）
+        :return: {
+            "user1": {"result": true, "message": "OK"},
+            "user2": {"result": false, "message": "发送失败"}
+        }
+        :rtype: dict
+        """
+        params = {
+            "title": self.title,
+            "content": self.content,
+            "is_content_base64": True,
+        }
+
+        # external_email: 邮件订阅支持直接外部邮件发送
+        if self.context.get("external_email"):
+            params["receiver"] = ",".join(notice_receivers)
+            params.pop("receiver__username", None)
+        else:
+            params["receiver__username"] = ",".join(notice_receivers)
+            params.pop("receiver", None)
+
+        # 添加附件参数 - 兼容字典和对象两种alarm类型
+        if self.context.get("attachments"):
+            params["attachments"] = self.context.get("attachments")
+        elif self.context.get("alarm") and action_plugin == ActionPluginType.NOTICE:
+            alarm = self.context["alarm"]
+            if isinstance(alarm, dict):
+                params["attachments"] = alarm.get("attachments")
+            else:
+                params["attachments"] = getattr(alarm, "attachments", None)
+
+        logger.info("send.mail({}): \ntitle: {}".format(",".join(notice_receivers), self.title))
+
+        api_result = api.cmsi.send_mail(bk_tenant_id=self.bk_tenant_id, **params)
+        return self.handle_api_result(api_result, notice_receivers)
+
+    def send_wxwork_bot(self, notice_receivers, action_plugin=ActionPluginType.NOTICE):
+        """
+        发送企业微信群通知（覆盖父类方法以支持字典类型的alarm）
+        """
+
+        def finish_send_wxork_bot(msg, ret):
+            notice_result = {}
+            for notice_receiver in notice_receivers:
+                notice_result[notice_receiver] = {"message": msg, "result": ret}
+            return notice_result
+
+        message = _("发送成功")
+        logger.info(
+            "send.wxwork_group({}): \ncontent: {} \n action_plugin {}".format(
+                ",".join(notice_receivers), self.content, action_plugin
+            )
+        )
+
+        result = True
+        alarm = self.context.get("alarm", None)
+
+        if not settings.WXWORK_BOT_WEBHOOK_URL:
+            return finish_send_wxork_bot(_("未配置蓝鲸监控群机器人回调地址，请联系管理员"), False)
+
+        if not notice_receivers:
+            return finish_send_wxork_bot(_("未配置企业微信群id，请联系管理员"), False)
+
+        try:
+            send_func: Callable[..., dict[str, Any]] = (
+                self.send_wxwork_layouts if self._is_wxwork_layouts_enabled else self.send_wxwork_content
+            )
+            response = send_func(self.msg_type, self.content, notice_receivers, self.mentioned_users)
+            if response["errcode"] != 0:
+                result = False
+                message = response["errmsg"]
+        except Exception as e:
+            result = False
+            message = str(e)
+            logger.exception(f"send.wxwork_group failed, {e}")
+
+        if action_plugin == ActionPluginType.NOTICE and settings.WXWORK_BOT_SEND_IMAGE:
+            # 只有告警通知才发送图片，执行不做图片发送
+            try:
+                # 兼容字典和对象两种alarm类型
+                if isinstance(alarm, dict):
+                    image = alarm.get("chart_image")
+                else:
+                    image = alarm.chart_image if alarm else None
+
+                if image:
+                    response = self.send_wxwork_image(image, notice_receivers)
+                    if response["errcode"] != 0:
+                        logger.error("send.wxwork_group image failed, {}".format(response["errmsg"]))
+                else:
+                    logger.info(
+                        "ignore sending chart image to chat_id({}) for action({})".format(
+                            "|".join(notice_receivers),
+                            self.context["action"].id if self.context.get("action") else "NULL",
+                        )
+                    )
+            except Exception as e:
+                logger.exception(f"send.wxwork_group image failed, {e}")
+
+        return finish_send_wxork_bot(message, result)

@@ -100,7 +100,8 @@
       >
         <template #default="{ row }">
           <div class="table-ceil-container">
-            <span v-bk-overflow-tips>{{ row.operator || '--' }}</span>
+            <!-- <span v-bk-overflow-tips>{{ row.operator || '--' }}</span> -->
+            <bk-user-display-name :user-id="row.operator"></bk-user-display-name>
           </div>
         </template>
       </bk-table-column>
@@ -117,6 +118,9 @@
         min-width="80"
         prop="created_by"
       >
+      <template #default="{ row }">
+        <bk-user-display-name :user-id="row.created_by"></bk-user-display-name>
+      </template>
       </bk-table-column>
       <bk-table-column
         :label="$t('操作')"
@@ -174,6 +178,7 @@
   import EmptyStatus from '@/components/empty-status';
   import SidebarDiffMixin from '@/mixins/sidebar-diff-mixin';
   import { mapGetters } from 'vuex';
+  import useUtils from '@/hooks/use-utils';
 
   import * as authorityMap from '../../../../common/authority-map';
   import DirectoryManage from './directory-manage';
@@ -239,7 +244,8 @@
           const res = await this.$http.request('extractManage/getStrategyList', {
             query: { bk_biz_id: this.$store.state.bkBizId },
           });
-          this.strategyList = res.data;
+          const { formatResponseListTimeZoneString } = useUtils();
+          this.strategyList = formatResponseListTimeZoneString(res.data || []);
         } catch (e) {
           console.warn(e);
           this.emptyType = '500';
@@ -260,7 +266,7 @@
                 },
               ],
             });
-            this.$store.commit('updateAuthDialogData', res.data);
+            this.$store.commit('updateState', {'authDialogData': res.data});
           } catch (err) {
             console.warn(err);
           } finally {

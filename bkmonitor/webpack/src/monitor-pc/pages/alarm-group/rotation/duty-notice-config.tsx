@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -265,7 +265,7 @@ export default class DutyNoticeConfig extends tsc<IProps> {
               class='icon-monitor icon-tips'
               v-bk-tooltips={{
                 content: this.$t(
-                  "获取会话ID方法:<br/>1.群聊列表右键添加群机器人: {name}<br/>2.手动 @{name} 并输入关键字'会话ID'<br/>3.将获取到的会话ID粘贴到输入框，使用逗号分隔",
+                  '获取会话ID方法:<br/>1.群聊列表右上角...面板，点击消息推送，搜索：{name} 并添加进群<br/>2.手动 @{name}<br/>3.复制会话ID粘贴到输入框，多个ID使用逗号分隔',
                   { name: this.chatTipName }
                 ),
                 boundary: 'window',

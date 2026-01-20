@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -33,6 +33,7 @@ from django.forms import model_to_dict
 from django.utils.translation import gettext as _
 from rest_framework.exceptions import ValidationError
 
+from bk_dataview.api import get_or_create_org, get_or_create_user
 from bkmonitor.aiops.alert.maintainer import AIOpsStrategyMaintainer
 from bkmonitor.dataflow.constant import (
     FLINK_KEY_WORDS,
@@ -57,7 +58,12 @@ from bkmonitor.strategy.serializers import MultivariateAnomalyDetectionSerialize
 from bkmonitor.utils.common_utils import to_bk_data_rt_id
 from bkmonitor.utils.sql import sql_format_params
 from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id, set_local_tenant_id
-from bkmonitor.utils.user import get_global_user, set_local_username
+from bkmonitor.utils.user import (
+    get_admin_username,
+    get_global_user,
+    get_user_display_name,
+    set_local_username,
+)
 from constants.aiops import SCENE_NAME_MAPPING
 from constants.common import DEFAULT_TENANT_ID
 from constants.data_source import DataSourceLabel, DataTypeLabel
@@ -79,6 +85,7 @@ from monitor_web.export_import.constant import ImportDetailStatus, ImportHistory
 from monitor_web.extend_account.models import UserAccessRecord
 from monitor_web.models.custom_report import CustomEventGroup
 from monitor_web.models.plugin import CollectorPluginMeta
+from monitor_web.models.uptime_check import UptimeCheckTask
 from monitor_web.plugin.constant import PLUGIN_REVERSED_DIMENSION
 from monitor_web.strategies.built_in import run_build_in
 from utils import business, count_md5
@@ -124,9 +131,18 @@ def active_business(username: str, space_info: dict[str, Any]):
 
 
 @shared_task(ignore_result=True)
-def run_init_builtin(bk_biz_id):
+def run_init_builtin(bk_biz_id: int, username: str | None = None):
     if bk_biz_id and settings.ENVIRONMENT != "development":
         logger.info("[run_init_builtin] enter with bk_biz_id -> %s", bk_biz_id)
+
+        # 初始化Grafana组织和用户
+        try:
+            get_or_create_org(str(bk_biz_id))
+            if username:
+                get_or_create_user(username=username, display_name=get_user_display_name(username))
+        except Exception as e:
+            logger.exception("[run_init_builtin] failed to create org: bk_biz_id -> %s, error -> %s", bk_biz_id, e)
+
         # 创建默认内置策略
         run_build_in(int(bk_biz_id))
 
@@ -216,6 +232,7 @@ def update_metric_list():
         )
 
         # 刷新指定租户的指标列表结果表
+        set_local_username(get_admin_username(bk_tenant_id=bk_tenant_id))
         _update_metric_list(bk_tenant_id, period, offset)
 
         # 更新此轮分发任务时间戳
@@ -256,8 +273,6 @@ def _update_metric_list(bk_tenant_id: str, period: int, offset: int):
                 f"{bk_tenant_id}_{bk_biz_id}_{_source_type}",
                 e,
             )
-
-    set_local_username(settings.COMMON_USERNAME)
 
     # 记录任务开始时间
     start = time.time()
@@ -377,7 +392,7 @@ def append_metric_list_cache(bk_tenant_id: str, result_table_id_list: list[str])
         return
 
     set_local_tenant_id(bk_tenant_id=bk_tenant_id)
-    set_local_username(username=settings.COMMON_USERNAME)
+    set_local_username(username=get_admin_username(bk_tenant_id=bk_tenant_id))
 
     if not result_table_id_list:
         return
@@ -415,9 +430,11 @@ def soft_delete_expired_shields():
     """
     软删除失效且创建时间在1个月前的屏蔽记录
     """
-    from django.utils import timezone
-    from bkmonitor.models import Shield
     from datetime import timedelta
+
+    from django.utils import timezone
+
+    from bkmonitor.models import Shield
 
     one_month_ago = timezone.now() - timedelta(days=30)
     updated_count = Shield.objects.filter(failure_time__lte=one_month_ago).update(is_enabled=False, is_deleted=True)
@@ -442,6 +459,7 @@ def import_config(
     collect_config_list,
     strategy_config_list,
     view_config_list,
+    folder_id: int = 0,
     is_overwrite_mode=False,
 ):
     """
@@ -467,7 +485,7 @@ def import_config(
 
     import_collect(bk_biz_id, history_instance, collect_config_list)
     import_strategy(bk_biz_id, history_instance, strategy_config_list, is_overwrite_mode)
-    import_view(bk_biz_id, view_config_list, is_overwrite_mode)
+    import_view(bk_biz_id, view_config_list, folder_id, is_overwrite_mode)
     if (
         ImportDetail.objects.filter(history_id=history_instance.id, import_status=ImportDetailStatus.IMPORTING).count()
         == 0
@@ -488,6 +506,8 @@ def remove_file(file_path):
 
     if settings.USE_CEPH:
         path = file_path.replace(settings.MEDIA_ROOT, "")
+        # 确保路径不以 / 开头，避免被识别为绝对路径
+        path = path.lstrip("/")
         if default_storage.exists(path):
             # 先删除目录下的文件
             files = default_storage.listdir(path)[1]
@@ -499,9 +519,9 @@ def remove_file(file_path):
 
 def clean_ceph_tmp_file():
     # 清理ceph临时导出文件
-    tmp = default_storage.listdir("/export_import/tmp/")[0]
+    tmp = default_storage.listdir("export_import/tmp/")[0]
     for package_dir in tmp:
-        path = f"/export_import/tmp/{package_dir}/"
+        path = f"export_import/tmp/{package_dir}/"
         files = default_storage.listdir(path)[1]
         for package in files:
             default_storage.delete(f"{path}{package}")
@@ -526,7 +546,7 @@ def append_event_metric_list_cache(bk_biz_id: int, bk_event_group_id: int):
     bk_tenant_id = bk_biz_id_to_bk_tenant_id(bk_biz_id)
 
     set_local_tenant_id(bk_tenant_id=bk_tenant_id)
-    set_local_username(username=settings.COMMON_USERNAME)
+    set_local_username(username=get_admin_username(bk_tenant_id=bk_tenant_id))
 
     event_group_id = int(bk_event_group_id)
     event_type = CustomEventGroup.objects.get(bk_biz_id=bk_biz_id, bk_event_group_id=event_group_id).type
@@ -566,7 +586,11 @@ def update_task_running_status(task_id):
     """
     异步查询拨测任务启动状态，更新拨测任务列表中的运行状态
     """
-    set_local_username(settings.COMMON_USERNAME)
+    task = UptimeCheckTask.objects.get(id=task_id)
+    bk_biz_id = task.bk_biz_id
+    bk_tenant_id = bk_biz_id_to_bk_tenant_id(bk_biz_id)
+    set_local_tenant_id(bk_tenant_id=bk_tenant_id)
+    set_local_username(username=get_admin_username(bk_tenant_id=bk_tenant_id))
     resource.uptime_check.update_task_running_status(task_id)
 
 

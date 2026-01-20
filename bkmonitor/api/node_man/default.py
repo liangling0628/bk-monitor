@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -17,7 +17,7 @@ from bkm_space.validate import validate_bk_biz_id
 from bkmonitor.commons.tools import batch_request
 from bkmonitor.utils.cache import CacheType
 from bkmonitor.utils.request import get_request_username
-from bkmonitor.utils.user import get_backend_username, get_global_user
+from bkmonitor.utils.user import get_admin_username
 from constants.cmdb import TargetNodeType
 from core.drf_resource import APIResource
 from core.drf_resource.base import Resource
@@ -28,7 +28,20 @@ class NodeManAPIGWResource(APIResource, metaclass=abc.ABCMeta):
     TIMEOUT = 300
 
     base_url_statement = None
-    base_url = settings.BKNODEMAN_API_BASE_URL or f"{settings.BK_COMPONENT_API_URL}/api/c/compapi/v2/nodeman/"
+
+    @property
+    def base_url(self):
+        if settings.BKNODEMAN_API_BASE_URL:
+            return settings.BKNODEMAN_API_BASE_URL
+
+        if self.use_apigw:
+            return f"{settings.BK_COMPONENT_API_URL}/api/bk-nodeman/prod/"
+        else:
+            return f"{settings.BK_COMPONENT_API_URL}/api/c/compapi/v2/nodeman/"
+
+    @property
+    def use_apigw(self):
+        return settings.BKNODEMAN_API_BASE_URL or settings.ENABLE_MULTI_TENANT_MODE
 
     # 模块名
     module_name = "node_man"
@@ -44,7 +57,17 @@ class NodeManAPIGWResource(APIResource, metaclass=abc.ABCMeta):
         return response_data
 
     def full_request_data(self, validated_request_data):
+        # 由于节点管理的有些接口存在独立的鉴权系统，因此不能直接使用请求的用户，否则会导致鉴权失败
+        # 记录真实请求用户
+        origin_user = get_request_username()
+        if not origin_user:
+            validated_request_data["_origin_user"] = origin_user
+
+        # 使用租户下的管理员用户
+        setattr(self, "bk_username", get_admin_username(bk_tenant_id=self._get_tenant_id()))
+
         validated_request_data = super().full_request_data(validated_request_data)
+
         # 业务id判定
         if "bk_biz_id" not in validated_request_data:
             return validated_request_data
@@ -61,7 +84,7 @@ class RenderConfigTemplateResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/render_config_template/"
         return "plugin_render_config_template/"
 
@@ -87,7 +110,7 @@ class StartDebugResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/start_debug/"
         return "plugin_start_debug/"
 
@@ -111,7 +134,7 @@ class QueryDebugResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/query_debug/"
         return "plugin_query_debug/"
 
@@ -136,7 +159,7 @@ class StopDebugResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/stop_debug/"
         return "plugin_stop_debug/"
 
@@ -174,7 +197,7 @@ class UploadCosResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/upload/"
         return "/backend/api/plugin/upload/"
 
@@ -193,7 +216,7 @@ class RegisterPackageResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/create_register_task/"
         return "plugin_create_register_task/"
 
@@ -214,7 +237,7 @@ class QueryRegisterTaskResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/query_register_task/"
         return "plugin_query_register_task/"
 
@@ -235,7 +258,7 @@ class PluginInfoResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/info/"
         return "plugin_info/"
 
@@ -249,7 +272,7 @@ class PluginInfoResource(NodeManAPIGWResource):
 class CreateConfigTemplateResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/create_config_template/"
         return "plugin_create_config_template/"
 
@@ -284,7 +307,7 @@ class CreateConfigTemplateResource(NodeManAPIGWResource):
 class ReleasePluginResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/release/"
         return "plugin_release/"
 
@@ -299,7 +322,7 @@ class ReleasePluginResource(NodeManAPIGWResource):
 class ReleaseConfigResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/release_config_template/"
         return "plugin_release_config_template/"
 
@@ -315,7 +338,7 @@ class ReleaseConfigResource(NodeManAPIGWResource):
 class ExportRawPackageResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/create_export_task/"
         return "plugin_create_export_task/"
 
@@ -335,7 +358,7 @@ class ExportRawPackageResource(NodeManAPIGWResource):
 class ExportQueryTaskResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/query_export_task/"
         return "plugin_query_export_task/"
 
@@ -348,7 +371,7 @@ class ExportQueryTaskResource(NodeManAPIGWResource):
 class DeletePluginResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/plugin/delete/"
         return "plugin_delete/"
 
@@ -361,7 +384,7 @@ class DeletePluginResource(NodeManAPIGWResource):
 class CreateSubscriptionResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/create/"
         return "subscription_create/"
 
@@ -396,7 +419,7 @@ class CreateSubscriptionResource(NodeManAPIGWResource):
 class SubscriptionInfoResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/info/"
         return "subscription_info/"
 
@@ -409,7 +432,7 @@ class SubscriptionInfoResource(NodeManAPIGWResource):
 class UpdateSubscriptionResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/update/"
         return "subscription_update/"
 
@@ -443,7 +466,7 @@ class UpdateSubscriptionResource(NodeManAPIGWResource):
 class DeleteSubscriptionResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/delete/"
         return "subscription_delete/"
 
@@ -456,7 +479,7 @@ class DeleteSubscriptionResource(NodeManAPIGWResource):
 class RunSubscriptionResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/run/"
         return "subscription_run/"
 
@@ -476,7 +499,7 @@ class RunSubscriptionResource(NodeManAPIGWResource):
 class RetrySubscriptionResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/retry/"
         return "backend/api/subscription/retry/"
 
@@ -492,7 +515,7 @@ class RevokeSubscriptionResource(NodeManAPIGWResource):
     # 因此 action 链接与其他接口的不一致，修改时请按照 节点管理2.0 esb yaml 中相应的接口链接进行调整
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/revoke/"
         return "backend/api/subscription/revoke/"
 
@@ -506,7 +529,7 @@ class RevokeSubscriptionResource(NodeManAPIGWResource):
 class TaskResultResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/task_result/"
         return "subscription_task_result/"
 
@@ -525,7 +548,7 @@ class TaskResultResource(NodeManAPIGWResource):
 class SwitchSubscriptionResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/switch/"
         return "subscription_switch/"
 
@@ -539,7 +562,7 @@ class SwitchSubscriptionResource(NodeManAPIGWResource):
 class SubscriptionInstanceStatusResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/instance_status/"
         return "subscription_instance_status/"
 
@@ -559,7 +582,7 @@ class SubscriptionInstanceStatusResource(NodeManAPIGWResource):
 class TaskResultDetailResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/task_result_detail/"
         return "subscription_task_result_detail/"
 
@@ -640,7 +663,7 @@ class GetProxiesResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/api/host/proxies/"
         return "api/host/proxies/"
 
@@ -658,7 +681,7 @@ class GetProxiesByBizResource(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/api/host/biz_proxies/"
         return "api/host/biz_proxies/"
 
@@ -667,12 +690,6 @@ class GetProxiesByBizResource(NodeManAPIGWResource):
 
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField(required=True, label="业务ID")
-
-    def full_request_data(self, validated_request_data):
-        validated_request_data = super().full_request_data(validated_request_data)
-        validated_request_data["_origin_user"] = get_global_user()
-        setattr(self, "bk_username", settings.COMMON_USERNAME)
-        return validated_request_data
 
 
 PLUGIN_JOB_TUPLE = (
@@ -693,7 +710,7 @@ class PluginOperate(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/api/plugin/operate/"
         return "api/plugin/operate/"
 
@@ -723,7 +740,7 @@ class PluginSearch(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/api/plugin/search/"
         return "api/plugin/search/"
 
@@ -742,8 +759,6 @@ class PluginSearch(NodeManAPIGWResource):
         pagesize = serializers.IntegerField(required=True, label="数量")
 
     def full_request_data(self, validated_request_data):
-        # plugin search 在节点管理侧会针对请求用户鉴权，监控有自己的鉴权系统，此处直接使用后台账户进行查询
-        setattr(self, "bk_username", get_backend_username(bk_tenant_id=self.bk_tenant_id))
         return super().full_request_data(validated_request_data)
 
 
@@ -762,7 +777,7 @@ class CheckTaskReady(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/check_task_ready/"
         return "backend/api/subscription/check_task_ready/"
 
@@ -780,7 +795,7 @@ class FetchSubscriptionStatistic(NodeManAPIGWResource):
 
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/backend/api/subscription/statistic/"
         return "backend/api/subscription/statistic/"
 
@@ -832,7 +847,7 @@ class BatchTaskResultResource(Resource):
 class IpchooserHostDetailResource(NodeManAPIGWResource):
     @property
     def action(self):
-        if settings.BKNODEMAN_API_BASE_URL:
+        if self.use_apigw:
             return "system/core/api/ipchooser_host/details/"
         return "core/api/ipchooser_host/details/"
 

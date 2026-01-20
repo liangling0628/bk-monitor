@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -8,6 +8,7 @@ an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express o
 specific language governing permissions and limitations under the License.
 """
 
+import json
 import logging
 from typing import Any
 from collections.abc import Generator
@@ -78,7 +79,7 @@ class BCSPod(BCSBase, BCSBaseResources):
 
     class Meta:
         unique_together = ["bcs_cluster_id", "namespace", "name"]
-        index_together = ["bk_biz_id", "bcs_cluster_id"]
+        index_together = (["bk_biz_id", "bcs_cluster_id"], ["name", "bcs_cluster_id"])
 
     @staticmethod
     def hash_unique_key(bk_biz_id, bcs_cluster_id, namespace, name):
@@ -493,6 +494,49 @@ class BCSPod(BCSBase, BCSBaseResources):
     def get_filter_node_ip(cls, params):
         """节点IP搜索条件 ."""
         return cls.get_filter_tags(params["bk_biz_id"], "node_ip")
+
+    @classmethod
+    def get_instance_with_cache(cls, name, bcs_cluster_id, namespace=None):
+        """
+        获取实例（带缓存）
+        """
+        from bkmonitor.utils.dynamic_settings import redis_cache
+
+        filter_kwargs = dict(name=name, bcs_cluster_id=bcs_cluster_id)
+        if namespace:
+            filter_kwargs["namespace"] = namespace
+
+        # 如果没有Redis缓存，直接查询数据库
+        if redis_cache is None:
+            return cls.get_instance(**filter_kwargs)
+
+        pod_cache_key = f"bcs_pod:{bcs_cluster_id}:{namespace}:{name}"
+        # 尝试从缓存获取
+        result = redis_cache.get(pod_cache_key)
+        if result:
+            return cls(**json.loads(result))
+
+        # 缓存未命中，查询数据库
+        instance = cls.get_instance(**filter_kwargs)
+        # 如果查询到实例，设置缓存
+        if instance:
+            redis_cache.set(pod_cache_key, instance._serialize_pod(), timeout=3600)
+
+        return instance
+
+    def _serialize_pod(self) -> str:
+        """
+        序列化Pod对象
+        """
+        data = {
+            "name": self.name,
+            "namespace": self.namespace,
+            "bk_biz_id": self.bk_biz_id,
+            "bcs_cluster_id": self.bcs_cluster_id,
+            "workload_type": self.workload_type,
+            "workload_name": self.workload_name,
+        }
+        return json.dumps(data)
 
 
 class BCSPodLabels(models.Model):

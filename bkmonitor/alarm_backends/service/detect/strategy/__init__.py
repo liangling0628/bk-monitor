@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -86,7 +86,7 @@ class Algorithms:
                 raise InvalidDataPoint(data_point=data_point)
 
         context = self.get_context(data_point)
-        if not hasattr(data_point, "__debug__"):
+        if "__debug__" not in data_point.as_dict():
             return eval(self.byte_code, {}, context)
         # debug only
         ret = False
@@ -135,7 +135,9 @@ class Algorithms:
         for data_point in data_points:
             try:
                 check_result = self.detect(data_point)
-            except Exception:
+            except Exception as e:
+                logger.debug(e)
+                # 这里记录数据点异常检测的异常堆栈，默认不开
                 continue
             if check_result:
                 ap = self.gen_anomaly_point(data_point, check_result, level)
@@ -223,10 +225,18 @@ class BasicAlgorithmsCollection(Algorithms):
     # op is Or or And
     expr_op = "and"
 
-    def __init__(self, config, unit=""):
+    def __init__(self, config, unit="", extra_config=None):
+        """
+        初始化算法集合
+
+        :param config: 算法配置（config 字段）
+        :param unit: 单位前缀
+        :param extra_config: 额外的控制参数（如 grey_to_bkfara, service_name 等）
+        """
         self.config = config or dict()
+        self.extra_config = extra_config or dict()
         self.validated_config = None
-        self.validate_config(config)
+        self.validate_config(self.config)
         self.unit = unit
         self.detectors = list(self.gen_expr())
         for detector in self.detectors:

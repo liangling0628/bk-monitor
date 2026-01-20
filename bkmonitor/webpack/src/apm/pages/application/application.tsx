@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -23,14 +23,14 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-import { Component, InjectReactive, Mixins, Prop, Ref } from 'vue-property-decorator';
+import { Component, InjectReactive, Prop, Provide, ProvideReactive, Ref } from 'vue-property-decorator';
+import { Component as tsc } from 'vue-tsx-support';
 
 import { listApplicationInfo, simpleServiceList } from 'monitor-api/modules/apm_meta';
 import { globalUrlFeatureMap } from 'monitor-common/utils/global-feature-map';
 import { random } from 'monitor-common/utils/utils';
 import { handleTransformToTimestamp } from 'monitor-pc/components/time-range/utils';
 import { destroyTimezone } from 'monitor-pc/i18n/dayjs';
-import authorityMixinCreate from 'monitor-pc/mixins/authorityMixin';
 import CommonAlert from 'monitor-pc/pages/monitor-k8s/components/common-alert';
 import CommonPage, { type SceneType } from 'monitor-pc/pages/monitor-k8s/components/common-page-new';
 
@@ -40,7 +40,9 @@ import ApmCommonNavBar, {
 } from '../../components/apm-common-nav-bar/apm-common-nav-bar';
 import ListMenu, { type IMenuItem } from '../../components/list-menu/list-menu';
 import applicationStore from '../../store/modules/application';
+import authorityStore from '../../store/modules/authority';
 import AppAddForm from '../home/app-add-form';
+import ServiceAddSide from '../service/service-add-side';
 import * as authorityMap from './../home/authority-map';
 
 import type { TimeRangeType } from 'monitor-pc/components/time-range/time-range';
@@ -51,12 +53,19 @@ import './application.scss';
 
 Component.registerHooks(['beforeRouteEnter', 'beforeRouteLeave']);
 @Component
-export default class Application extends Mixins(authorityMixinCreate(authorityMap)) {
+export default class Application extends tsc<undefined> {
   @Prop({ type: String, default: '' }) id: string;
 
   @Ref() commonPageRef: CommonPage;
   // 是否是只读模式
   @InjectReactive('readonly') readonly readonly: boolean;
+  @ProvideReactive('authority') authority: { [propsName: string]: boolean } = {};
+  @Provide('authorityMap') authorityMap = authorityMap;
+  // 显示申请权限的详情
+  @Provide('handleShowAuthorityDetail')
+  handleShowAuthorityDetail(actionId?: string) {
+    authorityStore.getAuthorityDetail(actionId || this.$route.meta.authority?.map?.MANAGE_AUTH);
+  }
   sceneType: SceneType = 'overview';
 
   backToOverviewKey = random(8);
@@ -112,6 +121,7 @@ export default class Application extends Mixins(authorityMixinCreate(authorityMa
     },
   ];
   dashboardId = '';
+  isShowServiceAdd = false;
   get pluginsList() {
     return applicationStore.pluginsListGetter || [];
   }
@@ -131,7 +141,7 @@ export default class Application extends Mixins(authorityMixinCreate(authorityMa
     return `${this.tabName}：${value}`;
   }
 
-  beforeRouteEnter(to, from, next) {
+  beforeRouteEnter(to, _from, next) {
     const { query } = to;
     const appName = query['filter-app_name'] as string;
 
@@ -179,7 +189,7 @@ export default class Application extends Mixins(authorityMixinCreate(authorityMa
       vm.getServiceList();
     });
   }
-  beforeRouteLeave(to, from, next) {
+  beforeRouteLeave(_to, _fromm, next) {
     destroyTimezone();
     next();
   }
@@ -283,18 +293,14 @@ export default class Application extends Mixins(authorityMixinCreate(authorityMa
 
     if (data) {
       this.appInfo = data;
+      this.authority = data.permission ?? {};
       this.viewHasNoData = this.appInfo.trace_data_status === 'no_data';
       this.isReady = true;
     }
   }
   /** 跳转接入服务页面 */
   handleAddService() {
-    this.$router.push({
-      name: 'service-add',
-      params: {
-        appName: this.appName,
-      },
-    });
+    this.isShowServiceAdd = true;
   }
   handleSceneTypeChange(type) {
     this.sceneType = type;
@@ -325,12 +331,7 @@ export default class Application extends Mixins(authorityMixinCreate(authorityMa
   }
 
   handleGotoServiceApply() {
-    this.$router.push({
-      name: 'service-add',
-      params: {
-        appName: this.appName,
-      },
-    });
+    this.isShowServiceAdd = true;
   }
 
   render() {
@@ -419,6 +420,16 @@ export default class Application extends Mixins(authorityMixinCreate(authorityMa
           v-model={this.showAddDialog}
           pluginId={this.pluginId}
         />
+        {this.appInfo?.app_name && (
+          <ServiceAddSide
+            applicationId={this.appInfo.application_id}
+            appName={this.appInfo.app_name.toString()}
+            isShow={this.isShowServiceAdd}
+            onSidesliderShow={v => {
+              this.isShowServiceAdd = v;
+            }}
+          />
+        )}
       </div>
     );
   }

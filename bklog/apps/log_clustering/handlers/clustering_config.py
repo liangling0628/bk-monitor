@@ -26,7 +26,7 @@ from django.core.cache import cache
 from django.utils.translation import gettext_lazy as _
 
 from apps.feature_toggle.handlers.toggle import FeatureToggleObject
-from apps.feature_toggle.plugins.constants import BKDATA_CLUSTERING_TOGGLE
+from apps.feature_toggle.plugins.constants import BKDATA_CLUSTERING_TOGGLE, MINI_CLUSTERING_CONFIG
 from apps.log_clustering.constants import (
     CLUSTERING_CONFIG_DEFAULT,
     CLUSTERING_CONFIG_EXCLUDE,
@@ -41,6 +41,7 @@ from apps.log_clustering.exceptions import (
     ClusteringDebugException,
     CollectorEsStorageNotExistException,
     CollectorStorageNotExistException,
+    RegexTemplateNotExistException,
 )
 from apps.log_clustering.handlers.dataflow.constants import OnlineTaskTrainingArgs
 from apps.log_clustering.handlers.dataflow.dataflow_handler import DataFlowHandler
@@ -111,10 +112,19 @@ class ClusteringConfigHandler:
             # 以下类型允许接入聚类: 1. 计算平台索引，2. 采集项索引
             raise ClusteringAccessNotSupportedException()
 
+        if log_index_set.scenario_id == Scenario.LOG:
+            use_mini_link = FeatureToggleObject.switch(
+                MINI_CLUSTERING_CONFIG, biz_id=space_uid_to_bk_biz_id(log_index_set.space_uid)
+            )
+            if use_mini_link:
+                from apps.log_clustering.handlers.mini_link import MiniLinkAccessHandler
+
+                return MiniLinkAccessHandler(index_set_id=index_set_id).access(params)
+
         collector_config_id = log_index_set.collector_config_id
         log_index_set_data, *_ = log_index_set.indexes
 
-        clustering_fields = params["clustering_fields"]
+        clustering_fields = params.get("clustering_fields", DEFAULT_CLUSTERING_FIELDS)
 
         conf = FeatureToggleObject.toggle(BKDATA_CLUSTERING_TOGGLE).feature_config
         default_conf = conf.get(CLUSTERING_CONFIG_DEFAULT)
@@ -162,10 +172,7 @@ class ClusteringConfigHandler:
                     "min_members", default_conf.get("min_members", OnlineTaskTrainingArgs.MIN_MEMBERS)
                 ),
                 max_dist_list=OnlineTaskTrainingArgs.MAX_DIST_LIST,
-                predefined_varibles=params.get(
-                    "predefined_varibles",
-                    default_conf.get("predefined_varibles", OnlineTaskTrainingArgs.PREDEFINED_VARIBLES),
-                ),
+                predefined_varibles=default_conf.get("predefined_varibles", OnlineTaskTrainingArgs.PREDEFINED_VARIBLES),
                 depth=OnlineTaskTrainingArgs.DEPTH,
                 delimeter=params.get("delimeter", default_conf.get("delimeter", OnlineTaskTrainingArgs.DELIMETER)),
                 max_log_length=params.get(
@@ -203,6 +210,18 @@ class ClusteringConfigHandler:
         from apps.log_clustering.handlers.pipline_service.aiops_service_online import (
             UpdateOnlineService,
         )
+
+        log_index_set = LogIndexSet.objects.get(index_set_id=self.index_set_id)
+
+        if log_index_set.scenario_id == Scenario.LOG:
+            # 小型化链路
+            use_mini_link = FeatureToggleObject.switch(
+                MINI_CLUSTERING_CONFIG, biz_id=space_uid_to_bk_biz_id(log_index_set.space_uid)
+            )
+            if use_mini_link:
+                from apps.log_clustering.handlers.mini_link import MiniLinkAccessHandler
+
+                return MiniLinkAccessHandler(index_set_id=self.index_set_id).access(params)
 
         params = {
             "index_set_id": self.index_set_id,
@@ -243,25 +262,20 @@ class ClusteringConfigHandler:
         return pipeline.id
 
     def synchronous_update(self, params):
-        pipeline_id = self.update(params)
-        # 类型:自定义
+        regex_template_id = params["regex_template_id"]
         if params["regex_rule_type"] == RegexRuleTypeEnum.CUSTOMIZE.value:
-            return [pipeline_id]
-        instance = RegexTemplate.objects.get(id=params["regex_template_id"])
-        # 模板无变化
-        if instance.predefined_varibles == params["predefined_varibles"]:
-            return [pipeline_id]
-        instance.predefined_varibles = params["predefined_varibles"]
-        instance.save()
-
-        pipeline_ids = [pipeline_id]
-        configs = ClusteringConfig.objects.exclude(index_set_id=self.index_set_id).filter(
-            regex_template_id=params["regex_template_id"], signature_enable=True
-        )
-        update_params = {"predefined_varibles": params["predefined_varibles"]}
-        for c in configs:
-            pipeline_ids.append(ClusteringConfigHandler(index_set_id=c.index_set_id).update(update_params))
-        return pipeline_ids
+            # 当 regex_rule_type 为 customize 时，regex_template_id 设为0，predefined_varibles 按前端的传的保存
+            params["regex_template_id"] = 0
+        else:
+            # 当 regex_rule_type 为 template 时，predefined_varibles从模板获取
+            instance = RegexTemplate.objects.filter(id=regex_template_id).first()
+            if not instance:
+                raise RegexTemplateNotExistException(
+                    RegexTemplateNotExistException.MESSAGE.format(regex_template_id=regex_template_id)
+                )
+            params["predefined_varibles"] = instance.predefined_varibles
+        pipeline_id = self.update(params)
+        return [pipeline_id]
 
     def get_access_status(self, task_id=None, include_update=False):
         """

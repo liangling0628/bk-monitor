@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/naming-convention */
+/** biome-ignore-all lint/suspicious/noExplicitAny: <explanation> */
 /*
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -57,10 +58,12 @@ import {
   type ITagsItem,
   EListItemType,
 } from '../../typings/trace';
-import { downFile, getSpanKindIcon } from '../../utils';
+import { downFile } from '../../utils';
+import { SPAN_KIND_MAPS as SPAN_KIND_MAPS_NEW } from '../trace-explore/components/trace-explore-table/constants';
 import { safeParseJsonValueForWhere } from '../trace-explore/utils';
-import DashboardPanel from './dashboard-panel/dashboard-panel';
 // import AiBluekingIcon from '@/components/ai-blueking-icon/ai-blueking-icon';
+import DashboardPanel from './dashboard-panel/dashboard-panel';
+import DecodeDialog from '@/components/decode-dialog/decode-dialog';
 
 import type { Span } from '../../components/trace-view/typings';
 import type { IFlameGraphDataItem } from 'monitor-ui/chart-plugins/hooks/profiling-graph/types';
@@ -167,17 +170,17 @@ export default defineComponent({
           // span 的 end_time 在当前一小时内
           if (Math.abs(diff2) <= 60 * 60 * 1000)
             return [
-              dayjs(spanStartTime.value).subtract(1, 'hour').format('YYYY-MM-DD HH:mm:ss'),
-              dayjs().format('YYYY-MM-DD HH:mm:ss'),
+              dayjs(spanStartTime.value).subtract(1, 'hour').format('YYYY-MM-DD HH:mm:ssZZ'),
+              dayjs().format('YYYY-MM-DD HH:mm:ssZZ'),
             ];
           return [
-            dayjs(spanStartTime.value).subtract(1, 'hour').format('YYYY-MM-DD HH:mm:ss'),
-            dayjs(spanEndTime.value).add(1, 'hour').format('YYYY-MM-DD HH:mm:ss'),
+            dayjs(spanStartTime.value).subtract(1, 'hour').format('YYYY-MM-DD HH:mm:ssZZ'),
+            dayjs(spanEndTime.value).add(1, 'hour').format('YYYY-MM-DD HH:mm:ssZZ'),
           ];
         }
         return [
-          dayjs(spanEndTime.value).subtract(2, 'hour').format('YYYY-MM-DD HH:mm:ss'),
-          dayjs(spanEndTime.value).format('YYYY-MM-DD HH:mm:ss'),
+          dayjs(spanEndTime.value).subtract(2, 'hour').format('YYYY-MM-DD HH:mm:ssZZ'),
+          dayjs(spanEndTime.value).format('YYYY-MM-DD HH:mm:ssZZ'),
         ];
       }
       return [];
@@ -202,7 +205,6 @@ export default defineComponent({
 
     const spanId = computed(() => props.spanDetails.span_id);
     provide('spanId', spanId);
-
     // 用作 Event 栏的首行打开。
     let isInvokeOnceFlag = true;
     /* 初始化 */
@@ -253,17 +255,6 @@ export default defineComponent({
       { immediate: true, deep: true }
     );
 
-    /** 获取 span 类型icon */
-    function getTypeIcon() {
-      const { source, kind, ebpf_kind: ebpfKind } = props.spanDetails;
-      if (source === 'ebpf') {
-        // ebpf 类型
-        return ebpfKind === 'ebpf_system' ? 'System1' : 'Network1';
-      }
-
-      return getSpanKindIcon(kind);
-    }
-
     /** 获取 span 类型描述 */
     function getTypeText() {
       const { kind, source, ebpf_kind: ebpfKind, is_virtual: isVirtual } = props.spanDetails;
@@ -286,6 +277,7 @@ export default defineComponent({
         process,
         source,
         stage_duration,
+        resource: spanResource,
       } = props.spanDetails as any | Span;
       // 服务、应用 名在日志 tab 里能用到
       serviceNameProvider.value = serviceName;
@@ -345,8 +337,8 @@ export default defineComponent({
           // { label: '日志', content: logs.length ? '有日志' :  '无日志' },
           {
             label: t('开始时间'),
-            content: dayjs.tz(startTime / 1e3).format('YYYY-MM-DD HH:mm:ss'),
-            title: dayjs.tz(startTime / 1e3).format('YYYY-MM-DD HH:mm:ss'),
+            content: dayjs.tz(startTime / 1e3).format('YYYY-MM-DD HH:mm:ssZZ'),
+            title: dayjs.tz(startTime / 1e3).format('YYYY-MM-DD HH:mm:ssZZ'),
           },
           {
             label: t('来源'),
@@ -356,8 +348,9 @@ export default defineComponent({
           {
             label: t('类型'),
             content: (
-              <span>
-                {!isVirtual && <i class={`icon-monitor icon-type icon-${getTypeIcon()}`} />}
+              <span class='content-detail-type'>
+                {/* {!isVirtual && <i class={`icon-monitor icon-type icon-${getTypeIcon()}`} />} */}
+                {!isVirtual && kind < 6 && (SPAN_KIND_MAPS_NEW[kind].prefixIcon as () => any)()}
                 <span>{getTypeText()}</span>
               </span>
             ),
@@ -395,7 +388,7 @@ export default defineComponent({
               attributes.map(
                 (item: { key: string; query_key: string; query_value: any; type: string; value: string }) => ({
                   label: item.key,
-                  content: item.value || '--',
+                  content: item.value === '' || item.value == null ? '--' : item.value,
                   type: item.type,
                   isFormat: false,
                   query_key: item.query_key,
@@ -477,24 +470,23 @@ export default defineComponent({
           },
         });
       }
+      const processTags = spanResource || process?.tags || [];
       /** process信息 */
-      if (process?.tags?.length) {
+      if (processTags.length) {
         info.list.push({
           type: EListItemType.tags,
           isExpan: true,
           title: 'Resource',
           [EListItemType.tags]: {
             list:
-              process?.tags.map(
-                (item: { key: any; query_key: string; query_value: any; type: string; value: any }) => ({
-                  label: item.key,
-                  content: item.value || '--',
-                  type: item.type,
-                  isFormat: false,
-                  query_key: item.query_key,
-                  query_value: item.query_value,
-                })
-              ) || [],
+              processTags.map((item: { key: any; query_key: string; query_value: any; type: string; value: any }) => ({
+                label: item.key,
+                content: item.value === '' || item.value == null ? '--' : item.value,
+                type: item.type,
+                isFormat: false,
+                query_key: item.query_key,
+                query_value: item.query_value,
+              })) || [],
           },
         });
       }
@@ -520,7 +512,7 @@ export default defineComponent({
                 },
                 content: item.attributes.map(attribute => ({
                   label: attribute.key,
-                  content: attribute.value || '--',
+                  content: attribute.value === '' || attribute.value == null ? '--' : attribute.value,
                   type: attribute.type,
                   isFormat: false,
                   query_key: attribute?.query_key || '',
@@ -548,28 +540,25 @@ export default defineComponent({
     }
 
     /** 递归检测符合json格式的字符串并转化 */
-    function handleFormatJson(obj: Record<string, any>) {
+    function handleFormatJson(obj: unknown) {
       try {
-        const newData: Record<string, any> = {};
-        Object.keys(obj).forEach(item => {
-          if (Object.prototype.toString.call(obj[item]) === '[object Object]') {
-            // 对象 遍历属性
-            newData[item] = handleFormatJson(obj[item]);
-          } else if (Object.prototype.toString.call(obj[item]) === '[object Array]') {
-            // 数组对象
-            newData[item] = obj[item].map((arrItme: Record<string, any>) => {
-              if (typeof arrItme === 'string') {
-                return arrItme;
+        const newData: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(JSON.parse(JSON.stringify(obj)))) {
+          if (Object.prototype.toString.call(value) === '[object Object]') {
+            newData[key] = handleFormatJson(value);
+          } else if (Object.prototype.toString.call(value) === '[object Array]') {
+            newData[key] = (value as unknown[]).map(item => {
+              if (!item || typeof item !== 'object') {
+                return item;
               }
-              return handleFormatJson(arrItme);
+              return handleFormatJson(item);
             });
-          } else if (typeof obj[item] === 'string' && isJson(obj[item])) {
-            // 符合json格式的字符串
-            newData[item] = handleFormatJson(JSON.parse(obj[item]));
+          } else if (typeof value === 'string' && isJson(value)) {
+            newData[key] = handleFormatJson(JSON.parse(value));
           } else {
-            newData[item] = obj[item];
+            newData[key] = value;
           }
-        });
+        }
         return newData;
       } catch {
         return obj;
@@ -689,7 +678,7 @@ export default defineComponent({
           break;
         }
         default: {
-          const hash = `#${window.__BK_WEWEB_DATA__?.baseroute || '/'}home/?app_name=${
+          const hash = `#${window.__BK_WEWEB_DATA__?.parentRoute || '/'}home/?app_name=${
             appName.value
           }&search_type=accurate&search_id=spanID&trace_id=${spanID}`;
           text = location.href.replace(location.hash, hash);
@@ -734,7 +723,6 @@ export default defineComponent({
       isExpan: boolean,
       title: string | undefined,
       content: any,
-      // biome-ignore lint/style/useDefaultParameterLast: <explanation>
       subTitle: any = '',
       expanChange: (v: boolean) => void
     ) => (
@@ -756,7 +744,6 @@ export default defineComponent({
       isExpan: boolean,
       title: string,
       content: any,
-      // biome-ignore lint/style/useDefaultParameterLast: <explanation>
       subTitle: any = '',
       expanChange: (v: boolean) => void
     ) => (
@@ -791,14 +778,18 @@ export default defineComponent({
       return false;
     };
 
-    const formatContent = (content?: string, isFormat?: boolean) => {
-      if (typeof content === 'number' || typeof content === 'undefined') return content;
-      if (!isJson(content)) return typeof content === 'string' ? content : JSON.stringify(content);
-      const data = JSON.parse(content || '');
+    const formatContent = (content?: number | string, isFormat?: boolean) => {
+      if ((typeof content === 'number' && content.toString().length < 10) || typeof content === 'undefined')
+        return content;
+      if (!isJson(content?.toString())) {
+        const str = typeof content === 'string' ? content : JSON.stringify(content);
+        return <DecodeDialog content={str} />;
+      }
+      const data = JSON.parse(content?.toString() || '');
       return isFormat ? <VueJsonPretty data={handleFormatJson(data)} /> : content;
     };
 
-    /** 导出原始数据josn */
+    /** 导出原始数据 json */
     const handleExportOriginData = () => {
       if (originalData.value) {
         const jsonString = JSON.stringify(originalData.value, null, 4);

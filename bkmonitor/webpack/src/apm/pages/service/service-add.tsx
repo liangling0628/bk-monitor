@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -23,13 +23,12 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-import { Component, Mixins, Prop } from 'vue-property-decorator';
+import { Component, Prop } from 'vue-property-decorator';
+import { Component as tsc } from 'vue-tsx-support';
 import * as tsx from 'vue-tsx-support';
 
 import CommonNavBar from 'monitor-pc/pages/monitor-k8s/components/common-nav-bar';
 
-import authorityMixinCreate from '../../mixins/authorityMixin';
-import * as authorityMap from './../home/authority-map';
 import ServiceApply from './data-guide';
 
 import type { INavItem } from 'monitor-pc/pages/monitor-k8s/typings';
@@ -43,7 +42,7 @@ interface IProps {
 
 Component.registerHooks(['beforeRouteEnter']);
 @Component
-class ServiceAdd extends Mixins(authorityMixinCreate(authorityMap)) {
+class ServiceAdd extends tsc<undefined> {
   @Prop({ type: String, default: '' }) pluginId: IProps['pluginId'];
   @Prop({ type: String, default: '' }) appName: IProps['appName'];
   guideUrl: string;
@@ -54,7 +53,7 @@ class ServiceAdd extends Mixins(authorityMixinCreate(authorityMap)) {
     return { application_name: this.$route.params?.appName || '' };
   }
 
-  beforeRouteEnter(from, to, next) {
+  beforeRouteEnter(_from, _too, next) {
     next((vm: ServiceAdd) => {
       vm.routeList = [
         {
@@ -73,12 +72,15 @@ class ServiceAdd extends Mixins(authorityMixinCreate(authorityMap)) {
         <CommonNavBar
           class='service-configuration-nav'
           slot='nav'
+          callbackRouterBack={() => {
+            this.$router.push({ path: '/apm/home', query: { app_name: this.$route.params?.appName || '' } });
+          }}
           navMode={'display'}
           needBack={true}
           routeList={this.routeList}
         >
           <div slot='custom'>
-            {this.$t('接入服务')}
+            {this.$t('Quick Start')}
             <div
               class='service-add-link'
               onClick={() => this.guideUrl && window.open(this.guideUrl)}

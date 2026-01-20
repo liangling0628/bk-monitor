@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2022 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -77,7 +77,7 @@ class RelationQ:
     def generate_q(
         cls,
         bk_biz_id,
-        source_info: Source,
+        source_info: Source | dict[str, Any],
         target_type: type[Source],
         start_time,
         end_time,
@@ -86,14 +86,21 @@ class RelationQ:
     ):
         """生成单个 relation 接口的查询条件"""
 
+        if isinstance(source_info, dict):
+            source_type: str = source_info["name"]
+            source_info_dict: dict[str, Any] = source_info
+        else:
+            source_type: str = source_info.name
+            source_info_dict: dict[str, Any] = source_info.to_source_info()
+
         return [
             {
                 "bk_biz_ids": [bk_biz_id],
                 "start_time": start_time,
                 "end_time": end_time,
                 "target_type": target_type.name,
-                "source_info": source_info.to_source_info(),
-                "source_type": source_info.name,
+                "source_info": source_info_dict,
+                "source_type": source_type,
                 "step": step or f"{end_time - start_time}s",
                 "path_resource": [i.name for i in path_resource] if path_resource else [],
             }

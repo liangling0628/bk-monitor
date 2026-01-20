@@ -3,7 +3,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -349,7 +349,7 @@ export default class App extends tsc<object> {
   handleToggle(v: boolean) {
     this.menuToggle = v;
   }
-  handleHeaderMenuClick(id: string, route: string) {
+  handleHeaderMenuClick(_id: string, route: string) {
     if (this.$route.name !== route) {
       this.$router.push({ name: route });
     }
@@ -511,6 +511,7 @@ export default class App extends tsc<object> {
     }
     window.requestIdleCallback(() => introduce.initIntroduce(this.$route));
     this.$store.commit('app/SET_ROUTE_CHANGE_LOADING', false);
+    aiWhaleStore.setEnableAiAssistantAction();
   }
   // 刷新页面
   async handleUpdateRoute(params: Record<string, any>, promise = () => false, path?: string) {
@@ -755,7 +756,7 @@ export default class App extends tsc<object> {
       >
         {process.env.NODE_ENV !== 'development' && (
           <notice-component
-            apiUrl='/notice/announcements/'
+            apiUrl={`${window.site_url}/notice/announcements/`.replace(/\/\//g, '/')}
             on-show-alert-change={this.showAlertChange}
           />
         )}

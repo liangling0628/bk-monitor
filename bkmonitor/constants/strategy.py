@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -305,6 +305,7 @@ GSE_PROCESS_EVENT_NAME = {
 MULTI_METRIC_DATA_SOURCES = {
     (DataSourceLabel.BK_MONITOR_COLLECTOR, DataTypeLabel.TIME_SERIES),
     (DataSourceLabel.CUSTOM, DataTypeLabel.TIME_SERIES),
+    (DataSourceLabel.BK_DATA, DataTypeLabel.TIME_SERIES),
 }
 
 HOST_SCENARIO = ["os", "host_process", "host_device"]
@@ -319,3 +320,7 @@ class StrategySyncType(CustomEnum):
     CREATE = "create"
     UPDATE = "update"
     DELETE = "delete"
+
+
+# 自定义优先级分组前缀
+CUSTOM_PRIORITY_GROUP_PREFIX = "PGK:"

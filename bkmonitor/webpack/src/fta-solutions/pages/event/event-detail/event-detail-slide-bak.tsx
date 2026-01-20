@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -168,7 +168,7 @@ export default class EventDetailSlider extends tsc<IEventDetailSlider, IEvent> {
           const { key } = item;
           item.value = data[key];
           if (key === 'create_time') {
-            item.value = dayjs.tz(data[key] * 1000).format('YYYY-MM-DD HH:mm:ss');
+            item.value = dayjs.tz(data[key] * 1000).format('YYYY-MM-DD HH:mm:ssZZ');
           }
           if (['action_plugin_type', 'signal', 'status', 'alert_level'].includes(key)) {
             item.display = item.valueDisplayMap[item.value as string];

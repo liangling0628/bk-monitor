@@ -106,6 +106,9 @@
         min-width="100"
         prop="created_by"
       >
+      <template #default="{ row }">
+        <bk-user-display-name :user-id="row.created_by"></bk-user-display-name>
+      </template>
       </bk-table-column>
       <bk-table-column
         :label="$t('任务状态')"
@@ -238,6 +241,7 @@
 
 <script>
   import EmptyStatus from '@/components/empty-status';
+  import useUtils from '@/hooks/use-utils';
 
   import DownloadUrl from './download-url';
   import ListBox from './list-box';
@@ -335,7 +339,8 @@
           }, []);
           // 获取displayName
           await this.queryDisplayName(allIpList);
-          this.taskList = res.data.list;
+          const { formatResponseListTimeZoneString } = useUtils();
+          this.taskList = formatResponseListTimeZoneString(res.data.list || [], {}, ['created_at', 'updated_at']);
           this.timeout = res.data.timeout || 10;
           this.pollingTaskStatus();
         } catch (e) {

@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -30,14 +30,14 @@ class EventTimeSeriesResource(Resource):
     RequestSerializer = serializers.EventTimeSeriesRequestSerializer
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> dict[str, Any]:
-        return event_resources.EventTimeSeriesResource().perform_request(validated_request_data)
+        return event_resources.EventTimeSeriesResource().request(validated_request_data)
 
 
 class EventLogsResource(Resource):
     RequestSerializer = serializers.EventLogsRequestSerializer
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> dict[str, Any]:
-        return event_resources.EventLogsResource().perform_request(validated_request_data)
+        return event_resources.EventLogsResource().request(validated_request_data)
 
 
 class EventViewConfigResource(Resource):
@@ -48,7 +48,7 @@ class EventViewConfigResource(Resource):
         for related_source in validated_request_data["related_sources"]:
             sources.append({"value": related_source, "alias": EventSource.from_value(related_source).label})
 
-        view_config: dict[str, Any] = event_resources.EventViewConfigResource().perform_request(validated_request_data)
+        view_config: dict[str, Any] = event_resources.EventViewConfigResource().request(validated_request_data)
         view_config["sources"] = sources
         return view_config
 
@@ -57,21 +57,21 @@ class EventTopKResource(Resource):
     RequestSerializer = serializers.EventTopKRequestSerializer
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> list[dict[str, Any]]:
-        return event_resources.EventTopKResource().perform_request(validated_request_data)
+        return event_resources.EventTopKResource().request(validated_request_data)
 
 
 class EventTotalResource(Resource):
     RequestSerializer = serializers.EventTotalRequestSerializer
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> dict[str, Any]:
-        return event_resources.EventTotalResource().perform_request(validated_request_data)
+        return event_resources.EventTotalResource().request(validated_request_data)
 
 
 class EventTagDetailResource(Resource):
     RequestSerializer = serializers.EventTagDetailRequestSerializer
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> dict[str, Any]:
-        return event_resources.EventTagDetailResource().perform_request(validated_request_data)
+        return event_resources.EventTagDetailResource().request(validated_request_data)
 
 
 class EventGetTagConfigResource(Resource):
@@ -123,17 +123,17 @@ class EventGetTagConfigResource(Resource):
         # 序列化器已做存在性判断，此处直接使用。
         app_event_config: dict[str, Any] = app.event_config
 
-        servie_tag_config: dict[str, Any] = {}
-        servie_config: ApmMetaConfig | None = ApmMetaConfig.get_service_config_value(
+        service_tag_config: dict[str, Any] = {}
+        service_config: ApmMetaConfig | None = ApmMetaConfig.get_service_config_value(
             bk_biz_id, app_name, service_name, self.process_key(validated_request_data["key"])
         )
-        if servie_config:
-            servie_tag_config = servie_config.config_value
+        if service_config:
+            service_tag_config = service_config.config_value
 
         return {
             "columns": self.generate_field_columns({"type": {"enum": EventType}, "source": {"enum": EventSource}}),
             # 配置优先级：默认 > App > Service
-            "config": {**self.DEFAULT_TAG_CONFIG, **app_event_config, **servie_tag_config},
+            "config": {**self.DEFAULT_TAG_CONFIG, **app_event_config, **service_tag_config},
         }
 
 
@@ -155,11 +155,11 @@ class EventStatisticsGraphResource(Resource):
     RequestSerializer = serializers.EventStatisticsGraphRequestSerializer
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> dict[str, Any]:
-        return event_resources.EventStatisticsGraphResource().perform_request(validated_request_data)
+        return event_resources.EventStatisticsGraphResource().request(validated_request_data)
 
 
 class EventStatisticsInfoResource(Resource):
     RequestSerializer = serializers.EventStatisticsInfoRequestSerializer
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> dict[str, Any]:
-        return event_resources.EventStatisticsInfoResource().perform_request(validated_request_data)
+        return event_resources.EventStatisticsInfoResource().request(validated_request_data)

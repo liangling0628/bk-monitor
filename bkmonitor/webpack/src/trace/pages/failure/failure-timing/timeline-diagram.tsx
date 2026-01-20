@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -229,8 +229,9 @@ export default defineComponent({
       dialog.value.quickShield.details = [
         {
           severity: v.severity,
-          dimension: v.dimension_message,
+          dimension: v.dimensions,
           trigger: v.description,
+          alertId: v.id,
           strategy: {
             id: v?.strategy_id as unknown as string,
             name: v?.strategy_name,
@@ -249,11 +250,11 @@ export default defineComponent({
       return props.alertAggregateData;
     });
     const tickWidth = ref(0);
-    const formatTime = (time: any, str = 'YYYY-MM-DD HH:mm:ss') => {
+    const formatTime = (time: any, str = 'YYYY-MM-DD HH:mm:ssZZ') => {
       return dayjs(time).format(str);
     };
     const setEndTime = time => {
-      return time || Math.floor(new Date().getTime() / 1000);
+      return time || Math.floor(Date.now() / 1000);
     };
     /** 处理告警树数据 */
     const handleData = (scopedData, parent = { isOpen: false }) => {
@@ -312,7 +313,7 @@ export default defineComponent({
     const getDateAndHour = (time: number) => {
       const date = time ? formatTime(time * 1000) : formatTime(new Date());
       const startDay = (date || '').split(' ')[0];
-      if (tickArr.value.findIndex(ele => ele === startDay) === -1) {
+      if (tickArr.value.indexOf(startDay) === -1) {
         tickArr.value.push(startDay);
       }
       const startDate = new Date(date);
@@ -829,7 +830,7 @@ export default defineComponent({
     };
 
     /** 等比例缩放时间 */
-    const zoomChange = (val: number, percent) => {
+    const zoomChange = (_val: number, percent) => {
       mainWidth.value = clientWidth.value + percent * clientWidth.value * 2;
       percentage.value = percent;
       mainLeft.value = (clientWidth.value - mainWidth.value) / 2;
@@ -847,7 +848,7 @@ export default defineComponent({
     const handleFeedbackChange = (val: boolean) => {
       dialog.value.rootCauseConfirm.show = val;
     };
-    const actionClickFn = (e: MouseEvent, fn) => {
+    const actionClickFn = (_e: MouseEvent, fn) => {
       showToolMenu.value = false;
       fn?.(currentSpan.value);
     };

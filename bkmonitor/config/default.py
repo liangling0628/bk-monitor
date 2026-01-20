@@ -1,7 +1,7 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community
 Edition) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 http://opensource.org/licenses/MIT
@@ -24,7 +24,6 @@ from blueapps.conf.default_settings import *  # noqa
 from blueapps.conf.log import get_logging_config_dict
 from django.utils.translation import gettext_lazy as _
 
-from ai_agent.conf.default import *  # noqa
 from bkmonitor.utils.i18n import TranslateDict
 
 from . import get_env_or_raise
@@ -38,6 +37,7 @@ from .tools.environment import (
     ROLE,
 )
 from .tools.mysql import (
+    get_backend_alert_mysql_settings,
     get_backend_mysql_settings,
     get_grafana_mysql_settings,
     get_saas_mysql_settings,
@@ -173,6 +173,8 @@ LANGUAGE_COOKIE_NAME = "blueking_language"
 USE_TZ = True
 TIME_ZONE = "Asia/Shanghai"
 TIMEZONE_SESSION_KEY = "blueking_timezone"
+# Django 4.0+ 默认使用 zoneinfo，但项目仍使用 pytz，需要设置此选项以继续使用 pytz
+USE_DEPRECATED_PYTZ = True
 
 # 平台地址配置
 BK_PAAS_HOST = BK_URL = os.getenv("BK_PAAS_HOST") or os.getenv("BK_PAAS_PUBLIC_URL") or os.getenv("BK_PAAS2_URL") or ""
@@ -256,13 +258,21 @@ USE_DISK_FILTER = True
 # method字段由SaaS在图形展示、策略配置的sql中作为where字段条件使用，
 # 无 method 字段则为后台磁盘事件型告警进行过滤使用
 DISK_FILTER_CONDITION_LIST_V1 = [
-    {"method": "not like", "sql_statement": "%dev\\/loop%", "file_system_regex": r"/?dev/loop.*"},
-    {"method": "not like", "sql_statement": "%dev\\/sr%", "file_system_regex": r"/?dev/sr.*"},
+    {
+        "method": "not like",
+        "sql_statement": "%dev\\/loop%",
+        "file_system_regex": r"/?dev/loop.*",
+    },
+    {
+        "method": "not like",
+        "sql_statement": "%dev\\/sr%",
+        "file_system_regex": r"/?dev/sr.*",
+    },
     {"method": "not like", "sql_statement": "%.iso", "file_system_regex": r".*?\.iso$"},
 ]
 
 # SQL最大查询条数
-SQL_MAX_LIMIT = 200000
+SQL_MAX_LIMIT = 500000
 
 FILE_SYSTEM_TYPE_RT_ID = "system.disk"
 FILE_SYSTEM_TYPE_FIELD_NAME = "device_type"
@@ -326,14 +336,15 @@ ACTIVE_VIEWS = {
         "datalink": "monitor_web.datalink.views",
         "new_report": "monitor_web.new_report.views",
         "incident": "monitor_web.incident.views",
-        "ai_assistant": "monitor_web.ai_assistant.views",
         "k8s": "monitor_web.k8s.views",
+        "query_template": "monitor_web.query_template.views",
     },
     "weixin": {"mobile_event": "weixin.event.views"},
     "fta_web": {
         "action": "fta_web.action.views",
         "event_plugin": "fta_web.event_plugin.views",
         "alert": "fta_web.alert.views",
+        "alert_v2": "fta_web.alert_v2.views",
         "assign": "fta_web.assign.views",
         "home": "fta_web.home.views",
     },
@@ -349,6 +360,7 @@ ACTIVE_VIEWS = {
         "apm_event": "apm_web.event.views",
         "apm_profile": "apm_web.profile.views",
         "apm_container": "apm_web.container.views",
+        "apm_strategy": "apm_web.strategy.views",
     },
 }
 
@@ -481,7 +493,12 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 CUSTOM_REPORT_DEFAULT_PROXY_IP = []
 CUSTOM_REPORT_DEFAULT_PROXY_DOMAIN = []
 CUSTOM_REPORT_DEFAULT_DEPLOY_CLUSTER = []  # 当接收端为 k8s 集群部署时，需要配置这个，支持部署在多个集群内
+CUSTOM_REPORT_K8S_SECRETS_CONFIG = {}  # 自定义上报 K8S 集群中 Secrets 分配逻辑默认配置
+
 IS_AUTO_DEPLOY_CUSTOM_REPORT_SERVER = True
+
+# 集群内上报固定域名
+CUSTOM_REPORT_DEFAULT_K8S_CLUSTER_SERVICE = "bkm-collector.bkmonitor-operator"
 
 # 监控内置可观测数据上报Redis Key TODO：联调时赋予默认值，后续更改
 BUILTIN_DATA_RT_REDIS_KEY = os.getenv(
@@ -494,14 +511,19 @@ ECOSYSTEM_CODE_ROOT_URL = ""
 
 # APM config
 APM_ACCESS_URL = ""
+APM_DATA_PUSH_URL = ""
 APM_BEST_PRACTICE_URL = ""
 APM_METRIC_DESCRIPTION_URL = ""
+APM_FUNC_INTRODUCTION_URL = ""
 
 APM_APDEX_T_VALUE = 800
 APM_SAMPLING_PERCENTAGE = 100
 APM_APP_QPS = 500
 
 APM_CUSTOM_EVENT_REPORT_CONFIG = {}
+
+# 新建应用时，指定存储集群的路由规则
+APM_APP_STORAGE_ROUTES = []
 
 # 新建应用的刷新频率，每 2 分钟执行一次拓扑发现
 APM_APPLICATION_QUICK_REFRESH_INTERVAL = 2
@@ -519,6 +541,9 @@ APM_IS_DISTRIBUTE_PLATFORM_API_NAME_CONFIG = (
 APM_IS_ADD_PLATFORM_METRIC_DIMENSION_CONFIG = (
     os.getenv("BKAPP_APM_IS_ADD_PLATFORM_METRIC_DIMENSION_CONFIG", "false").lower() == "true"
 )
+
+# 是否下发平台级别字段标准化配置
+APM_FIELD_NORMALIZER_ENABLED = True
 
 APM_APP_DEFAULT_ES_STORAGE_CLUSTER = -1
 APM_APP_DEFAULT_ES_RETENTION = 7
@@ -539,13 +564,15 @@ APM_APP_BKDATA_VIRTUAL_METRIC_STORAGE_EXPIRE = 30
 APM_APP_BKDATA_VIRTUAL_METRIC_STORAGE = ""
 APM_APP_PRE_CALCULATE_STORAGE_SLICE_SIZE = 100
 APM_APP_PRE_CALCULATE_STORAGE_RETENTION = 15
-APM_APP_PRE_CALCULATE_STORAGE_SHARDS = 3
+APM_APP_PRE_CALCULATE_STORAGE_SHARDS = 1
 APM_TRACE_DIAGRAM_CONFIG = {}
 APM_DORIS_STORAGE_CONFIG = {}
 # {2:["foo", "bar"], 3:["baz"]}
 APM_PROFILING_ENABLED_APPS = {}
 # dis/enable profiling for all apps
 APM_PROFILING_ENABLED = False
+# APM metrics维度补充功能应用白名单 {2:["app1", "app2"], 3:["app3"]}
+APM_RESOURCE_FILTER_METRICS_ENABLED_APPS = {}
 APM_EBPF_ENABLED = False
 APM_TRPC_ENABLED = False
 # {2:["app1", "app2"], 3:["app_name"]}
@@ -553,7 +580,7 @@ APM_TRPC_APPS = {}
 APM_BMW_DEPLOY_BIZ_ID = 0
 # 在列表中业务，才会创建虚拟指标， [2]
 APM_CREATE_VIRTUAL_METRIC_ENABLED_BK_BIZ_ID = []
-APM_BMW_TASK_QUEUES = []
+APM_BMW_TASK_QUEUES = ["apm-01"]
 # APM V4 链路 metric data status 配置
 APM_V4_METRIC_DATA_STATUS_CONFIG = {}
 # APM 自定义指标 SDK 映射配置
@@ -633,7 +660,12 @@ BCS_STORAGE_PAGE_SIZE = os.getenv("BKAPP_BCS_STORAGE_PAGE_SIZE", 5000)
 BCS_SYNC_SYNC_CONCURRENCY = os.getenv("BKAPP_BCS_SYNC_SYNC_CONCURRENCY", 20)
 
 # 所有bcs指标都将基于该信息进行label复制
-BCS_METRICS_LABEL_PREFIX = {"*": "kubernetes", "node_": "kubernetes", "container_": "kubernetes", "kube_": "kubernetes"}
+BCS_METRICS_LABEL_PREFIX = {
+    "*": "kubernetes",
+    "node_": "kubernetes",
+    "container_": "kubernetes",
+    "kube_": "kubernetes",
+}
 
 # 容器化共存适配，添加API访问子路径
 API_SUB_PATH = os.getenv("BKAPP_API_SUB_PATH", os.getenv("API_SUB_PATH", ""))
@@ -680,12 +712,6 @@ GRAFANA_ADMIN_USERNAME = os.getenv("BKAPP_GRAFANA_ADMIN_USERNAME", "admin")
 # 降噪时间窗口
 NOISE_REDUCE_TIMEDELTA = 5
 
-# 故障自愈是否已完成迁移
-IS_FTA_MIGRATED = False
-
-# 已经迁移完成的业务
-FTA_MIGRATE_BIZS = []
-
 # 指标上报默认任务标志
 DEFAULT_METRIC_PUSH_JOB = "SLI"
 # 运营指标上报任务标志
@@ -716,7 +742,6 @@ DOUBLE_CHECK_SUM_STRATEGY_IDS = os.environ.get("DOUBLE_CHECK_SUM_STRATEGY_IDS", 
 # BCS 集群配置来源标签
 BCS_CLUSTER_BK_ENV_LABEL = os.environ.get("BCS_CLUSTER_BK_ENV_LABEL", "")
 
-ALARM_DISABLE_STRATEGY_RULES = []
 OPTZ_FAKE_EVENT_BIZ_IDS = []
 
 # access模块数据拉取延迟时间
@@ -725,6 +750,11 @@ ACCESS_DATA_TIME_DELAY = 10
 # access模块延迟上报
 ACCESS_LATENCY_INTERVAL_FACTOR = 1
 ACCESS_LATENCY_THRESHOLD_CONSTANT = 180
+
+# access-detect 合并处理开关
+# 灰度策略 ID 列表（可选）
+# 仅对列表中的策略启用合并处理，为空时对所有静态阈值策略生效
+ACCESS_DETECT_MERGE_STRATEGY_IDS = []
 
 # kafka是否自动提交配置
 KAFKA_AUTO_COMMIT = True
@@ -738,6 +768,7 @@ if os.getenv("ENABLE_TABLE_VISIT_COUNT", "false").lower() == "true":
     DATABASE_ROUTERS.append("bkmonitor.db_routers.TableVisitCountRouter")
 
 # 数据库配置
+# 后台DB配置
 (
     BACKEND_MYSQL_NAME,
     BACKEND_MYSQL_HOST,
@@ -745,7 +776,22 @@ if os.getenv("ENABLE_TABLE_VISIT_COUNT", "false").lower() == "true":
     BACKEND_MYSQL_USER,
     BACKEND_MYSQL_PASSWORD,
 ) = get_backend_mysql_settings()
-SAAS_MYSQL_NAME, SAAS_MYSQL_HOST, SAAS_MYSQL_PORT, SAAS_MYSQL_USER, SAAS_MYSQL_PASSWORD = get_saas_mysql_settings()
+# SaaS DB配置
+(
+    SAAS_MYSQL_NAME,
+    SAAS_MYSQL_HOST,
+    SAAS_MYSQL_PORT,
+    SAAS_MYSQL_USER,
+    SAAS_MYSQL_PASSWORD,
+) = get_saas_mysql_settings()
+# 后台DB扩展配置
+(
+    BACKEND_ALERT_MYSQL_NAME,
+    BACKEND_ALERT_MYSQL_HOST,
+    BACKEND_ALERT_MYSQL_PORT,
+    BACKEND_ALERT_MYSQL_USER,
+    BACKEND_ALERT_MYSQL_PASSWORD,
+) = get_backend_alert_mysql_settings()
 
 # 判断前后台DB配置是否相同，如果不同则需要使用路由
 if SAAS_MYSQL_NAME != BACKEND_MYSQL_NAME or SAAS_MYSQL_HOST != BACKEND_MYSQL_HOST:
@@ -756,6 +802,7 @@ else:
     BACKEND_DATABASE_NAME = "default"
     MIGRATE_MONITOR_API = False
 
+# Grafana DB配置
 (
     GRAFANA_MYSQL_NAME,
     GRAFANA_MYSQL_HOST,
@@ -786,7 +833,7 @@ DATABASES = {
             "MAX_OVERFLOW": -1,
             "RECYCLE": 600,
         },
-        "OPTIONS": {"charset": "utf8mb4"},
+        "OPTIONS": {"charset": "utf8mb4", "read_timeout": 300},
     },
     "monitor_api": {
         "ENGINE": "django.db.backends.mysql",
@@ -795,7 +842,7 @@ DATABASES = {
         "PASSWORD": BACKEND_MYSQL_PASSWORD,
         "HOST": BACKEND_MYSQL_HOST,
         "PORT": BACKEND_MYSQL_PORT,
-        "OPTIONS": {"charset": "utf8mb4"},
+        "OPTIONS": {"charset": "utf8mb4", "read_timeout": 300},
     },
     "bk_dataview": {
         "ENGINE": "django.db.backends.mysql",
@@ -804,9 +851,23 @@ DATABASES = {
         "PASSWORD": GRAFANA_MYSQL_PASSWORD or BACKEND_MYSQL_PASSWORD,
         "HOST": GRAFANA_MYSQL_HOST or BACKEND_MYSQL_HOST,
         "PORT": GRAFANA_MYSQL_PORT or BACKEND_MYSQL_PORT,
-        "OPTIONS": {"charset": "utf8mb4"},
+        "OPTIONS": {"charset": "utf8mb4", "read_timeout": 300},
     },
 }
+
+if BACKEND_ALERT_MYSQL_HOST == BACKEND_MYSQL_HOST:
+    DATABASES["backend_alert"] = {}
+    DATABASES["backend_alert"].update(DATABASES["monitor_api"])
+else:
+    DATABASES["backend_alert"] = {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": BACKEND_ALERT_MYSQL_NAME,
+        "USER": BACKEND_ALERT_MYSQL_USER,
+        "PASSWORD": BACKEND_ALERT_MYSQL_PASSWORD,
+        "HOST": BACKEND_ALERT_MYSQL_HOST,
+        "PORT": BACKEND_ALERT_MYSQL_PORT,
+        "OPTIONS": {"charset": "utf8mb4", "read_timeout": 300},
+    }
 
 # ES7 config
 ES7_HOST, ES7_REST_PORT, ES7_TRANSPORT_PORT, ES7_USER, ES7_PASSWORD = get_es7_settings(fta=True)
@@ -867,7 +928,10 @@ LOG_LEVEL_MAP = {
 }
 
 warnings.filterwarnings(
-    "ignore", r"DateTimeField .* received a naive datetime", RuntimeWarning, r"django\.db\.models\.fields"
+    "ignore",
+    r"DateTimeField .* received a naive datetime",
+    RuntimeWarning,
+    r"django\.db\.models\.fields",
 )
 
 #
@@ -1018,7 +1082,7 @@ LINUX_UPTIME_CHECK_COLLECTOR_CONF_NAME = "uptimecheckbeat.conf"
 LINUX_GSE_AGENT_IPC_PATH = "/var/run/ipc.state.report"
 
 # 采集配置升级，使用订阅更新模式的业务列表
-COLLECTING_UPGRADE_WITH_UPDATE_BIZ = []
+COLLECTING_UPGRADE_WITH_UPDATE_BIZ = [0]
 
 # aix系统配置
 AIX_SCRIPT_EXT = "sh"
@@ -1087,7 +1151,10 @@ HEADER_FOOTER_CONFIG = {
                     "text": "技术支持",
                     "link": "https://wpa1.qq.com/KziXGWJs?_type=wpa&qidian=true",
                 },
-                {"text": "社区论坛", "link": "https://bk.tencent.com/s-mart/community/"},
+                {
+                    "text": "社区论坛",
+                    "link": "https://bk.tencent.com/s-mart/community/",
+                },
                 {"text": "产品官网", "link": "https://bk.tencent.com/index/"},
             ],
             "en": [
@@ -1127,6 +1194,8 @@ CMDB_API_BASE_URL = os.getenv("BKAPP_CMDB_API_BASE_URL", "")
 CMSI_API_BASE_URL = os.getenv("BKAPP_CMSI_API_BASE_URL", "")
 JOB_USE_APIGW = os.getenv("BKAPP_JOB_USE_APIGW", "false").lower() == "true"
 JOB_API_BASE_URL = os.getenv("BKAPP_JOB_API_BASE_URL", "")
+# bcs api base url
+BCS_APIGW_BASE_URL = os.getenv("BKAPP_BCS_APIGW_BASE_URL", "")
 # monitor api base url:
 MONITOR_API_BASE_URL = os.getenv("BKAPP_MONITOR_API_BASE_URL", "")
 NEW_MONITOR_API_BASE_URL = os.getenv("BKAPP_NEW_MONITOR_API_BASE_URL", "")
@@ -1139,6 +1208,7 @@ BKLOGSEARCH_API_BASE_URL = os.getenv("BKAPP_BKLOGSEARCH_API_BASE_URL", "")
 # 通过 apigw 访问日志平台 api 的地址
 BKLOGSEARCH_API_GW_BASE_URL = os.getenv("BKAPP_BKLOGSEARCH_API_GW_BASE_URL", "")
 BKNODEMAN_API_BASE_URL = os.getenv("BKAPP_BKNODEMAN_API_BASE_URL", "")
+BKSOPS_API_BASE_URL = os.getenv("BKAPP_BKSOPS_API_BASE_URL", "")
 BKDOCS_API_BASE_URL = os.getenv("BKAPP_BKDOCS_API_BASE_URL", "")
 DEVOPS_API_BASE_URL = os.getenv("BKAPP_DEVOPS_API_BASE_URL", "")
 # 用户信息
@@ -1173,8 +1243,17 @@ JOB_URL = os.getenv("BK_JOB_SITE_URL") or os.getenv("BK_JOB_HOST", JOB_URL)
 BK_CC_URL = BK_PAAS_HOST.replace("paas", "cmdb")
 BK_CC_URL = os.getenv("BK_CC_SITE_URL") or os.getenv("BK_CC_HOST", BK_CC_URL)
 
+# 用户管理站点 URL（用于个人中心跳转等）
+BK_USER_SITE_URL = os.getenv("BK_USER_SITE_URL", "")
+
+# 新版ITSM
+BK_ITSM_V4_HOST = os.getenv("BK_ITSM_V4_HOST", "")
+BK_ITSM_V4_API_URL = os.getenv("BK_ITSM_V4_API_URL", f"{BK_COMPONENT_API_URL}/api/cw-aitsm/prod")
+BK_ITSM_V4_SYSTEM_ID = os.getenv("BK_ITSM_V4_SYSTEM_ID", APP_CODE)
+
 BK_ITSM_HOST = os.getenv("BK_ITSM_HOST", f"{BK_PAAS_HOST}/o/bk_itsm/")
 BK_SOPS_HOST = os.getenv("BK_SOPS_URL", f"{BK_PAAS_HOST}/o/bk_sops/")
+BK_INCIDENT_SAAS_HOST = os.getenv("BK_INCIDENT_SAAS_HOST", f"{BK_PAAS_HOST}/o/bk_incident/")
 # todo  新增BK_CI_URL 需要在bin/environ.sh 模板中定义
 BK_BCS_HOST = os.getenv("BK_BCS_URL", f"{BK_PAAS_HOST}/o/bk_bcs_app/")
 BK_CI_URL = os.getenv("BK_CI_URL") or os.getenv("BKAPP_BK_CI_URL", "")
@@ -1184,9 +1263,15 @@ BKCI_APP_SECRET = os.getenv("BKCI_APP_SECRET")
 BK_MONITOR_HOST = os.getenv("BK_MONITOR_HOST", "{}/o/bk_monitorv3/".format(BK_PAAS_HOST.rstrip("/")))
 ACTION_DETAIL_URL = f"{BK_MONITOR_HOST}?bizId={{bk_biz_id}}/#/event-center/action-detail/{{action_id}}"
 EVENT_CENTER_URL = urljoin(
-    BK_MONITOR_HOST, "?bizId={bk_biz_id}#/event-center?queryString=action_id%20%3A%20{collect_id}"
+    BK_MONITOR_HOST,
+    "?bizId={bk_biz_id}#/event-center?queryString=action_id%20%3A%20{collect_id}",
 )
 MAIL_REPORT_URL = urljoin(BK_MONITOR_HOST, "#/email-subscriptions")
+
+# 故障分析
+BK_INCIDENT_APIGW_URL = os.getenv("BKAPP_INCIDENT_APIGW_URL", "")
+# 是否开启故障分析功能，默认不开启
+ENABLE_BK_INCIDENT_PLUGIN = os.getenv("ENABLE_BK_INCIDENT_PLUGIN", "false").lower() == "true"
 
 # IAM
 BK_IAM_SYSTEM_ID = "bk_monitorv3"
@@ -1356,6 +1441,12 @@ ALARM_BACKEND_CLUSTER_NAME = os.getenv("BK_MONITOR_ALARM_BACKEND_CLUSTER_NAME", 
 ALARM_BACKEND_CLUSTER_CODE = os.getenv("BK_MONITOR_ALARM_BACKEND_CLUSTER_CODE", 0)
 ALARM_BACKEND_CLUSTER_ROUTING_RULES = []
 
+# 是否开启Consul Lite 模式，精简非必要字段
+ENABLE_CONSUL_LITE_MODE = False
+
+# AI小鲸灰度业务名单
+AI_BIZ_LIST = []
+
 # AIDEV配置
 AIDEV_AGENT_APP_CODE = os.getenv("BK_AIDEV_AGENT_APP_CODE")
 AIDEV_AGENT_APP_SECRET = os.getenv("BK_AIDEV_AGENT_APP_SECRET")
@@ -1365,8 +1456,19 @@ AIDEV_AGENT_LLM_GW_ENDPOINT = os.getenv("BK_AIDEV_AGENT_LLM_GW_ENDPOINT")
 AIDEV_AGENT_LLM_DEFAULT_TEMPERATURE = 0.3  # 默认温度
 AIDEV_COMMAND_AGENT_MAPPING = {}  # 快捷指令<->Agent映射
 AIDEV_AGENT_ENABLE_LANGFUSE = False  # 是否开启langfuse上报
+AIDEV_AGENT_MCP_REQUEST_HEADER_VALUE = os.getenv("BK_AIDEV_AGENT_MCP_REQUEST_HEADER_VALUE", "bkm-mcp-client")
 # AIAgent内容生成关键字
 AIDEV_AGENT_AI_GENERATING_KEYWORD = "生成中"
+# 是否开启AI RENAME
+ENABLE_AI_RENAME = False
+# MCP权限校验豁免的工具名称白名单
+MCP_PERMISSION_EXEMPT_TOOLS = ["list_spaces"]
+
+# 场景-Agent映射配置,用于实现Agent路由
+AIDEV_SCENE_AGENT_CODE_MAPPING = {}
+
+# 默认MCP APP_CODE
+AIDEV_AGENT_MCP_REQUEST_AGENT_CODE = "bkmonitor-mcp"
 
 # 采集订阅巡检配置，默认开启
 IS_SUBSCRIPTION_ENABLED = True
@@ -1389,17 +1491,14 @@ ENVIRONMENT_CODE = os.getenv("BKAPP_ENVIRONMENT_CODE") or "bk_monitor"
 # `dbm_` 开头的结果表，仅特定的业务可以查看，并且不需要添加过滤条件
 ACCESS_DBM_RT_SPACE_UID = []
 
-# BCS APIGW 地址
-BCS_APIGW_BASE_URL = os.getenv("BKAPP_BCS_APIGW_BASE_URL", "")
-
 # 获取指标的间隔时间，默认为 2 hour
 FETCH_TIME_SERIES_METRIC_INTERVAL_SECONDS = 7200
 
 # 自定义指标过期时间
 TIME_SERIES_METRIC_EXPIRED_SECONDS = 30 * 24 * 3600
 
-# 是否启用 influxdb 写入，默认 True
-ENABLE_INFLUXDB_STORAGE = True
+# 是否使用 is_active 字段来过滤时序指标（开启时使用 is_active=True，关闭时使用过期时间过滤）
+ENABLE_TS_METRIC_FILTER_BY_IS_ACTIVE = False
 
 # bk-notice-sdk requirment
 if not os.getenv("BK_API_URL_TMPL"):
@@ -1447,17 +1546,22 @@ BK_MONITOR_API_HOST = os.getenv("BKAPP_BK_MONITOR_API_HOST", "http://monitor.bkm
 # 网关管理员
 APIGW_MANAGERS = f"[{','.join(os.getenv('BKAPP_APIGW_MANAGERS', 'admin').split(','))}]"
 
-# 是否启用新版的数据链路
-# 是否启用通过计算平台获取GSE data_id 资源，默认不启用
-ENABLE_V2_BKDATA_GSE_RESOURCE = False
-# 是否启用新版的 vm 链路，默认不启用
-ENABLE_V2_VM_DATA_LINK = False
-ENABLE_V2_VM_DATA_LINK_CLUSTER_ID_LIST = []
-# 插件数据是否启用接入V4链路
-ENABLE_PLUGIN_ACCESS_V4_DATA_LINK = os.getenv("ENABLE_PLUGIN_ACCESS_V4_DATA_LINK", "false").lower() == "true"
+# 是否启用新版的数据链路，默认开启
+ENABLE_V2_VM_DATA_LINK = os.getenv("ENABLE_V2_VM_DATA_LINK", "true").lower() == "true"
+# 插件数据是否启用接入V4链路，默认开启
+ENABLE_PLUGIN_ACCESS_V4_DATA_LINK = os.getenv("ENABLE_PLUGIN_ACCESS_V4_DATA_LINK", "true").lower() == "true"
+# 是否启用influxdb，默认关闭
+ENABLE_INFLUXDB_STORAGE = os.getenv("BKAPP_ENABLE_INFLUXDB_STORAGE", "false").lower() == "true"
+# 是否开启空间内置数据链路初始化
+ENABLE_SPACE_BUILTIN_DATA_LINK = os.getenv("ENABLE_SPACE_BUILTIN_DATA_LINK", "false").lower() == "true"
+# 是否开启dataid注册时能够指定集群名称，默认关闭
+ENABLE_DATAID_REGISTER_WITH_CLUSTER_NAME = (
+    os.getenv("ENABLE_DATAID_REGISTER_WITH_CLUSTER_NAME", "false").lower() == "true"
+)
 
-# 是否启用计算平台Kafka采样接口
-ENABLE_BKDATA_KAFKA_TAIL_API = False
+# 创建 vm 链路资源所属的命名空间
+DEFAULT_VM_DATA_LINK_NAMESPACE = "bkmonitor"
+
 # Kafka采样接口重试次数
 KAFKA_TAIL_API_RETRY_TIMES = 3
 # Kafka Consumer超时时间(秒)
@@ -1474,7 +1578,7 @@ BKBASE_REDIS_WATCH_LOCK_RENEWAL_INTERVAL_SECONDS = 15
 # 计算平台Redis Watch锁过期时间(秒)
 BKBASE_REDIS_WATCH_LOCK_EXPIRE_SECONDS = 60
 # 单个任务最长执行时间(秒),默认一天
-BKBASE_REDIS_TASK_MAX_EXECUTION_TIME_SECONDS = 86400
+BKBASE_REDIS_TASK_MAX_EXECUTION_TIME_SECONDS = 600
 # 重连等待间隔时间(秒)
 BKBASE_REDIS_RECONNECT_INTERVAL_SECONDS = 2
 # Redis默认锁名称
@@ -1513,13 +1617,7 @@ SYNC_BKBASE_META_BIZ_BATCH_SIZE = 10
 # 同步计算平台RT元信息时支持的存储类型
 SYNC_BKBASE_META_SUPPORTED_STORAGE_TYPES = ["mysql", "tspider", "hdfs"]
 
-# 创建 vm 链路资源所属的命名空间
-DEFAULT_VM_DATA_LINK_NAMESPACE = "bkmonitor"
-# grafana和策略导出是否支持data_label转换
-ENABLE_DATA_LABEL_EXPORT = True
-
-# 是否启用access数据批量处理
-ENABLED_ACCESS_DATA_BATCH_PROCESS = False
+# access数据批量处理
 ACCESS_DATA_BATCH_PROCESS_SIZE = 50000
 ACCESS_DATA_BATCH_PROCESS_THRESHOLD = 0
 
@@ -1541,9 +1639,6 @@ ENABLE_UPTIMECHECK_TEST = True
 
 # 检测结果缓存 TTL(小时)
 CHECK_RESULT_TTL_HOURS = 1
-
-# LLM 接口地址
-BK_MONITOR_AI_API_URL = os.environ.get("BK_MONITOR_AI_API_URL", "")
 
 # 支持来源 APIGW 列表
 FROM_APIGW_NAME = os.getenv("FROM_APIGW_NAME", "bk-monitor")
@@ -1600,6 +1695,21 @@ K8S_V2_BIZ_LIST = []
 # APM UnifyQuery 查询业务黑名单
 APM_UNIFY_QUERY_BLACK_BIZ_LIST = []
 
+# 事件 UnifyQuery 查询业务黑名单
+EVENT_UNIFY_QUERY_BLACK_BIZ_LIST = []
+
+# 日志 UnifyQuery 查询业务白名单
+LOG_UNIFY_QUERY_WHITE_BIZ_LIST = []
+
+# APM 调用分析启用全局指标的应用列表
+APM_RPC_GLOBAL_METRIC_ENABLE_APP_LIST = []
+
+# APM 按服务缓存指标的灰度应用列表，格式：["业务ID-应用名1", "业务ID-应用名2"]
+APM_SERVICE_CACHE_APPLICATIONS = []
+
+# 企业微信模块化（layouts）消息通知灰度业务列表
+WECOM_LAYOUTS_BIZ_LIST = []
+
 # 文档中心对应文档版本
 BK_DOC_VERSION = "3.9"
 
@@ -1612,10 +1722,19 @@ if os.getenv("USE_BKREPO", os.getenv("BKAPP_USE_BKREPO", "")).lower() == "true":
     BKREPO_PROJECT = os.getenv("BKAPP_BKREPO_PROJECT") or os.environ["BKREPO_PROJECT"]
     BKREPO_BUCKET = os.getenv("BKAPP_BKREPO_BUCKET") or os.environ["BKREPO_BUCKET"]
 
-    DEFAULT_FILE_STORAGE = "bkstorages.backends.bkrepo.BKRepoStorage"
+    AI_BKREPO_BUCKET = os.getenv("BKAPP_AI_BKREPO_BUCKET")
+    AI_BKREPO_PROJECT = os.getenv("BKAPP_AI_BKREPO_PROJECT")
 
-# 告警图表渲染模式
-ALARM_GRAPH_RENDER_MODE = os.getenv("BKAPP_ALARM_GRAPH_RENDER_MODE", "image_exporter")
+    # Django 4.2+ 使用 STORAGES 配置替代 DEFAULT_FILE_STORAGE 和 STATICFILES_STORAGE
+    # 注意：Django 4.2+ 中 STORAGES 和 DEFAULT_FILE_STORAGE 是互斥的，不能同时配置
+    STORAGES = {
+        "default": {
+            "BACKEND": "bkstorages.backends.bkrepo.BKRepoStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
 
 # 首页告警图业务数量限制
 HOME_PAGE_ALARM_GRAPH_BIZ_LIMIT = 5
@@ -1637,5 +1756,33 @@ ENABLE_AIOPS_EVENT_CENTER_BIZ_LIST = []
 # 用户管理web api地址
 BK_USER_WEB_API_URL = os.getenv("BK_USER_WEB_API_URL") or f"{BK_COMPONENT_API_URL}/api/bk-user-web/prod/"
 
-# 进程采集独立数据源模式业务ID列表
-PROCESS_INDEPENDENT_DATAID_BIZ_IDS = []
+# GSE消息槽
+GSE_SLOT_ID = int(os.getenv("GSE_SLOT_ID", 0))
+GSE_SLOT_TOKEN = os.getenv("GSE_SLOT_TOKEN", "")
+# 是否开启公共拨测节点鉴权
+ENABLE_PUBLIC_SYNTHETIC_LOCATION_AUTH = False
+
+# V4链路分业务系统事件初始化配置
+SYSTEM_EVENT_DEFAULT_ES_INDEX_SHARDS = int(os.getenv("SYSTEM_EVENT_DEFAULT_ES_INDEX_SHARDS", 1))
+SYSTEM_EVENT_DEFAULT_ES_INDEX_REPLICAS = int(os.getenv("SYSTEM_EVENT_DEFAULT_ES_INDEX_REPLICAS", 0))
+
+# AIOPS 接口地址
+# 时序预测远程访问地址
+AIOPS_SERVER_TF_URL = os.getenv("BKAPP_AIOPS_SERVER_TF_URL", "http://bk-aiops-serving-tf:8000")
+# 智能异常检测远程访问地址
+AIOPS_SERVER_KPI_URL = os.getenv("BKAPP_AIOPS_SERVER_KPI_URL", "http://bk-aiops-serving-kpi:8000")
+# 离群检测远程访问地址
+AIOPS_SERVER_ACD_URL = os.getenv("BKAPP_AIOPS_SERVER_ACD_URL", "http://bk-aiops-serving-acd:8000")
+# SDK执行预测逻辑接口
+AIOPS_PREDICT_SDK = os.getenv("BKAPP_AIOPS_PREDICT_SDK", "/aiops/serving/default/")
+# SDK初始化历史依赖接口
+AIOPS_INIT_DEPEND_SDK = os.getenv("BKAPP_AIOPS_INIT_DEPEND_SDK", "/aiops/serving/init_depend/")
+# SDK执行分组预测逻辑接口
+AIOPS_GROUP_PREDICT_SDK = os.getenv("BKAPP_AIOPS_GROUP_PREDICT_SDK", "/aiops/serving/group_predict/")
+# bkfara apigew地址
+BKFARA_AIOPS_SERVICE_USE_APIGW = bool(str(os.getenv("BKFARA_AIOPS_SERVICE_USE_APIGW", False)).lower() == "true")
+BKFARA_AIOPS_SERVICE_APIGW_HOST = os.getenv("BKFARA_AIOPS_SERVICE_APIGW_HOST", "")
+BKFARA_AIOPS_SERVICE_HOST_PREFIX = os.getenv("BKFARA_AIOPS_SERVICE_HOST_PREFIX", "")
+
+# 在同步bkbase集群信息时，是否进行更新
+SYNC_BKBASE_CLUSTER_INFO_UPDATE = os.getenv("SYNC_BKBASE_CLUSTER_INFO_UPDATE", "false").lower() == "true"

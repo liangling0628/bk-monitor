@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -39,7 +38,7 @@ class ActionProcessor(BaseActionProcessor):
     """
 
     def __init__(self, action_id, alerts=None):
-        super(ActionProcessor, self).__init__(action_id, alerts=alerts)
+        super().__init__(action_id, alerts=alerts)
         self.execute_config = self.action_config["execute_config"]
         self.backend_config = self.action.action_plugin.get("backend_config", {})
         self.function_config = {item["function"]: item for item in self.backend_config}
@@ -183,7 +182,9 @@ class ActionProcessor(BaseActionProcessor):
             else:
                 self.set_finished(
                     ActionStatus.FAILURE,
-                    message=_("{}阶段出错，第三方任务返回执行失败: {}").format(current_step_name, outputs.get("message")),
+                    message=_("{}阶段出错，第三方任务返回执行失败: {}").format(
+                        current_step_name, outputs.get("message")
+                    ),
                     retry_func=config.get("function", "execute"),
                     kwargs=kwargs,
                 )

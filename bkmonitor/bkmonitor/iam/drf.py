@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -9,17 +9,15 @@ specific language governing permissions and limitations under the License.
 """
 
 import logging
-
 from typing import Literal
 
-from bkmonitor.utils.request import get_request_tenant_id
 from bkmonitor.utils.thread_backend import ThreadPool
 
 """
 DRF 插件
 """
-from functools import wraps
 from collections.abc import Callable
+from functools import wraps
 
 from iam import Resource
 from rest_framework import permissions
@@ -104,6 +102,33 @@ class ViewBusinessPermission(BusinessActionPermission):
         super().__init__([ActionEnum.VIEW_BUSINESS])
 
 
+class MCPPermission(BusinessActionPermission):
+    """
+    MCP权限检查 - 支持动态权限加载
+    根据请求头中的 X-Bkapi-Permission-Action 动态选择对应的权限动作
+    """
+
+    def __init__(self, action: ActionMeta | None = None):
+        """
+        初始化MCP权限检查
+        :param action: 权限动作，如果不提供则使用默认的 USING_DASHBOARD_MCP
+        """
+        action = action if action is not None else ActionEnum.USING_DASHBOARD_MCP
+        logger.info(f"MCPPermission: action: {action.id}")
+        super().__init__([action])
+
+    def has_permission(self, request, view):
+        # 尝试从request中读取bk_biz_id / biz_id
+        if not hasattr(request, "biz_id") or not request.biz_id:
+            # 如果没有 biz_id，抛出异常
+            logger.error("MCPPermission: Missing biz_id for MCP permission check")
+            raise PermissionDeniedError("Missing biz_id for MCP permission check")
+        logger.info(f"MCPPermission: biz_id: {request.biz_id},skip_check: {request.skip_check}")
+        self.resources = [ResourceEnum.BUSINESS.create_instance(request.biz_id)]
+        logger.info("MCPPermission: Calling IAMPermission.has_permission")
+        return IAMPermission.has_permission(self, request, view)
+
+
 class InstanceActionPermission(IAMPermission):
     """
     关联其他资源的权限检查
@@ -124,9 +149,9 @@ class InstanceActionPermission(IAMPermission):
         lookup_url_kwarg = view.lookup_url_kwarg or view.lookup_field
 
         assert lookup_url_kwarg in view.kwargs, (
-            "Expected view %s to be called with a URL keyword argument "
-            'named "%s". Fix your URL conf, or set the `.lookup_field` '
-            "attribute on the view correctly." % (self.__class__.__name__, lookup_url_kwarg)
+            f"Expected view {self.__class__.__name__} to be called with a URL keyword argument "
+            f'named "{lookup_url_kwarg}". Fix your URL conf, or set the `.lookup_field` '
+            "attribute on the view correctly."
         )
         return lookup_url_kwarg
 
@@ -274,9 +299,10 @@ def extract_attribute(item):
 
 
 def filter_data_by_permission(
+    bk_tenant_id: str,
     data: list[dict] | dict,
     actions: list[ActionMeta],
-    resource_meta: ResourceMeta,
+    resource_meta: type[ResourceMeta],
     id_field: Callable[[dict], str] = lambda item: item["id"],
     always_allowed: Callable[[dict], bool] = lambda item: False,
     instance_create_func: Callable[[dict], Resource] | None = None,
@@ -305,9 +331,7 @@ def filter_data_by_permission(
         return []
 
     # 批量鉴权
-    permission_result = Permission(username=username, bk_tenant_id=get_request_tenant_id()).batch_is_allowed(
-        actions, resources
-    )
+    permission_result = Permission(username=username, bk_tenant_id=bk_tenant_id).batch_is_allowed(actions, resources)
 
     allowed_data = []
     for item in data:

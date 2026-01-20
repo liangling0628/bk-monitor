@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -299,14 +299,15 @@ export default class TargetCompareSelect extends tsc<IProps> {
       indexRanges.push([tempIndex, temp]);
       tempIndex = temp + search.length;
     });
+    const h = this.$createElement;
     return indexRanges.map((range: number[], index: number) => {
       if (index !== indexRanges.length - 1) {
         return [
-          <span>{content.slice(range[0], range[1])}</span>,
-          <span class='light'>{content.slice(range[1], indexRanges[index + 1][0])}</span>,
+          h('span', content.slice(range[0], range[1])),
+          h('span', { class: 'light' }, content.slice(range[1], indexRanges[index + 1][0]))
         ];
       }
-      return <span>{content.slice(range[0], range[1])}</span>;
+      return h('span', content.slice(range[0], range[1]));
     });
   }
   /* 选中选项，并弹出可选项 */

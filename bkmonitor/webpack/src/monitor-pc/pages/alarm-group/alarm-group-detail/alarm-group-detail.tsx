@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -36,6 +36,7 @@ import {
 import { listDutyRule, retrieveUserGroup } from 'monitor-api/modules/model';
 import { getNoticeWay } from 'monitor-api/modules/notice_group';
 import { getBkchatGroup, previewUserGroupPlan } from 'monitor-api/modules/user_groups';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { random } from 'monitor-common/utils/utils';
 
 import HistoryDialog from '../../../components/history-dialog/history-dialog';
@@ -180,9 +181,9 @@ export default class AlarmGroupDetail extends tsc<IAlarmGroupDetail, IEvent> {
   get historyList() {
     return [
       { label: this.$t('创建人'), value: this.detailData.createUser || '--' },
-      { label: this.$t('创建时间'), value: this.detailData.createTime || '--' },
+      { label: this.$t('创建时间'), value: formatWithTimezone(this.detailData.createTime) || '--' },
       { label: this.$t('最近更新人'), value: this.detailData.updateUser || '--' },
-      { label: this.$t('修改时间'), value: this.detailData.updateTime || '--' },
+      { label: this.$t('修改时间'), value: formatWithTimezone(this.detailData.updateTime) || '--' },
     ];
   }
 
@@ -422,7 +423,7 @@ export default class AlarmGroupDetail extends tsc<IAlarmGroupDetail, IEvent> {
    */
   getMappingDisplayName(display_name) {
     const mapping = {
-      all: this.$t('内部通知人'),
+      all: this.$t('告警接收人'),
     };
     return mapping[display_name] || display_name;
   }
@@ -596,8 +597,7 @@ export default class AlarmGroupDetail extends tsc<IAlarmGroupDetail, IEvent> {
                           ]}
                         </div>
                         <span class='person-name'>
-                          <bk-user-display-name user-id={item.id} />
-                          {`(${item.display_name})`}
+                          <bk-user-display-name user-id={item.display_name} />
                         </span>
                       </div>
                     ));

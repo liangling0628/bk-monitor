@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -52,8 +52,7 @@ export default {
   删除该业务: 'Delete this space',
   立刻添加: 'Add now',
   添加业务: 'Add a service',
-  '请输入 IP / Trace ID / 容器集群 / 告警ID / 策略名 进行搜索':
-    'Please enter IP / Trace ID / container cluster / alarm ID / policy name to search',
+  '搜索 IP、Trace ID、容器集群、告警ID、策略名': 'Search IP, Trace ID, container cluster, alarm ID, strategy name',
   清空检索: 'Clear search',
   '当前正在加载 采集任务': 'Currently loading the collection task',
   相关功能: 'Related functions',

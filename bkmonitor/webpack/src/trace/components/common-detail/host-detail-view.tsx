@@ -3,7 +3,7 @@ import { defineComponent } from 'vue';
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -147,8 +147,8 @@ export default defineComponent({
     function timeFormatter(time: ITableItem<'time'>) {
       if (!time) return '--';
       if (typeof time !== 'number') return time;
-      if (time.toString().length < 13) return dayjs.tz(time * 1000, window.timezone).format('YYYY-MM-DD HH:mm:ss');
-      return dayjs.tz(time, window.timezone).format('YYYY-MM-DD HH:mm:ss');
+      if (time.toString().length < 13) return dayjs.tz(time * 1000, window.timezone).format('YYYY-MM-DD HH:mm:ssZZ');
+      return dayjs.tz(time, window.timezone).format('YYYY-MM-DD HH:mm:ssZZ');
     }
     // list类型格式化
     function listFormatter(item: IDetailItem) {

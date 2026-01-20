@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -128,9 +128,9 @@ export default class LogInfo extends tsc<IProps> {
 
   /* 跳转到日志平台 */
   handleClick(row) {
-    const startTime = encodeURIComponent(dayjs.tz(this.detail.begin_time * 1000).format('YYYY-MM-DD HH:mm:ss'));
+    const startTime = encodeURIComponent(dayjs.tz(this.detail.begin_time * 1000).format('YYYY-MM-DD HH:mm:ssZZ'));
     const endTime = encodeURIComponent(
-      dayjs.tz(this.detail.end_time ? this.detail.end_time * 1000 : new Date().getTime()).format('YYYY-MM-DD HH:mm:ss')
+      dayjs.tz(this.detail.end_time ? this.detail.end_time * 1000 : Date.now()).format('YYYY-MM-DD HH:mm:ssZZ')
     );
     const host = window.bk_log_search_url || window.bklogsearch_host;
     let hostScopes = null;

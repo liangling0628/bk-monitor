@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -143,7 +143,7 @@ class AIOPSManager(abc.ABC):
                                     "filter_dict": {"dedupe_md5": alert.dedupe_md5},
                                 }
                             ],
-                            "function": compare_function,
+                            "function": {"time_compare": []},
                         },
                         "datasourceId": "time_series",
                         "name": _("时序数据"),
@@ -382,6 +382,10 @@ class AIOPSManager(abc.ABC):
             (DataSourceLabel.CUSTOM, DataTypeLabel.EVENT),
             (DataSourceLabel.BK_FTA, DataTypeLabel.EVENT),
         )
+        if is_bar:
+            # 柱状图不需要时间对比
+            unify_query_params["function"] = {"time_compare": []}
+            extra_unify_query_params["function"] = {"time_compare": []}
 
         is_composite = data_type_label == DataTypeLabel.ALERT
 

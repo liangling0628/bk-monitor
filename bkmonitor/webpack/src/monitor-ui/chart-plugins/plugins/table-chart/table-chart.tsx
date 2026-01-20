@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -513,7 +513,7 @@ export class TableChart extends CommonSimpleChart {
                   <bk-input
                     class='search-wrapper-input'
                     v-model={this.keyword}
-                    placeholder='搜索'
+                    placeholder='搜索 服务名称'
                     right-icon='bk-icon icon-search'
                     clearable
                     onChange={this.handleSearchChange}

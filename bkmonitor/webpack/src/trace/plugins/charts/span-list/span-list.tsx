@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台社区版 (BlueKing PaaS Community Edition) is licensed under the MIT License.
  *
@@ -27,9 +27,10 @@
 import { type PropType, computed, defineComponent, reactive, ref, watch } from 'vue';
 
 import { Pagination, Popover } from 'bkui-vue';
+import { formatWithTimezone } from 'monitor-common/utils/timezone';
 import { useI18n } from 'vue-i18n';
 
-import { customFormatTime, formatDate, formatDuration } from '../../../components/trace-view/utils/date';
+import { formatDuration } from '../../../components/trace-view/utils/date';
 import { getSpanKindIcon } from '../../../utils';
 
 import './span-list.scss';
@@ -254,9 +255,7 @@ export default defineComponent({
                   >
                     {original.operationName}
                   </div>
-                  <span class='start-time'>
-                    {`${formatDate(original.startTime)} ${customFormatTime(original.startTime, 'HH:mm:ss')}`}
-                  </span>
+                  <span class='start-time'>{formatWithTimezone(original.startTime)}</span>
                 </div>
               </li>
             ))}

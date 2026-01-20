@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -251,7 +251,9 @@ class IncidentSnapshot:
         self.incident_graph_edges = {}
         self.alert_entity_mapping = {}
         self.bk_biz_id = None
+        # 以source为key，将对应的targets聚合在一起
         self.entity_targets = defaultdict(lambda: defaultdict(set))
+        # 以target为key，将对应的sources聚合在一起
         self.entity_sources = defaultdict(lambda: defaultdict(set))
 
         if prepare:
@@ -344,7 +346,7 @@ class IncidentSnapshot:
 
         :param entity_id: 实体ID
         :param types: 按照指定的类型列表过滤
-        :return: 实体父节点
+        :return: 实体父节点 (子(source) -> 父(target))
         """
         if len(self.entity_targets[entity_id][IncidentGraphEdgeType.DEPENDENCY]) == 0:
             return []
@@ -401,12 +403,14 @@ class IncidentSnapshot:
         sub_incident_snapshot_content["incident_alerts"] = []
         sub_incident_snapshot_content["bk_biz_id"] = self.incident_snapshot_content["bk_biz_id"]
 
-        for entity in sub_incident_snapshot_content["incident_propagation_graph"]["entities"]:
+        for entity in sub_incident_snapshot_content.get("incident_propagation_graph", {}).get("entities", []):
             entity["is_root"] = False
             entity["is_anomaly"] = False
             entity["dimensions"] = entity.get("dimensions", {})
 
-            for incident_entity in self.incident_snapshot_content["incident_propagation_graph"]["entities"]:
+            for incident_entity in self.incident_snapshot_content.get("incident_propagation_graph", {}).get(
+                "entities", []
+            ):
                 if incident_entity["entity_id"] == entity["entity_id"]:
                     entity["is_root"] = incident_entity["is_root"]
                     entity["is_anomaly"] = incident_entity["is_anomaly"]
@@ -558,17 +562,20 @@ class IncidentSnapshot:
         for entity_id, entity in self.incident_graph_entities.items():
             if aggregate_config is None:
                 # 如果没有聚合配置，则执行自动聚合的逻辑
+                source_dependency = frozenset(self.entity_sources[entity_id][IncidentGraphEdgeType.DEPENDENCY])
+                target_dependency = frozenset(self.entity_targets[entity_id][IncidentGraphEdgeType.DEPENDENCY])
+                dependency_location = any([source_dependency, target_dependency])
                 key = (
-                    frozenset(self.entity_sources[entity_id][IncidentGraphEdgeType.DEPENDENCY]),
-                    frozenset(self.entity_targets[entity_id][IncidentGraphEdgeType.DEPENDENCY]),
+                    source_dependency,
+                    target_dependency,
                     entity.entity_type,
                     entity.logic_key(),
                     entity_id
-                    if entity.is_anomaly
-                    or entity.is_on_alert
-                    or entity.is_root
-                    or getattr(incident.feedback, "incident_root", None) == entity.entity_id
-                    else "normal",
+                    if entity.is_on_alert  # 告警中
+                    or entity.is_root  # 根因
+                    or getattr(incident.feedback, "incident_root", None) == entity.entity_id  # 反馈根因
+                    or dependency_location is False  # 无法定位从属关系
+                    else ("anomaly" if entity.is_anomaly else "normal"),  # 按照状态聚合
                 )
             else:
                 # 按照聚合配置进行聚合

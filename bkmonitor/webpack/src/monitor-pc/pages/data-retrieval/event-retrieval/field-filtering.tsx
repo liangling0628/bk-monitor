@@ -2,7 +2,7 @@
  * Tencent is pleased to support the open source community by making
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) available.
  *
- * Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
+ * Copyright (C) 2017-2025 Tencent.  All rights reserved.
  *
  * 蓝鲸智云PaaS平台 (BlueKing PaaS) is licensed under the MIT License.
  *
@@ -164,6 +164,7 @@ export default class FieldFiltering extends tsc<FieldFilteringType.IProps, Field
         <div class='field-filtering-title'>{this.$t('维度过滤')}</div>
         <div class='field-search-row'>
           <bk-input
+            placeholder={this.$t('搜索')}
             right-icon='bk-icon icon-search'
             value={this.searchKeyword}
             onChange={this.handleSearchChange}

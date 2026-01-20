@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -30,10 +30,10 @@ from apm.constants import (
     StatisticsProperty,
     VisibleEnum,
 )
+from apm.core.handlers.apm_cache_handler import ApmCacheHandler
 from apm.core.handlers.application_hepler import ApplicationHelper
 from apm.core.handlers.bk_data.helper import FlowHelper
 from apm.core.handlers.discover_handler import DiscoverHandler
-from apm.core.handlers.instance_handlers import InstanceHandler
 from apm.core.handlers.query.base import FilterOperator
 from apm.core.handlers.query.define import QueryMode, QueryStatisticsMode
 from apm.core.handlers.query.ebpf_query import DeepFlowQuery
@@ -75,12 +75,12 @@ from apm.serializers import (
 )
 from apm.task.tasks import create_or_update_tail_sampling, delete_application_async
 from apm.utils.ui_optimizations import HistogramNiceNumberGenerator
-from apm_web.constants import ServiceRelationLogTypeChoices
 from bkm_space.api import SpaceApi
 from bkm_space.utils import space_uid_to_bk_biz_id
 from bkmonitor.utils.cipher import transform_data_id_to_v1_token
 from bkmonitor.utils.common_utils import format_percent
-from bkmonitor.utils.request import get_request_username
+from bkmonitor.utils.request import get_request_tenant_id, get_request_username
+from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id
 from bkmonitor.utils.thread_backend import InheritParentThread, ThreadPool, run_threads
 from constants.apm import (
     DataSamplingLogTypeChoices,
@@ -132,9 +132,16 @@ class CreateApplicationResource(Resource):
     def perform_request(self, validated_data):
         datasource_options = validated_data.get("es_storage_config")
         if not datasource_options:
-            datasource_options = ApplicationHelper.get_default_storage_config(validated_data["bk_biz_id"])
+            datasource_options = ApplicationHelper.get_default_storage_config(
+                validated_data["bk_biz_id"], validated_data["app_name"]
+            )
+
+        bk_tenant_id = validated_data.get("bk_tenant_id")
+        if not bk_tenant_id:
+            bk_tenant_id = get_request_tenant_id()
 
         return ApmApplication.create_application(
+            bk_tenant_id=bk_tenant_id,
             bk_biz_id=validated_data["bk_biz_id"],
             app_name=validated_data["app_name"],
             app_alias=validated_data["app_alias"],
@@ -404,7 +411,17 @@ class ReleaseAppConfigResource(Resource):
 
         db_slow_command_config = DbSlowCommandConfigSerializer(label="慢命令配置", default={})
 
+        code_relabel_config = serializers.ListField(
+            label="返回码重定义配置", child=serializers.DictField(), required=False, default=list
+        )
+
         qps = serializers.IntegerField(label="qps", min_value=1, required=False)
+
+        all_app_config = serializers.DictField(required=False, allow_null=True, default=None)
+
+        all_service_configs = serializers.ListSerializer(child=serializers.DictField(), required=False, default=None)
+
+        all_instance_configs = serializers.ListSerializer(child=serializers.DictField(), required=False, default=None)
 
     def perform_request(self, validated_request_data):
         bk_biz_id = validated_request_data["bk_biz_id"]
@@ -414,18 +431,35 @@ class ReleaseAppConfigResource(Resource):
         if not application:
             raise CustomException(_("业务下的应用: {} 不存在").format(app_name))
 
+        self.validate_all_service_configs(validated_request_data.get("all_service_configs"))
+        self.validate_all_instance_configs(validated_request_data.get("all_instance_configs"))
+
         service_configs = validated_request_data.get("service_configs", [])
         instance_configs = validated_request_data.get("instance_configs", [])
         self.set_config(bk_biz_id, app_name, app_name, ApdexConfig.APP_LEVEL, validated_request_data)
         self.set_custom_service_config(bk_biz_id, app_name, validated_request_data.get("custom_service_config"))
         self.set_qps_config(bk_biz_id, app_name, app_name, ApdexConfig.APP_LEVEL, validated_request_data.get("qps"))
+        # 写入 code_relabel 列表
+        self.set_code_relabel_config(
+            bk_biz_id,
+            app_name,
+            app_name,
+            ApdexConfig.APP_LEVEL,
+            validated_request_data.get("code_relabel_config", []),
+        )
 
         for service_config in service_configs:
             self.set_config(bk_biz_id, app_name, app_name, ApdexConfig.SERVICE_LEVEL, service_config)
 
+        all_service_configs = validated_request_data.get("all_service_configs")
+        self.set_all_service_configs(bk_biz_id, app_name, all_service_configs)
+
         # 目前暂无实例配置
         for instance_config in instance_configs:
             self.set_config(bk_biz_id, app_name, instance_config["id"], ApdexConfig.INSTANCE_LEVEL, instance_config)
+
+        all_instance_configs = validated_request_data.get("all_instance_configs")
+        self.set_all_instance_configs(bk_biz_id, app_name, all_instance_configs)
 
         from apm.task.tasks import refresh_apm_application_config
 
@@ -459,6 +493,7 @@ class ReleaseAppConfigResource(Resource):
             db_config = config.get("db_config", {})
             probe_config = config.get("probe_config", {})
             db_slow_command_config = config.get("db_slow_command_config", {})
+            all_app_config = config.get("all_app_config")
 
             self.set_apdex_configs(bk_biz_id, app_name, config_key, config_level, apdex_configs)
             self.set_sampler_configs(bk_biz_id, app_name, config_key, config_level, sampler_config)
@@ -468,6 +503,7 @@ class ReleaseAppConfigResource(Resource):
             self.set_db_config(bk_biz_id, app_name, config_key, config_level, db_config)
             self.set_probe_config(bk_biz_id, app_name, config_key, config_level, probe_config)
             self.set_db_slow_command_config(bk_biz_id, app_name, config_key, config_level, db_slow_command_config)
+            self.set_all_app_config(bk_biz_id, app_name, config_key, config_level, all_app_config)
         elif config_level == AppConfigBase.SERVICE_LEVEL:
             self.set_apdex_configs(
                 bk_biz_id, app_name, config["service_name"], AppConfigBase.SERVICE_LEVEL, config["apdex_config"]
@@ -518,6 +554,64 @@ class ReleaseAppConfigResource(Resource):
         NormalTypeValueConfig.refresh_config(
             bk_biz_id, app_name, config_level, config_key, [type_value_config], need_delete_config=False
         )
+
+    def set_code_relabel_config(self, bk_biz_id, app_name, config_key, config_level, code_relabel_list):
+        if not code_relabel_list:
+            return
+        type_value_config = {"type": ConfigTypes.CODE_RELABEL_CONFIG, "value": json.dumps(code_relabel_list)}
+        NormalTypeValueConfig.refresh_config(
+            bk_biz_id, app_name, config_level, config_key, [type_value_config], need_delete_config=False
+        )
+
+    def set_all_app_config(self, bk_biz_id, app_name, config_key, config_level, all_app_config):
+        if all_app_config is None:
+            return
+        type_value_config = {"type": ConfigTypes.ALL_APP_CONFIG, "value": json.dumps(all_app_config)}
+        NormalTypeValueConfig.refresh_config(
+            bk_biz_id, app_name, config_level, config_key, [type_value_config], need_delete_config=False
+        )
+
+    def set_all_service_configs(self, bk_biz_id, app_name, all_service_configs):
+        if all_service_configs is None:
+            return
+        type_value_config = {"type": ConfigTypes.ALL_SERVICE_CONFIG, "value": json.dumps(all_service_configs)}
+        NormalTypeValueConfig.refresh_config(
+            bk_biz_id,
+            app_name,
+            AppConfigBase.SERVICE_LEVEL,
+            ConfigTypes.ALL_SERVICE_CONFIG,
+            [type_value_config],
+            need_delete_config=False,
+        )
+
+    def set_all_instance_configs(self, bk_biz_id, app_name, all_instance_configs):
+        if all_instance_configs is None:
+            return
+        type_value_config = {"type": ConfigTypes.ALL_INSTANCE_CONFIG, "value": json.dumps(all_instance_configs)}
+        NormalTypeValueConfig.refresh_config(
+            bk_biz_id,
+            app_name,
+            AppConfigBase.INSTANCE_LEVEL,
+            ConfigTypes.ALL_INSTANCE_CONFIG,
+            [type_value_config],
+            need_delete_config=False,
+        )
+
+    def validate_all_service_configs(self, all_service_configs):
+        if all_service_configs is None:
+            return
+        if not isinstance(all_service_configs, list):
+            raise ValueError("all_service_configs 应当为list类型")
+        if not all(all_service_config.get("service_name") for all_service_config in all_service_configs):
+            raise ValueError("all_service_configs 中有配置缺乏键：service_name")
+
+    def validate_all_instance_configs(self, all_instance_configs):
+        if all_instance_configs is None:
+            return
+        if not isinstance(all_instance_configs, list):
+            raise ValueError("all_instance_configs 应当为list类型")
+        if not all(all_instance_config.get("id") for all_instance_config in all_instance_configs):
+            raise ValueError("all_instance_configs 中有配置缺乏键：id")
 
 
 class DeleteAppConfigResource(Resource):
@@ -759,15 +853,22 @@ class QueryTopoInstanceResource(PageListResource):
 
     def merge_data(self, instance_list, validated_request_data):
         merge_data = []
-        name = InstanceHandler.get_topo_instance_cache_key(
+        name = ApmCacheHandler.get_topo_instance_cache_key(
             validated_request_data["bk_biz_id"], validated_request_data["app_name"]
         )
-        cache_data = InstanceHandler().get_cache_data(name)
+        cache_data = ApmCacheHandler().get_cache_data(name)
         # 更新 updated_at 字段
         for instance in instance_list:
             key = str(instance["id"]) + ":" + instance["instance_id"]
             if key in cache_data:
-                instance["updated_at"] = datetime.datetime.fromtimestamp(cache_data.get(key), tz=pytz.UTC)
+                instance["updated_at"] = datetime.datetime.fromtimestamp(cache_data.get(key)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            else:
+                # 缓存中没有命中，使用数据库中的时间
+                instance["updated_at"] = (
+                    instance["updated_at"].astimezone().replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+                )
             merge_data.append(instance)
         return merge_data
 
@@ -785,9 +886,10 @@ class QueryTopoInstanceResource(PageListResource):
         return page, page_size, query_fields
 
     def perform_request(self, validated_request_data):
-        filter_params = DiscoverHandler.get_retention_utc_filter_params(
+        filter_params = DiscoverHandler.get_retention_filter_params(
             validated_request_data["bk_biz_id"], validated_request_data["app_name"]
         )
+        filter_params["updated_at__gte"] = str(filter_params["updated_at__gte"])
         service_name = validated_request_data["service_name"]
         if service_name:
             filter_params["topo_node_key__in"] = service_name
@@ -895,18 +997,37 @@ class QueryEndpointResource(Resource):
         app_name = serializers.CharField(label="应用名称", max_length=50)
         # start_time = serializers.IntegerField(required=True, label="数据开始时间")
         # end_time = serializers.IntegerField(required=True, label="数据开始时间")
-        category = serializers.CharField(required=False, label="类别", default="")
+        category = serializers.ListField(child=serializers.CharField(), required=False, label="类别", default=list)
         category_kind_value = serializers.CharField(required=False, label="类型具体值", default="")
         service_name = serializers.CharField(required=False, label="服务名称", allow_blank=True, default="")
         bk_instance_id = serializers.CharField(required=False, label="实例id", allow_blank=True, default="")
         filters = serializers.DictField(label="查询条件", required=False)
 
-    def perform_request(self, data):
-        filter_params = DiscoverHandler.get_retention_filter_params(data["bk_biz_id"], data["app_name"])
+        def to_internal_value(self, data):
+            """
+            允许 "category:xxx"（单个字符串），
+            也可以 "category:[]"（列表）
+            """
+            if isinstance(data, dict):
+                category = data.get("category")
+                # 单个字符串时转成列表
+                if isinstance(category, str):
+                    data["category"] = [category]
+            return super().to_internal_value(data)
 
-        endpoints = Endpoint.objects.filter(**filter_params).order_by("-updated_at")
+    def perform_request(self, data):
+        # 获取过期时间分界线，确保使用UTC时区
+        retention = DiscoverHandler.get_app_retention(data["bk_biz_id"], data["app_name"])
+        retention_cutoff = datetime.datetime.now(tz=pytz.UTC) - datetime.timedelta(retention)
+
+        # 获取数据库中的端点数据，不使用updated_at__gte过滤，避免过早过滤导致数据丢失
+        filter_params = {
+            "bk_biz_id": data["bk_biz_id"],
+            "app_name": data["app_name"],
+        }
+        endpoints = Endpoint.objects.filter(**filter_params)
         if data["category"]:
-            endpoints = endpoints.filter(category_id=data["category"])
+            endpoints = endpoints.filter(category_id__in=data["category"])
         if data["category_kind_value"]:
             endpoints = endpoints.filter(category_kind_value=data["category_kind_value"])
         if data["service_name"]:
@@ -921,17 +1042,41 @@ class QueryEndpointResource(Resource):
         if data.get("filters"):
             endpoints = endpoints.filter(**data["filters"])
 
-        return [
-            {
-                "endpoint_name": endpoint.endpoint_name,
-                "kind": endpoint.span_kind,
-                "service_name": endpoint.service_name,
-                "category_kind": {"key": endpoint.category_kind_key, "value": endpoint.category_kind_value},
-                "category": endpoint.category_id,
-                "extra_data": endpoint.extra_data,
-            }
-            for endpoint in endpoints
-        ]
+        # 从Redis缓存获取端点时间信息
+        cache_name = ApmCacheHandler.get_endpoint_cache_key(data["bk_biz_id"], data["app_name"])
+        cache_data = ApmCacheHandler().get_cache_data(cache_name)
+
+        # 构建端点数据并合并缓存时间信息，然后根据合并后的时间进行过期过滤
+        result = []
+        for endpoint in endpoints:
+            # 构建缓存key，格式：{id}:{service_name}:{endpoint_name}
+            cache_key = f"{endpoint.id}:{endpoint.service_name}:{endpoint.endpoint_name}"
+
+            # 获取时间戳，优先使用缓存中的时间，如果缓存中没有则使用数据库的updated_at
+            updated_at = endpoint.updated_at
+            if cache_key in cache_data:
+                updated_at = datetime.datetime.fromtimestamp(cache_data[cache_key], tz=pytz.UTC)
+
+            # 根据合并后的时间进行过期过滤
+            if updated_at >= retention_cutoff:
+                result.append(
+                    {
+                        "endpoint_name": endpoint.endpoint_name,
+                        "kind": endpoint.span_kind,
+                        "service_name": endpoint.service_name,
+                        "category_kind": {"key": endpoint.category_kind_key, "value": endpoint.category_kind_value},
+                        "category": endpoint.category_id,
+                        "extra_data": endpoint.extra_data,
+                        "app_name": endpoint.app_name,
+                        "created_at": endpoint.created_at,
+                        "updated_at": updated_at,
+                    }
+                )
+
+        # 按照更新时间倒序排序（最新的在前面）
+        result.sort(key=lambda x: x["updated_at"], reverse=True)
+
+        return result
 
 
 class QueryEventResource(Resource):
@@ -1208,9 +1353,14 @@ class ListEsClusterInfoResource(Resource):
             return True
         return bk_biz_id in visible_bk_biz
 
-    def perform_request(self, validated_request_data):
+    def perform_request(self, validated_request_data: dict[str, Any]):
+        bk_tenant_id = get_request_tenant_id(peaceful=True) or bk_biz_id_to_bk_tenant_id(
+            validated_request_data["bk_biz_id"]
+        )
         bk_biz_id = str(validated_request_data["bk_biz_id"])
-        query_result = models.ClusterInfo.objects.filter(cluster_type=models.ClusterInfo.TYPE_ES)
+        query_result = models.ClusterInfo.objects.filter(
+            cluster_type=models.ClusterInfo.TYPE_ES, bk_tenant_id=bk_tenant_id
+        )
         result = []
         for cluster in query_result:
             cluster_info = cluster.consul_config
@@ -1466,11 +1616,7 @@ class QueryLogRelationByIndexSetIdResource(Resource):
         from apm_web.models import LogServiceRelation
 
         # Step: 从服务关联中找
-        log_relation = (
-            LogServiceRelation.objects.filter(log_type=ServiceRelationLogTypeChoices.BK_LOG, value=data["index_set_id"])
-            .order_by("created_at")
-            .first()
-        )
+        log_relation = LogServiceRelation.filter_by_index_set_id(data["index_set_id"]).order_by("created_at").first()
         if log_relation:
             return {
                 "bk_biz_id": log_relation.bk_biz_id,
@@ -1894,7 +2040,9 @@ class CreateApplicationSimpleResource(Resource):
         if not validate_data.get("language_ids"):
             validate_data["language_ids"] = self.DEFAULT_LANGUAGE_IDS
 
-        validate_data["datasource_option"] = ApplicationHelper.get_default_storage_config(validate_data["bk_biz_id"])
+        validate_data["datasource_option"] = ApplicationHelper.get_default_storage_config(
+            validate_data["bk_biz_id"], validate_data["app_name"]
+        )
 
     def perform_request(self, validated_request_data):
         """api侧创建应用 需要保持和saas侧创建应用接口逻辑一致"""

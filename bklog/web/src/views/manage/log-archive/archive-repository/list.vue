@@ -46,6 +46,7 @@
           data-test-id="storehouseContainer_input_searchTableItem"
           @change="handleSearchChange"
           @enter="handleSearch"
+
         >
         </bk-input>
       </div>
@@ -121,7 +122,7 @@
           :render-header="$renderHeader"
         >
           <template #default="props">
-            {{ props.row.creator }}
+            <bk-user-display-name :user-id="props.row.creator"></bk-user-display-name>
           </template>
         </bk-table-column>
         <bk-table-column
@@ -187,6 +188,7 @@
   import { clearTableFilter } from '@/common/util';
   import EmptyStatus from '@/components/empty-status';
   import { mapGetters } from 'vuex';
+  import useUtils from '@/hooks/use-utils';
 
   import * as authorityMap from '../../../../common/authority-map';
   import RepositorySlider from './repository-slider.vue';
@@ -293,12 +295,14 @@
           })
           .then(res => {
             const { data } = res;
+            const { formatResponseListTimeZoneString } = useUtils();
             if (!data.length) {
               return;
             }
-            this.tableDataOrigin = data;
-            this.tableDataSearched = data;
-            this.pagination.count = data.length;
+            const formattedData = formatResponseListTimeZoneString(data || [], {}, ['create_time', 'created_at', 'updated_at']);
+            this.tableDataOrigin = formattedData;
+            this.tableDataSearched = formattedData;
+            this.pagination.count = formattedData.length;
             this.computePageData();
           })
           .catch(err => {
@@ -421,7 +425,7 @@
         try {
           this.isTableLoading = true;
           const res = await this.$store.dispatch('getApplyData', paramData);
-          this.$store.commit('updateAuthDialogData', res.data);
+          this.$store.commit('updateState', {'authDialogData': res.data});
         } catch (err) {
           console.warn(err);
         } finally {

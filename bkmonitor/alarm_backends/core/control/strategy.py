@@ -1,6 +1,6 @@
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
-Copyright (C) 2017-2021 THL A29 Limited, a Tencent company. All rights reserved.
+Copyright (C) 2017-2025 Tencent. All rights reserved.
 Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
 You may obtain a copy of the License at http://opensource.org/licenses/MIT
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
@@ -19,12 +19,12 @@ from django.utils.translation import gettext as _
 from alarm_backends.constants import CONST_MINUTES, CONST_ONE_HOUR, NO_DATA_LEVEL
 from alarm_backends.core.cache import key
 from alarm_backends.core.cache.calendar import CalendarCacheManager
-from alarm_backends.core.cache.cmdb.business import BusinessManager
 from alarm_backends.core.cache.strategy import StrategyCacheManager
 from alarm_backends.core.control.item import Item
 from alarm_backends.core.i18n import i18n
-from bkmonitor.utils import time_tools
 from bkmonitor.models.strategy import AlgorithmModel
+from bkmonitor.utils import time_tools
+from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id
 from core.errors.alarm_backends import StrategyItemNotFound
 
 logger = logging.getLogger("core.control")
@@ -42,14 +42,14 @@ class Strategy:
         return self._config
 
     @property
-    def strategy_group_key(self):
+    def strategy_group_key(self) -> str:
         if not self.config.get("items"):
             return ""
 
         return self.config["items"][0].get("query_md5", "")
 
     @property
-    def use_api_sdk(self):
+    def use_api_sdk(self) -> bool:
         for query_config in self.config["items"][0]["query_configs"]:
             if "intelligent_detect" in query_config:
                 return bool(query_config["intelligent_detect"].get("use_sdk"))
@@ -79,42 +79,57 @@ class Strategy:
 
         return min_interval or CONST_MINUTES
 
+    @cached_property
+    def bk_tenant_id(self) -> str:
+        return bk_biz_id_to_bk_tenant_id(self.bk_biz_id)
+
     @property
     def priority(self):
         return self.config.get("priority")
 
     @property
-    def priority_group_key(self):
+    def priority_group_key(self) -> str:
         return self.config.get("priority_group_key", "")
 
     @cached_property
-    def is_service_target(self):
+    def is_service_target(self) -> bool:
         """
         判断是否是"服务"层
         """
         return self.config.get("scenario") in ("component", "service_module", "service_process")
 
     @cached_property
-    def is_host_target(self):
+    def is_host_target(self) -> bool:
         """
         判断是否为"主机"层
         """
         return self.config.get("scenario") in ("os", "host_process")
 
     @cached_property
-    def bk_biz_id(self):
+    def bk_biz_id(self) -> str:
         return self.config.get("bk_biz_id", "0")
 
     @cached_property
-    def scenario(self):
+    def scenario(self) -> str:
         return self.config.get("scenario", "")
 
     @cached_property
-    def name(self):
+    def name(self) -> str:
         return self.config.get("name") or _("--")
 
     @cached_property
-    def items(self):
+    def labels(self) -> str:
+        """策略标签"""
+        return ",".join(self.config.get("labels", []))
+
+    @cached_property
+    def item(self) -> Item:
+        if self.items:
+            return self.items[0]
+        return Item({}, self)
+
+    @cached_property
+    def items(self) -> list[Item]:
         results = []
         item_list = self.config.get("items") or []
         for item_config in item_list:
@@ -122,15 +137,15 @@ class Strategy:
         return results
 
     @cached_property
-    def type(self):
+    def type(self) -> str:
         return self.config.get("type", "monitor")
 
     @cached_property
-    def notice(self):
+    def notice(self) -> dict:
         return self.config.get("notice", {})
 
     @cached_property
-    def actions(self):
+    def actions(self) -> list:
         return self.config.get("actions", [])
 
     def in_alarm_time(self, now_time=None) -> tuple[bool, str]:
@@ -187,27 +202,56 @@ class Strategy:
             # 一个时间范围都没匹配上，这个策略就不生效
             return False, _("当前时刻不在策略生效时间范围: {}").format(", ".join(time_ranges))
 
-        # 再看看日历，是不是处于休息日
+        # 检查生效日历和不生效日历
+        active_calendar_ids = uptime.get("active_calendars") or []
         calendar_ids = uptime.get("calendars") or []
-        if calendar_ids:
-            calendars = CalendarCacheManager.mget(
-                calendar_ids=calendar_ids, bk_tenant_id=BusinessManager.get_tenant_id(self.bk_biz_id)
-            )
-        else:
-            calendars = []
 
-        item_messages = []
+        # 获取生效日历事项
+        active_item_messages = self._get_calendar_item_messages(active_calendar_ids)
+
+        # 获取不生效日历事项
+        inactive_item_messages = self._get_calendar_item_messages(calendar_ids)
+
+        # 处理日历冲突逻辑
+        # 优先级：生效日历 > 不生效日历
+        if active_item_messages and inactive_item_messages:
+            # 同时命中生效日历和不生效日历，生效日历优先
+            return True, _("当前时刻同时命中告警日历和休息日历，告警日历优先生效: 告警日历[{}], 休息日历[{}]").format(
+                ", ".join(active_item_messages), ", ".join(inactive_item_messages)
+            )
+        elif active_item_messages:
+            # 只命中生效日历
+            return True, _("当前时刻命中告警日历事项: {}").format(", ".join(active_item_messages))
+        elif inactive_item_messages:
+            # 只命中不生效日历
+            return False, _("当前时刻命中日历休息事项: {}").format(", ".join(inactive_item_messages))
+        elif active_calendar_ids:
+            # 配置了生效日历但未命中任何事项
+            return False, _("当前时刻未命中告警日历事项")
+
+        return True, ""
+
+    def _get_calendar_item_messages(self, calendar_ids: list[int]) -> list[str]:
+        """
+        获取日历事项消息列表
+
+        :param calendar_ids: 日历ID列表（整数列表）
+        :return: 日历事项消息列表，格式为 "日历名称(事项名称)"
+        """
+        item_messages: list[str] = []
+        if not calendar_ids:
+            return item_messages
+
+        calendars: list[list[dict]] = CalendarCacheManager.mget(
+            calendar_ids=calendar_ids, bk_tenant_id=self.bk_tenant_id
+        )
         for items in calendars:
-            # 只要命中了任意一个节假日，则这个告警就不生效
             for item in items:
-                item_list = item.get("list", [])
+                item_list: list[dict] = item.get("list", [])
                 for _item in item_list:
                     item_messages.append(f"{_item['calendar_name']}({_item['name']})")
 
-        if item_messages:
-            return False, _("当前时刻命中日历休息事项: {}").format(", ".join(item_messages))
-
-        return True, ""
+        return item_messages
 
     def gen_strategy_snapshot(self):
         """
