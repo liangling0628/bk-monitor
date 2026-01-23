@@ -151,7 +151,7 @@ const errorHandle = (response: ErrorResponse, config: CustomAxiosRequestConfig):
 };
 
 const instance: AxiosInstance = axios.create({
-  timeout: 1000 * 120,
+  timeout: 1000 * 120 * 5,
   withCredentials: true,
   paramsSerializer(params: any): string {
     return qs.stringify(params, { arrayFormat: 'brackets' });

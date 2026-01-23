@@ -79,7 +79,10 @@ const createRouter = () =>
       ...item,
       path:
         item.path !== '*'
-          ? `${window.__BK_WEWEB_DATA__?.parentRoute || '/'}${item.path}`.replace(/\/\//gim, '/')
+          ? `${window.__POWERED_BY_QIANKUN__ || window.__POWERED_BY_BK_WEWEB__ ? window.__BK_WEWEB_DATA__?.baseroute || '/apm/' : ''}${item.path}`.replace(
+              /\/\//gim,
+              '/'
+            )
           : item.path,
     })),
   });
@@ -121,7 +124,7 @@ router.beforeEach(async (to, from, next) => {
       next();
     } else {
       next({
-        path: `${window.__BK_WEWEB_DATA__?.parentRoute || '/'}exception/403/${random(10)}`,
+        path: `${window.__POWERED_BY_QIANKUN__ ? '/apm/' : window.__BK_WEWEB_DATA__?.baseroute || '/'}exception/403/${random(10)}`,
         query: {
           actionId: authority.page || '',
           fromUrl: to.fullPath.replace(/^\//, ''),

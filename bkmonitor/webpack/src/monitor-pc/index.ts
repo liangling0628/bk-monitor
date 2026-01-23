@@ -40,6 +40,7 @@ import { type VueInstance, setVue } from 'monitor-api/utils/index';
 import { immediateRegister } from 'monitor-common/service-worker/service-worker';
 import { getUrlParam, mergeSpaceList, setGlobalBizId } from 'monitor-common/utils';
 import { assignWindowField } from 'monitor-common/utils/assign-window';
+import { registerMicroApps } from 'qiankun';
 
 import './common/global-login';
 import { userDisplayNameConfigure } from './common/user-display-name';
@@ -52,6 +53,16 @@ import store from './store/store';
 import './static/css/global.scss';
 import './static/css/reset.scss';
 import 'monitor-static/icons/monitor-icons.css';
+registerMicroApps([
+  {
+    name: 'apm',
+    entry: '//appdev.woa.com:7002/',
+    container: '#apmPageWrap',
+    activeRule: (location: Location) => {
+      return location.hash.startsWith('#/apm');
+    },
+  },
+]);
 // import './tailwind.css';
 // todo: 子应用externals
 // import './common/externals';

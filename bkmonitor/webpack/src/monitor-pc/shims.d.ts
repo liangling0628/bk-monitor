@@ -77,6 +77,7 @@ declare global {
     __AuthMap__: Map<string, Map<string, boolean>>;
     __BK_WEWEB_DATA__: Record<string, any>;
     __POWERED_BY_BK_WEWEB__?: boolean;
+    __POWERED_BY_QIANKUN__?: boolean;
     agent_setup_url: string;
     // ai小鲸鱼 api base url
     ai_xiao_jing_base_url?: string;
@@ -95,11 +96,11 @@ declare global {
     bk_log_search_url: string;
     bk_nodeman_host: string;
     bk_paas_host: string;
-    bk_user_site_url: string;
     bk_shared_res_url: string;
     // 多租户租户id
     bk_tenant_id?: string;
     bk_url: string;
+    bk_user_site_url: string;
     // 多租户用户中心接口地址
     bk_user_web_api_url?: string;
     bkchat_manage_url: string;

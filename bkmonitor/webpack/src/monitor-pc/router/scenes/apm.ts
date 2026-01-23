@@ -29,6 +29,8 @@ import { VIEW_AUTH } from '../../pages/apm/authority-map';
 import type { RouteConfig } from 'vue-router';
 
 const Apm = () => import(/* webpackChunkName: 'apm' */ '../../pages/apm/apm');
+// const Apm = () => import(/* webpackChunkName: 'apm' */ '../../pages/apm/qiankun');
+
 export default applyGuidePage([
   {
     path: '/apm/home',

@@ -39,6 +39,7 @@
     "monitor-common": "workspace:*",
     "monitor-static": "workspace:*",
     "monitor-ui": "workspace:*",
+    "qiankun": "^2.10.16",
     "sortablejs": "^1.15.6",
     "tdesign-vue": "1.11.2-naruto",
     "throttle-debounce": "^5.0.2",

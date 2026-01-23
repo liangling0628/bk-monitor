@@ -60,76 +60,113 @@ setVue(Vue as VueInstance);
 if (process.env.NODE_ENV === 'development') {
   window.site_url = '/';
 }
-if (window.__POWERED_BY_BK_WEWEB__) {
-  window.bk_biz_id = window.rawWindow.bk_biz_id;
-  window.cc_biz_id = window.rawWindow.bk_biz_id;
-  store.commit('app/SET_APP_STATE', {
-    userName: window.user_name,
-    bizId: window.cc_biz_id,
-    bizList: window.space_list,
-    csrfCookieName: window.csrf_cookie_name || '',
-    siteUrl: window.site_url,
-    bkUrl: window.bk_url,
-  });
-
-  new Vue({
-    el: '#app',
-    router,
-    store,
-    i18n,
-    render: h => h(App),
-  });
-  Vue.prototype.$bus = new Vue();
-  Vue.prototype.$api = Api;
-  Vue.prototype.$authorityStore = Authority;
-} else {
-  Api.model
-    .enhancedContext({
-      space_uid: spaceUid || undefined,
-      bk_biz_id: !spaceUid ? +bizId || process.env.defaultBizId : undefined,
-      context_type: 'basic',
-    })
-    .then(data => {
-      assignWindowField(data);
-      mergeSpaceList(window.space_list);
-      window.username = window.uin;
-      window.user_name = window.uin;
-      window.cc_biz_id = +window.bk_biz_id;
-      window.bk_log_search_url = data.BKLOGSEARCH_HOST;
-      const bizId = setGlobalBizId();
-      if (bizId === false) return;
-      userDisplayNameConfigure();
-      store.commit('app/SET_APP_STATE', {
-        userName: window.user_name,
-        bizId: window.cc_biz_id,
-        bizList: window.space_list,
-        csrfCookieName: window.csrf_cookie_name || '',
-        siteUrl: window.site_url,
-        bkUrl: window.bk_url,
-      });
-
-      new Vue({
-        el: '#app',
-        router,
-        store,
-        i18n,
-        render: h => h(App),
-      });
-      Vue.prototype.$bus = new Vue();
-      Vue.prototype.$api = Api;
-      Vue.prototype.$authorityStore = Authority;
-      Api.model
-        .enhancedContext({
-          space_uid: spaceUid || undefined,
-          bk_biz_id: bizId,
-          context_type: 'extra',
-        })
-        .then(data => {
-          assignWindowField(data);
-        });
-    })
-    .catch(e => console.error(e))
-    .finally(() => {
-      immediateRegister();
+const render = () => {
+  if (window.__POWERED_BY_BK_WEWEB__) {
+    window.bk_biz_id = window.rawWindow.bk_biz_id;
+    window.cc_biz_id = window.rawWindow.bk_biz_id;
+    store.commit('app/SET_APP_STATE', {
+      userName: window.user_name,
+      bizId: window.cc_biz_id,
+      bizList: window.space_list,
+      csrfCookieName: window.csrf_cookie_name || '',
+      siteUrl: window.site_url,
+      bkUrl: window.bk_url,
     });
+
+    new Vue({
+      el: '#app',
+      router,
+      store,
+      i18n,
+      render: h => h(App),
+    });
+    Vue.prototype.$bus = new Vue();
+    Vue.prototype.$api = Api;
+    Vue.prototype.$authorityStore = Authority;
+  } else {
+    Api.model
+      .enhancedContext({
+        space_uid: spaceUid || undefined,
+        bk_biz_id: !spaceUid ? +bizId || process.env.defaultBizId : undefined,
+        context_type: 'basic',
+      })
+      .then(data => {
+        assignWindowField(data);
+        mergeSpaceList(window.space_list);
+        window.username = window.uin;
+        window.user_name = window.uin;
+        window.cc_biz_id = +window.bk_biz_id;
+        window.bk_log_search_url = data.BKLOGSEARCH_HOST;
+        const bizId = setGlobalBizId();
+        if (bizId === false) return;
+        userDisplayNameConfigure();
+        store.commit('app/SET_APP_STATE', {
+          userName: window.user_name,
+          bizId: window.cc_biz_id,
+          bizList: window.space_list,
+          csrfCookieName: window.csrf_cookie_name || '',
+          siteUrl: window.site_url,
+          bkUrl: window.bk_url,
+        });
+
+        new Vue({
+          el: '#app',
+          router,
+          store,
+          i18n,
+          render: h => h(App),
+        });
+        Vue.prototype.$bus = new Vue();
+        Vue.prototype.$api = Api;
+        Vue.prototype.$authorityStore = Authority;
+        Api.model
+          .enhancedContext({
+            space_uid: spaceUid || undefined,
+            bk_biz_id: bizId,
+            context_type: 'extra',
+          })
+          .then(data => {
+            assignWindowField(data);
+          });
+      })
+      .catch(e => console.error(e))
+      .finally(() => {
+        immediateRegister();
+      });
+  }
+};
+
+if (!window.__POWERED_BY_QIANKUN__) {
+  render();
 }
+
+async function bootstrap() {
+  console.log('[vue] vue app bootstraped');
+}
+
+async function mount(props) {
+  console.info(window, '+++++++++++++++');
+  console.log('[vue] props from main framework', props);
+  render();
+}
+
+async function unmount() {
+  window.mainComponent.$destroy();
+  window.mainComponent.$el.innerHTML = '';
+  window.mainComponent = null;
+  // router = null;
+}
+
+export default {
+  bootstrap,
+  mount,
+  unmount,
+};
+window.unmount = unmount;
+window.mount = mount;
+window.bootstrap = bootstrap;
+window.bootstrap = {
+  bootstrap,
+  mount,
+  unmount,
+};
