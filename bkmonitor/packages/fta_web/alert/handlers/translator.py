@@ -10,17 +10,21 @@ specific language governing permissions and limitations under the License.
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import reduce
 
+from django.conf import settings
 from django.db.models import Q
 from django.utils.translation import gettext as _
+from django.utils.translation import gettext_lazy as _lazy
 
 from bkmonitor.models import EventPluginV2, MetricListCache, StrategyModel
-from bkmonitor.strategy.new_strategy import get_metric_id, parse_metric_id
+from bk_monitor_base.strategy import get_metric_id, parse_metric_id
 from bkmonitor.utils.request import get_request_tenant_id
 from constants.action import ActionPluginType, ActionSignal
 from constants.data_source import DataSourceLabel, DataTypeLabel
-from core.drf_resource import resource
+from core.drf_resource import api, resource
+from common.decorators import db_safe_wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +75,44 @@ class MetricTranslator(AbstractTranslator):
         self.bk_biz_ids = list(set(bk_biz_ids or []) & {0})
         super().__init__(*args, **kwargs)
 
+    @db_safe_wrapper
+    def _execute_single_query(self, query: Q, tenant_id: str) -> list:
+        """
+        执行单个查询
+        每个独立查询使用精确条件，能更好地利用复合索引
+        使用 db_safe_wrapper 确保多线程环境下数据库连接安全
+        """
+        try:
+            metrics_queryset = MetricListCache.objects.filter(bk_tenant_id=tenant_id).filter(query)
+            if self.bk_biz_ids:
+                metrics_queryset = metrics_queryset.filter(bk_biz_id__in=self.bk_biz_ids)
+            # 只查询必要的字段
+            return list(
+                metrics_queryset.only(
+                    "data_source_label",
+                    "data_type_label",
+                    "result_table_id",
+                    "metric_field",
+                    "metric_field_name",
+                    "related_id",
+                    "extend_fields",
+                    "data_label",
+                )
+            )
+        except Exception as e:
+            # 捕获并静默处理查询异常：返回空列表以跳过该指标的翻译，避免异常传播影响其他并发查询
+            logger.warning("MetricListCache query failed: %s", str(e))
+            return []
+
     def translate(self, values: list[str]) -> dict:
-        metrics = MetricListCache.objects.filter(bk_tenant_id=get_request_tenant_id())
+        if settings.ROLE == "api":
+            return {}
+        if not values:
+            return {}
+
+        tenant_id = get_request_tenant_id()
+
+        # 解析所有metric_id并构建查询条件
         queries = []
         for metric_id in values:
             try:
@@ -91,13 +131,39 @@ class MetricTranslator(AbstractTranslator):
             # 没有需要查询的指标，则直接退出
             return {}
 
-        metrics = metrics.filter(reduce(lambda x, y: x | y, queries))
+        all_metrics = []
+        if len(queries) <= 3:
+            # OR 查询条件较少，使用单次 OR 查询
+            metrics_queryset = MetricListCache.objects.filter(bk_tenant_id=tenant_id).filter(
+                reduce(lambda x, y: x | y, queries)
+            )
+            if self.bk_biz_ids:
+                metrics_queryset = metrics_queryset.filter(bk_biz_id__in=self.bk_biz_ids)
 
-        if self.bk_biz_ids:
-            metrics = metrics.filter(bk_biz_id__in=self.bk_biz_ids)
+            all_metrics = list(
+                metrics_queryset.only(
+                    "data_source_label",
+                    "data_type_label",
+                    "result_table_id",
+                    "metric_field",
+                    "metric_field_name",
+                    "related_id",
+                    "extend_fields",
+                    "data_label",
+                )
+            )
+        else:
+            # OR 查询条件较多，拆分为并发查询
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                future_to_query = {
+                    executor.submit(self._execute_single_query, query, tenant_id): query for query in queries
+                }
+
+                for future in as_completed(future_to_query):
+                    all_metrics.extend(future.result())
 
         metric_translations = {}
-        for metric in metrics:
+        for metric in all_metrics:
             query_data = {
                 "data_source_label": metric.data_source_label,
                 "data_type_label": metric.data_type_label,
@@ -114,7 +180,8 @@ class MetricTranslator(AbstractTranslator):
             elif (metric.data_source_label, metric.data_type_label) == (DataSourceLabel.CUSTOM, DataTypeLabel.EVENT):
                 query_data["custom_event_name"] = metric.extend_fields.get("custom_event_name", "")
             metric_id = get_metric_id(**query_data)
-            metric_translations.update({metric_id: metric.metric_field_name})
+            metric_translations[metric_id] = metric.metric_field_name
+
         return {value: metric_translations.get(value, value) for value in values}
 
 
@@ -135,9 +202,19 @@ class BizTranslator(AbstractTranslator):
                 self.__class__.biz_map_cache = resource.space.get_space_map()
         return self.__class__.biz_map_cache
 
-    def translate(self, values: list[int]) -> dict:
+    def translate(self, values: list[int | str]) -> dict:
         biz_map = self.biz_map()
-        return {value: biz_map[value]["display_name"] if value in biz_map else str(value) for value in values}
+        result = {}
+        for value in values:
+            # 兼容 bk_biz_id 为字符串类型（ES Keyword 聚合返回的 bucket.key）
+            lookup_key = value
+            if isinstance(value, str):
+                try:
+                    lookup_key = int(value)
+                except (ValueError, TypeError):
+                    pass
+            result[value] = biz_map[lookup_key]["display_name"] if lookup_key in biz_map else str(value)
+        return result
 
 
 class CategoryTranslator(AbstractTranslator):
@@ -168,3 +245,72 @@ class PluginTranslator(AbstractTranslator):
         }
         plugins["bkmonitor"] = _("监控策略")
         return {value: plugins[str(value)] if str(value) in plugins else value for value in values}
+
+
+class TopoNodeTranslator(AbstractTranslator):
+    """拓扑节点翻译器，将 bk_topo_node 的值翻译为中文名称"""
+
+    TYPE_LABEL_MAP = {
+        "biz": _lazy("业务"),
+        "set": _lazy("集群"),
+        "module": _lazy("模块"),
+    }
+
+    def __init__(self, bk_biz_ids: list[int], *args, **kwargs):
+        self.bk_biz_ids = bk_biz_ids
+        super().__init__(*args, **kwargs)
+
+    def translate(self, values: list[str]) -> dict:
+        if not values:
+            return {}
+
+        # 按 type 分组收集 id
+        grouped = {}
+        for value in values:
+            parts = str(value).split("|", 1)
+            if len(parts) != 2:
+                continue
+            node_type, node_id = parts[0], parts[1]
+            try:
+                node_id = int(node_id)
+            except (ValueError, TypeError):
+                continue
+            grouped.setdefault(node_type, []).append(node_id)
+
+        # 批量查询各类型名称
+        name_map = {}  # {原始值: 翻译后名称}
+        if "biz" in grouped:
+            biz_ids = grouped["biz"]
+            try:
+                businesses = api.cmdb.get_business(bk_biz_ids=biz_ids)
+                for biz in businesses:
+                    label = self.TYPE_LABEL_MAP.get("biz", "biz")
+                    name_map[f"biz|{biz.bk_biz_id}"] = f"{label}|{biz.bk_biz_name}"
+            except Exception:
+                logger.exception("TopoNodeTranslator: failed to translate biz nodes")
+
+        if "set" in grouped:
+            set_ids = grouped["set"]
+            try:
+                params = [{"bk_biz_id": biz_id, "bk_set_ids": set_ids} for biz_id in self.bk_biz_ids]
+                sets_list = api.cmdb.get_set.bulk_request(params)
+                for sets in sets_list:
+                    for s in sets:
+                        label = self.TYPE_LABEL_MAP.get("set", "set")
+                        name_map[f"set|{s.bk_set_id}"] = f"{label}|{s.bk_set_name}"
+            except Exception:
+                logger.exception("TopoNodeTranslator: failed to translate set nodes")
+
+        if "module" in grouped:
+            module_ids = grouped["module"]
+            try:
+                params = [{"bk_biz_id": biz_id, "bk_module_ids": module_ids} for biz_id in self.bk_biz_ids]
+                modules_list = api.cmdb.get_module.bulk_request(params)
+                for modules in modules_list:
+                    for m in modules:
+                        label = self.TYPE_LABEL_MAP.get("module", "module")
+                        name_map[f"module|{m.bk_module_id}"] = f"{label}|{m.bk_module_name}"
+            except Exception:
+                logger.exception("TopoNodeTranslator: failed to translate module nodes")
+
+        return {value: name_map.get(value, value) for value in values}

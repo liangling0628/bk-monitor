@@ -21,9 +21,13 @@ from django.db.models import Q
 from django.utils.translation import gettext as _
 from tenacity import RetryError, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from alarm_backends.core.cache.key import SERVICE_LOCK_METADATA_MANAGE_ES_STORAGE
+from alarm_backends.core.lock.service_lock import service_lock
 from alarm_backends.service.scheduler.app import app
+from bkmonitor.utils.tenant import get_tenant_default_biz_id
 from constants.common import DEFAULT_TENANT_ID
 from core.drf_resource import api
+from core.errors.alarm_backends import LockError
 from core.prometheus import metrics
 from metadata import models
 from metadata.models import BkBaseResultTable, ClusterInfo, DataSource
@@ -39,6 +43,7 @@ from metadata.models.data_link.constants import (
     BASEREPORT_SOURCE_SYSTEM,
     BASEREPORT_USAGES,
     BKBASE_NAMESPACE_BK_MONITOR,
+    DataLinkKind,
     DataLinkResourceStatus,
 )
 from metadata.models.data_link.data_link import DataLink
@@ -52,11 +57,7 @@ from metadata.models.vm.utils import (
     get_vm_cluster_id_name,
     report_metadata_data_link_status_info,
 )
-from metadata.service.sync_metadata import (
-    sync_es_metadata,
-    sync_kafka_metadata,
-    sync_vm_metadata,
-)
+from metadata.service.sync_metadata import sync_kafka_metadata, sync_vm_metadata
 from metadata.task.utils import bulk_handle
 from metadata.tools.constants import TASK_FINISHED_SUCCESS, TASK_STARTED
 from metadata.utils import consul_tools
@@ -77,6 +78,32 @@ def refresh_custom_log_report_config(log_group_id=None):
     from metadata.task.custom_report import refresh_custom_log_config
 
     refresh_custom_log_config(log_group_id=log_group_id)
+
+
+@app.task(name="metadata.sync_graph_definition_to_bkbase", ignore_result=True, queue="celery_metadata_task_worker")
+def sync_graph_definition_to_bkbase(
+    namespace: str,
+    kind: str = "",
+    name: str = "",
+    generation: int | None = None,
+    action: str = "apply",
+):
+    from metadata.task.sync_cmdb_relation import sync_graph_definition_to_bkbase as sync_graph_definition
+
+    sync_graph_definition(
+        namespace=namespace,
+        kind=kind,
+        name=name,
+        generation=generation,
+        action=action,
+    )
+
+
+@app.task(ignore_result=True, queue="celery_metadata_task_worker")
+def refresh_entity_definition_to_redis():
+    from metadata.task.entity_relation import refresh_entity_definition_to_redis as _refresh
+
+    _refresh()
 
 
 @app.task(ignore_result=True, queue="celery_metadata_task_worker")
@@ -215,19 +242,28 @@ def update_time_series_metrics(time_series_metrics):
 
 # todo: es 索引管理，迁移至BMW
 @app.task(ignore_result=True, queue="celery_long_task_cron")
-def manage_es_storage(storage_record_ids, cluster_id: int = None):
+def manage_es_storage(storage_record_ids: list[int], cluster_id: int | None = None) -> None:
     """
     ES索引轮转异步任务
     @param es_storages: 待轮转采集项
     @param cluster_id: 集群ID
     @return:
     """
+    try:
+        with service_lock(SERVICE_LOCK_METADATA_MANAGE_ES_STORAGE, cluster_id=cluster_id):
+            _manage_es_storage_with_cluster_lock(storage_record_ids=storage_record_ids, cluster_id=cluster_id)
+    except LockError:
+        logger.info("manage_es_storage:cluster_id->[%s] is locked, skip rotate index", cluster_id)
+
+
+def _manage_es_storage_with_cluster_lock(storage_record_ids: list[int], cluster_id: int | None = None) -> None:
+    """在集群级锁内执行 ES 索引轮转任务."""
     # 统计&上报 任务状态指标
     metrics.METADATA_CRON_TASK_STATUS_TOTAL.labels(
         task_name="manage_es_storage", status=TASK_STARTED, process_target=None
     ).inc()
 
-    logger.info("manage_es_storage: start to manage_es_storage")
+    logger.info("manage_es_storage:cluster_id->[%s],start to manage_es_storage", cluster_id)
     start_time = time.time()
 
     es_storages = models.ESStorage.objects.filter(id__in=storage_record_ids)
@@ -268,11 +304,11 @@ def manage_es_storage(storage_record_ids, cluster_id: int = None):
         cost_time
     )
     metrics.report_all()
-    logger.info("manage_es_storage:manage_es_storage cost time: %s", cost_time)
+    logger.info("manage_es_storage:cluster_id->[%s],manage_es_storage cost time: %s", cluster_id, cost_time)
 
 
 @app.task(ignore_result=True, queue="celery_long_task_cron")
-def clean_disable_es_storage(es_storages, cluster_id: int = None):
+def clean_disable_es_storage(es_storages, cluster_id: int | None = None):
     """
     停用采集项管理异步任务
     @param es_storages: 待处理采集项
@@ -511,6 +547,7 @@ def _access_bkdata_vm(
     data_id: int,
     allow_access_v2_data_link: bool | None = False,
     force_update: bool = False,
+    consumer_group: str | None = None,
 ):
     """接入计算平台 VM 任务
     NOTE: 根据环境变量判断是否启用新版vm链路
@@ -526,6 +563,7 @@ def _access_bkdata_vm(
             table_id=table_id,
             data_id=data_id,
             force_update=force_update,
+            consumer_group=consumer_group,
         )
     else:
         logger.info("_access_bkdata_vm: start to access bkdata vm, table_id->%s, data_id->%s", table_id, data_id)
@@ -540,6 +578,7 @@ def access_bkdata_vm(
     data_id: int,
     allow_access_v2_data_link: bool = False,
     force_update: bool = False,
+    consumer_group: str | None = None,
 ):
     """接入计算平台 VM 任务"""
     logger.info("bk_biz_id: %s, table_id: %s, data_id: %s start access bkdata vm", bk_biz_id, table_id, data_id)
@@ -551,6 +590,7 @@ def access_bkdata_vm(
             data_id=data_id,
             allow_access_v2_data_link=allow_access_v2_data_link,
             force_update=force_update,
+            consumer_group=consumer_group,
         )
     except RetryError as e:
         logger.error(
@@ -718,107 +758,240 @@ def _refresh_data_link_status(bkbase_rt_record: BkBaseResultTable):
     start_time = time.time()  # 记录开始时间
     bkbase_data_id_name = bkbase_rt_record.bkbase_data_name
     data_link_name = bkbase_rt_record.data_link_name
-    bkbase_rt_name = bkbase_rt_record.bkbase_rt_name
     logger.info(
-        "_refresh_data_link_status: data_link_name->[%s],bkbase_data_id_name->[%s],bkbase_rt_name->[%s]",
+        "_refresh_data_link_status: data_link_name->[%s],bkbase_data_id_name->[%s]",
         data_link_name,
         bkbase_data_id_name,
-        bkbase_rt_name,
     )
     data_link_ins = models.DataLink.objects.get(data_link_name=data_link_name)
     data_link_strategy = data_link_ins.data_link_strategy
+    bk_tenant_id = bkbase_rt_record.bk_tenant_id
+    namespace = data_link_ins.namespace
     logger.info(
-        "_refresh_data_link_status: data_link_name->[%s] data_link_strategy->[%s]",
+        "_refresh_data_link_status: data_link_name->[%s] data_link_strategy->[%s] namespace->[%s]",
         data_link_name,
         data_link_strategy,
+        namespace,
     )
 
     # 2. 刷新数据源状态
+    # 优先按 bkbase_data_id_name 精确命中；考虑到复用场景 / 存量脏数据里 BkBaseResultTable.bkbase_data_name
+    # 可能记录的是旧生成名，这里再补一道按 DataLink.bk_data_id 的 fallback，最大程度兜住历史数据。
+    data_id_config = None
     try:
-        with transaction.atomic():
-            data_id_config = models.DataIdConfig.objects.get(name=bkbase_data_id_name)
-            data_id_status = get_data_link_component_status(
-                bk_tenant_id=bkbase_rt_record.bk_tenant_id,
-                kind=data_id_config.kind,
-                namespace=data_id_config.namespace,
-                component_name=data_id_config.name,
-            )
-            # 当和DB中的数据不一致时，才进行变更
-            if data_id_config.status != data_id_status:
-                logger.info(
-                    "_refresh_data_link_status:data_link_name->[%s],data_id_config status->[%s] is different "
-                    "with exist record,will change to->[%s]",
-                    data_link_name,
-                    data_id_config.status,
-                    data_id_status,
-                )
-                data_id_config.status = data_id_status
-                data_id_config.data_link_name = data_link_name
-                data_id_config.save()
-            report_metadata_data_link_status_info(
-                data_link_name=data_link_name,
-                biz_id=data_id_config.bk_biz_id,
-                kind=data_id_config.kind,
-                status=data_id_config.status,
-            )
-    except models.DataIdConfig.DoesNotExist:
-        logger.error(
-            "_refresh_data_link_status: data_link_name->[%s],data_id_config->[%s] does not exist",
-            data_link_name,
-            bkbase_data_id_name,
+        data_id_config = models.DataIdConfig.objects.get(
+            bk_tenant_id=bk_tenant_id, namespace=namespace, name=bkbase_data_id_name
         )
+    except models.DataIdConfig.DoesNotExist:
+        fallback_bk_data_id = data_link_ins.bk_data_id
+        if fallback_bk_data_id:
+            data_id_config = (
+                models.DataIdConfig.objects.filter(
+                    bk_tenant_id=bk_tenant_id,
+                    namespace=namespace,
+                    bk_data_id=fallback_bk_data_id,
+                )
+                .order_by("-id")
+                .first()
+            )
+        if data_id_config is None:
+            logger.warning(
+                "_refresh_data_link_status: data_link_name->[%s],data_id_config name->[%s] and bk_data_id->[%s] "
+                "both miss, skip data source status refresh",
+                data_link_name,
+                bkbase_data_id_name,
+                fallback_bk_data_id,
+            )
 
-    # 3. 根据链路套餐（类型）获取该链路需要的组件资源种类
-    components = models.DataLink.STRATEGY_RELATED_COMPONENTS.get(data_link_strategy)
-    all_components_ok = True
-
-    # 4. 遍历链路关联的所有类型资源，查询并刷新其状态
-    for component in components:
+    if data_id_config is not None:
         try:
             with transaction.atomic():
-                component_ins = component.objects.get(name=bkbase_rt_name)
-                component_status = get_data_link_component_status(
-                    bk_tenant_id=bkbase_rt_record.bk_tenant_id,
-                    kind=component_ins.kind,
-                    namespace=component_ins.namespace,
-                    component_name=component_ins.name,
+                data_id_status = get_data_link_component_status(
+                    bk_tenant_id=bk_tenant_id,
+                    kind=data_id_config.kind,
+                    namespace=data_id_config.namespace,
+                    component_name=data_id_config.name,
                 )
-                logger.info(
-                    "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s],status->[%s]",
+                if data_id_config.status != data_id_status:
+                    logger.info(
+                        "_refresh_data_link_status:data_link_name->[%s],data_id_config status->[%s] is different "
+                        "with exist record,will change to->[%s]",
+                        data_link_name,
+                        data_id_config.status,
+                        data_id_status,
+                    )
+                    data_id_config.status = data_id_status
+                    data_id_config.data_link_name = data_link_name
+                    data_id_config.save()
+                report_metadata_data_link_status_info(
+                    data_link_name=data_link_name,
+                    biz_id=data_id_config.bk_biz_id,
+                    kind=data_id_config.kind,
+                    status=data_id_config.status,
+                )
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error(
+                "_refresh_data_link_status: data_link_name->[%s],refresh data_id_config->[%s] error->[%s]",
+                data_link_name,
+                data_id_config.name,
+                e,
+            )
+
+    # 3. 根据链路套餐（类型）获取该链路需要的组件资源种类
+    if hasattr(data_link_ins, "get_related_component_classes"):
+        components = data_link_ins.get_related_component_classes()
+    else:
+        components = models.DataLink.STRATEGY_RELATED_COMPONENTS.get(data_link_strategy) or []
+    components = [component for component in components if component is not models.GraphRelationBindingConfig]
+    graph_binding = None
+    all_components_ok = True
+    if data_link_strategy == models.DataLink.GRAPH_RELATION_TIME_SERIES:
+        graph_binding = models.GraphRelationBindingConfig.objects.filter(
+            bk_tenant_id=bk_tenant_id,
+            namespace=namespace,
+            data_link_name=data_link_name,
+        ).first()
+        if graph_binding:
+            try:
+                with transaction.atomic():
+                    graph_binding_status = graph_binding.component_status
+                    if (
+                        graph_binding.status == DataLinkResourceStatus.FAILED.value
+                        and graph_binding_status == DataLinkResourceStatus.OK.value
+                    ):
+                        all_components_ok = False
+                        logger.info(
+                            "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s] "
+                            "keep failed status before graph reapply succeeds",
+                            data_link_name,
+                            graph_binding.name,
+                            graph_binding.kind,
+                        )
+                    else:
+                        if graph_binding_status != DataLinkResourceStatus.OK.value:
+                            all_components_ok = False
+                        if graph_binding.status != graph_binding_status:
+                            graph_binding.status = graph_binding_status
+                            graph_binding.save()
+                            logger.info(
+                                "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s],"
+                                "status updated to->[%s]",
+                                data_link_name,
+                                graph_binding.name,
+                                graph_binding.kind,
+                                graph_binding_status,
+                            )
+                    report_metadata_data_link_status_info(
+                        data_link_name=data_link_name,
+                        biz_id=graph_binding.bk_biz_id,
+                        kind=graph_binding.kind,
+                        status=graph_binding.status,
+                    )
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error(
+                    "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s] "
+                    "refresh failed,error->[%s]",
+                    data_link_name,
+                    graph_binding.name,
+                    graph_binding.kind,
+                    e,
+                )
+                all_components_ok = False
+        else:
+            logger.warning(
+                "_refresh_data_link_status: data_link_name->[%s],component kind->[%s] has no instance, skip",
+                data_link_name,
+                models.GraphRelationBindingConfig.kind,
+            )
+            all_components_ok = False
+    refreshed_component_keys: set[tuple[str, str, str]] = set()
+
+    # 4. 遍历链路关联的所有类型资源；
+    # 历史写法按 ``name=bkbase_rt_name`` 查，默认 RT/Binding/DataBus 三者同名。组件复用之后三者可能
+    # 各自复用 legacy name、互不相同，此处改为按 (bk_tenant_id, namespace, data_link_name) 过滤该 kind
+    # 下属于本链路的所有实例并逐条刷新。非复用链路同样兼容：三者同名时按 data_link_name 过滤一样命中。
+    for component in components:
+        component_queryset = component.objects.filter(
+            bk_tenant_id=bk_tenant_id, namespace=namespace, data_link_name=data_link_name
+        )
+        expected_component_names = graph_binding.get_expected_component_names(component) if graph_binding else []
+        if expected_component_names:
+            component_queryset = component_queryset.filter(name__in=expected_component_names)
+
+        component_instances = list(component_queryset)
+        if expected_component_names:
+            existing_component_names = {component_ins.name for component_ins in component_instances}
+            for expected_component_name in expected_component_names:
+                if expected_component_name in existing_component_names:
+                    continue
+                logger.warning(
+                    "_refresh_data_link_status: data_link_name->[%s],component kind->[%s],"
+                    "name->[%s] has no instance, skip",
+                    data_link_name,
+                    component.kind,
+                    expected_component_name,
+                )
+                all_components_ok = False
+        elif not component_instances:
+            logger.warning(
+                "_refresh_data_link_status: data_link_name->[%s],component kind->[%s] has no instance, skip",
+                data_link_name,
+                component.kind,
+            )
+            all_components_ok = False
+            continue
+
+        for component_ins in component_instances:
+            try:
+                with transaction.atomic():
+                    component_key = (component_ins.kind, component_ins.namespace, component_ins.name)
+                    if component_key in refreshed_component_keys:
+                        continue
+                    refreshed_component_keys.add(component_key)
+
+                    component_status = get_data_link_component_status(
+                        bk_tenant_id=bk_tenant_id,
+                        kind=component_ins.kind,
+                        namespace=component_ins.namespace,
+                        component_name=component_ins.name,
+                    )
+                    logger.info(
+                        "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s],status->[%s]",
+                        data_link_name,
+                        component_ins.name,
+                        component_ins.kind,
+                        component_status,
+                    )
+                    if component_status != DataLinkResourceStatus.OK.value:
+                        all_components_ok = False
+                    # 和DB中数据不一致时，才进行更新操作
+                    if component_ins.status != component_status:
+                        component_ins.status = component_status
+                        component_ins.save()
+                        logger.info(
+                            "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s],"
+                            "status updated to->[%s]",
+                            data_link_name,
+                            component_ins.name,
+                            component_ins.kind,
+                            component_status,
+                        )
+
+                report_metadata_data_link_status_info(
+                    data_link_name=data_link_name,
+                    biz_id=component_ins.bk_biz_id,
+                    kind=component_ins.kind,
+                    status=component_ins.status,
+                )
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error(
+                    "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s] "
+                    "refresh failed,error->[%s]",
                     data_link_name,
                     component_ins.name,
                     component_ins.kind,
-                    component_status,
+                    e,
                 )
-                if component_status != DataLinkResourceStatus.OK.value:
-                    all_components_ok = False
-                # 和DB中数据不一致时，才进行更新操作
-                if component_ins.status != component_status:
-                    component_ins.status = component_status
-                    component_ins.save()
-                    logger.info(
-                        "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s],"
-                        "status updated to->[%s]",
-                        data_link_name,
-                        component.name,
-                        component.kind,
-                        component_status,
-                    )
-
-            report_metadata_data_link_status_info(
-                data_link_name=data_link_name,
-                biz_id=component_ins.bk_biz_id,
-                kind=component_ins.kind,
-                status=component_ins.status,
-            )
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error(
-                "_refresh_data_link_status: data_link_name->[%s],component->[%s],kind->[%s] refresh failed,error->[%s]",
-                data_link_name,
-                component.name,
-                component.kind,
-                e,
-            )
 
     # 5. 如果所有的component_ins状态都为OK，那么BkBaseResultTable也应设置为OK，否则为PENDING
     if all_components_ok:
@@ -828,12 +1001,13 @@ def _refresh_data_link_status(bkbase_rt_record: BkBaseResultTable):
     with transaction.atomic():
         bkbase_rt_record.save()
 
-    report_metadata_data_link_status_info(
-        data_link_name=data_link_name,
-        biz_id=data_id_config.bk_biz_id,
-        kind=data_id_config.kind,
-        status=bkbase_rt_record.status,
-    )
+    if data_id_config is not None:
+        report_metadata_data_link_status_info(
+            data_link_name=data_link_name,
+            biz_id=data_id_config.bk_biz_id,
+            kind=DataLinkKind.RESULTTABLE.value,
+            status=bkbase_rt_record.status,
+        )
 
     cost_time = time.time() - start_time
 
@@ -976,19 +1150,6 @@ def sync_bkbase_v4_metadata(key, skip_types: list[str] | None = None):
             sync_kafka_metadata(bk_tenant_id=bk_tenant_id, kafka_info=kafka_info, ds=ds, bk_data_id=bk_data_id)
             logger.info("sync_bkbase_v4_metadata: sync kafka info for bk_data_id->[%s] successfully", bk_data_id)
 
-    # 处理 ES 信息
-    es_info = bkbase_metadata_dict.get("es")
-    if es_info and "es" not in skip_types:
-        with transaction.atomic():  # 单独事务
-            logger.info(
-                "sync_bkbase_v4_metadata: got es_info->[%s],bk_data_id->[%s],try to sync es info", es_info, bk_data_id
-            )
-            # TODO: 这里需要特别注意,新版协议中，es_info中的数据结构是 {key:[info1,info2]},这里的key对应计算平台侧的RT,在监控平台这边不可读
-            # TODO：考虑到目前日志链路中，不存在1个DataId关联多个ES结果表的场景，因此这里默认只选取第一条元素的value
-            es_info_value = next(iter(es_info.values()))
-            sync_es_metadata(bk_tenant_id=bk_tenant_id, es_info=es_info_value, table_id=table_id)
-            logger.info("sync_bkbase_v4_metadata: sync es info for bk_data_id->[%s] successfully", bk_data_id)
-
     # 处理 VM 信息
     vm_info = bkbase_metadata_dict.get("vm")
     if vm_info and "vm" not in skip_types:
@@ -1013,19 +1174,261 @@ def sync_bkbase_v4_metadata(key, skip_types: list[str] | None = None):
     )
 
 
+def _get_bk_biz_internal_data_ids(bk_tenant_id: str, bk_biz_id: int) -> list[dict[str, int | str]]:
+    """
+    获取业务内置数据ID
+    """
+    result: list[dict[str, int | str]] = []
+
+    # 系统指标
+    system_metric_data_source = DataSource.objects.filter(data_name=f"{bk_tenant_id}_{bk_biz_id}_sys_base").first()
+    if system_metric_data_source:
+        result.append({"task": "basereport", "dataid": system_metric_data_source.bk_data_id})
+
+    # 系统事件
+    system_event_data_source = DataSource.objects.filter(data_name=f"base_{bk_biz_id}_agent_event").first()
+    if system_event_data_source:
+        result.append({"task": "exceptionbeat", "dataid": system_event_data_source.bk_data_id})
+
+    # 系统进程
+    system_proc_data_source = DataSource.objects.filter(
+        data_name=SYSTEM_PROC_DATA_LINK_CONFIGS["perf"]["data_name_tpl"].format(bk_biz_id=bk_biz_id)
+    ).first()
+    if system_proc_data_source:
+        result.append({"task": "processbeat_perf", "dataid": system_proc_data_source.bk_data_id})
+
+    system_proc_port_data_source = DataSource.objects.filter(
+        data_name=SYSTEM_PROC_DATA_LINK_CONFIGS["port"]["data_name_tpl"].format(bk_biz_id=bk_biz_id)
+    ).first()
+    if system_proc_port_data_source:
+        result.append({"task": "processbeat_port", "dataid": system_proc_port_data_source.bk_data_id})
+
+    return result
+
+
 @app.task(ignore_result=True, queue="celery_metadata_task_worker")
-def create_basereport_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, storage_cluster_name: str | None = None):
+def process_gse_slot_message(message_id: str, bk_agent_id: str, content: str, received_at: str):
+    """
+    Celery异步任务--处理GSE投递的数据
+
+    {
+        # type 格式为 "动作名称"/"影响范围"/"操作内容"
+        "type": "fetch/host/dataid", # 请求类型，暂时只有一种，后续可能扩展
+        "cloudid": 0, # 发起请求的采集器主机 cloudid
+        "bk_agent_id": "02000000005254003dd2ea1700473962076n", # 发起请求的采集器主机 agentid
+        "ip": "127.0.0.1", # 发起请求的采集器主机 ip
+        "bk_tenant_id" : "my-tenant_id", # 采集器读到的 CMDB 下发的文件中的租户 ID
+        "params": "..." # 请求参数，不同的 type 对应着不同的参数
+    }
+
+    type: fetch/host/dataid
+    {
+        # metadata 可以内置这批 tasks 的数据格式以及元信息等，编写成一个独立的任务。
+        "tasks": [
+            "basereport", # 原 1001 dataid
+            "processbeat_perf", # 原 1007 dataid
+            "processbeat_port", # 原 1013 dataid
+            "global_heartbeat", # 原 1100001 dataid
+            "gather_up_beat",  # 原 1100017 dataid
+            "timesync", # 原 1100030 dataid
+            "dmesg", # 原 1100031 dataid
+            "exceptionbeat", # 原 1000 dataid
+        ]
+    }
+    """
+    from alarm_backends.core.cache.cmdb import HostManager
+
+    try:
+        content_data = json.loads(content)
+    except (ValueError, TypeError):
+        logger.error(
+            "process_gse_slot_message: content is not a valid json, message_id->%s, bk_agent_id->%s, content->%s",
+            message_id,
+            bk_agent_id,
+            content,
+        )
+        return
+
+    # 解析Content，Content内容为采集器与Metadata约定的协议
+    if content_data.get("type") == "fetch/host/dataid":
+        logger.info("process_gse_slot_message: start to fetch host dataid")
+
+        bk_tenant_id = content_data.get("bk_tenant_id")
+
+        if not bk_tenant_id:
+            logger.warning(
+                "process_gse_slot_message: bk_tenant_id is not found,message_id->%s,content->%s",
+                message_id,
+                content,
+            )
+            return
+
+        # 如果内置数据链路是按租户申请的，直接按租户默认业务ID查询对应的数据ID
+        if settings.SPACE_BUILTIN_DATA_LINK_MODE == "tenant":
+            try:
+                default_biz_id = get_tenant_default_biz_id(bk_tenant_id)
+            except ValueError:
+                logger.error(
+                    "process_gse_slot_message: get tenant default biz id failed, bk_tenant_id->%s", bk_tenant_id
+                )
+                return
+            result = _get_bk_biz_internal_data_ids(bk_tenant_id=bk_tenant_id, bk_biz_id=default_biz_id)
+        else:
+            host = HostManager.get_by_agent_id(bk_tenant_id=bk_tenant_id, bk_agent_id=bk_agent_id)
+            if not host:
+                logger.warning(
+                    "process_gse_slot_message: host not found,bk_tenant_id->%s,bk_agent_id->%s",
+                    bk_tenant_id,
+                    bk_agent_id,
+                )
+                return
+
+            result: list[dict[str, int | str]] = _get_bk_biz_internal_data_ids(
+                bk_tenant_id=bk_tenant_id, bk_biz_id=host.bk_biz_id
+            )
+
+        # 回调GSE接口,告知DataId
+        api.gse.dispatch_message(
+            bk_tenant_id=bk_tenant_id,
+            message_id=message_id,
+            agent_id_list=[bk_agent_id],
+            content=json.dumps({"code": 0, "data": result}),
+        )
+        logger.info(
+            "process_gse_slot_message: callback gse interface,message_id->%s,bk_agent_id->%s,content->%s,received_at->%s,result->%s",
+            message_id,
+            bk_agent_id,
+            content,
+            received_at,
+            result,
+        )
+    else:
+        logger.warning(
+            "process_gse_slot_message: unknown content type,message_id->%s,bk_agent_id->%s,content->%s,received_at->%s",
+            message_id,
+            bk_agent_id,
+            content,
+            received_at,
+        )
+
+
+def check_bkcc_space_builtin_datalink(biz_list: list[tuple[str, int]]):
+    """
+    检查业务内置数据链路
+    """
+
+    # 如果未开启新版数据链路或空间内置数据链路，则不检查
+    if not (settings.ENABLE_V2_VM_DATA_LINK and settings.ENABLE_SPACE_BUILTIN_DATA_LINK) or not biz_list:
+        return
+
+    logger.info("check_bkcc_space_builtin_datalink: start to check bkcc space builtin datalink")
+
+    # 如果是按租户申请的，则只检查每个租户的默认业务
+    if settings.SPACE_BUILTIN_DATA_LINK_MODE == "tenant":
+        seen_tenants: set[str] = set()
+        tenant_biz_list: list[tuple[str, int]] = []
+        for bk_tenant_id, _ in biz_list:
+            if bk_tenant_id not in seen_tenants:
+                seen_tenants.add(bk_tenant_id)
+                try:
+                    tenant_biz_list.append((bk_tenant_id, get_tenant_default_biz_id(bk_tenant_id)))
+                except ValueError:
+                    logger.error(
+                        "check_bkcc_space_builtin_datalink: get tenant default biz id failed, bk_tenant_id->[%s], return!",
+                        bk_tenant_id,
+                    )
+                    continue
+        biz_list = tenant_biz_list
+
+    # 获取已存在的数据源名称
+    exists_data_names: set[str] = set(
+        DataSource.objects.filter(
+            Q(data_name__endswith="_agent_event")
+            | Q(data_name__endswith="_sys_base")
+            | Q(data_name__endswith="_system_proc_port")
+            | Q(data_name__endswith="_system_proc_perf")
+        ).values_list("data_name", flat=True)
+    )
+
+    # 获取已存在的DataLink名称
+    data_link_name_to_namespaces: dict[str, str] = dict(DataLink.objects.values_list("data_link_name", "namespace"))
+
+    # 数据源名称模板到任务的映射
+    data_name_tpl_to_task: dict[tuple[str, tuple[str, ...]], Any] = {
+        ("bkmonitor", ("{bk_tenant_id}_{bk_biz_id}_sys_base",)): create_basereport_datalink_for_bkcc,
+        ("bklog", ("base_{bk_biz_id}_agent_event",)): create_base_event_datalink_for_bkcc,
+        ("bkmonitor", ("base_{bk_biz_id}_system_proc_port",)): create_system_proc_datalink_for_bkcc,
+        ("bkmonitor", ("base_{bk_biz_id}_system_proc_perf",)): create_system_proc_datalink_for_bkcc,
+    }
+
+    # 遍历业务列表，检查是否存在对应的数据源名称，如果不存在，则执行对应任务创建数据源
+    for bk_tenant_id, bk_biz_id in biz_list:
+        for (namespace, data_name_tpls), task in data_name_tpl_to_task.items():
+            data_names: list[str] = [
+                data_name_tpl.format(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id) for data_name_tpl in data_name_tpls
+            ]
+            for data_name in data_names:
+                if data_name not in exists_data_names:
+                    logger.info(
+                        "check_bkcc_space_builtin_datalink: data_source(%s) not found, bk_tenant_id->[%s], bk_biz_id->[%s], run task->[%s] to create",
+                        data_name,
+                        bk_tenant_id,
+                        bk_biz_id,
+                        task,
+                    )
+                    task(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id)
+                    break
+
+                if data_name not in data_link_name_to_namespaces:
+                    # 如果数据链路不存在，则创建数据链路
+                    logger.info(
+                        "check_bkcc_space_builtin_datalink: data_link(%s) not found, bk_tenant_id->[%s], bk_biz_id->[%s], run task->[%s] to create",
+                        data_name,
+                        bk_tenant_id,
+                        bk_biz_id,
+                        task,
+                    )
+                    task(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id)
+                    break
+                elif data_link_name_to_namespaces[data_name] != namespace:
+                    # 如果数据链路存在，但命名空间不匹配，则调整命名空间后重建
+                    datalink_ins = DataLink.objects.get(data_link_name=data_name)
+                    datalink_ins.namespace = namespace
+                    datalink_ins.save()
+                    logger.info(
+                        "check_bkcc_space_builtin_datalink: data_link(%s) namespace mismatch, bk_tenant_id->[%s], bk_biz_id->[%s], run task->[%s] to rebuild",
+                        data_name,
+                        bk_tenant_id,
+                        bk_biz_id,
+                        task,
+                    )
+                    for component_class in datalink_ins.get_related_component_classes():
+                        component_class.objects.filter(data_link_name=data_name).update(namespace=namespace)
+                    task(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id)
+
+    logger.info("check_bkcc_space_builtin_datalink: check bkcc space builtin datalink success")
+
+
+@app.task(ignore_result=True, queue="celery_metadata_task_worker")
+def create_basereport_datalink_for_bkcc(
+    bk_tenant_id: str,
+    bk_biz_id: int,
+    storage_cluster_name: str | None = None,
+    extra_source: str | None = None,
+):
     """
     为单个业务创建基础采集数据链路
     @param bk_tenant_id: 租户ID
     @param bk_biz_id: 业务ID
     @param storage_cluster_name: 存储集群名称(VM)
+    @param extra_source: 额外主机维度数据来源
     """
 
     logger.info(
         "create_basereport_datalink_for_bkcc: start to create basereport datalink,for bk_biz_id->[%s]", bk_biz_id
     )
 
+    # 如果未开启多租户模式，则不创建
     if not settings.ENABLE_MULTI_TENANT_MODE:
         logger.error("create_basereport_datalink_for_bkcc: multi tenant mode is not enabled,return!")
         return
@@ -1039,6 +1442,27 @@ def create_basereport_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
             logger.error("create_basereport_datalink_for_bkcc: get default vm cluster failed,return!")
             return
         storage_cluster_name = cluster_info.cluster_name
+
+    # 如果内置数据链路是按租户申请的，则只有业务ID等于租户下的运营业务时，才创建数据链路
+    # 如果是按租户申请的，数据源需要设置为公共数据源
+    is_platform_data_id = False
+    if settings.SPACE_BUILTIN_DATA_LINK_MODE == "tenant":
+        try:
+            default_biz_id = get_tenant_default_biz_id(bk_tenant_id)
+        except ValueError:
+            logger.error(
+                "create_basereport_datalink_for_bkcc: get tenant default biz id failed, bk_tenant_id->[%s], return!",
+                bk_tenant_id,
+            )
+            return
+        if bk_biz_id != default_biz_id:
+            logger.info(
+                "create_basereport_datalink_for_bkcc: bk_biz_id->[%s] is not the operation business of bk_tenant_id->[%s],return!",
+                bk_biz_id,
+                bk_tenant_id,
+            )
+            return
+        is_platform_data_id = True
 
     # source -- 数据渠道 sys / dbm / devx / perforce
     source = BASEREPORT_SOURCE_SYSTEM
@@ -1070,6 +1494,7 @@ def create_basereport_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
             type_label="time_series",
             bk_biz_id=bk_biz_id,
             created_from=DataIdCreatedFromSystem.BKDATA.value,
+            is_platform_data_id=is_platform_data_id,
         )
         logger.info(
             "create_basereport_datalink_for_bkcc: data_source created,bk_biz_id->[%s],data_name->[%s],bk_data_id->[%s]",
@@ -1092,11 +1517,30 @@ def create_basereport_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
                 }
                 for usage in BASEREPORT_USAGES
             ]
+            if extra_source:
+                result_table_usage_mapping.extend(
+                    [
+                        {
+                            "usage": usage,
+                            "table_id": f"{bk_tenant_id}_{bk_biz_id}_{extra_source}.{usage}",
+                            "table_name": f"{bk_tenant_id}_{bk_biz_id}_{extra_source}_{usage}",
+                            "data_label": f"{extra_source}_system",
+                        }
+                        for usage in BASEREPORT_USAGES
+                    ]
+                )
 
             result_table_ids = [t["table_id"] for t in result_table_usage_mapping]
             existing_rts = set(
                 models.ResultTable.objects.filter(table_id__in=result_table_ids).values_list("table_id", flat=True)
             )
+            if extra_source:
+                extra_result_table_ids = [
+                    t["table_id"] for t in result_table_usage_mapping if t.get("data_label") == f"{extra_source}_system"
+                ]
+                models.ResultTable.objects.filter(table_id__in=extra_result_table_ids).update(
+                    data_label=f"{extra_source}_system"
+                )
 
             for table in result_table_usage_mapping:
                 if table["table_id"] in existing_rts:  # 已存在
@@ -1113,6 +1557,7 @@ def create_basereport_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
                         bk_tenant_id=bk_tenant_id,
                         bk_biz_id=bk_biz_id,
                         table_name_zh=table["table_name"],
+                        data_label=table.get("data_label", ""),
                         is_custom_table=False,
                         default_storage=models.ClusterInfo.TYPE_VM,
                         creator="system",
@@ -1233,10 +1678,18 @@ def create_basereport_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
     # 2. 申请数据链路配置 VmResultTable, VmResultTableBinding, DataBus, ConditionalSink
     try:
         data_link_ins.apply_data_link(
-            data_source=data_source, storage_cluster_name=storage_cluster_name, bk_biz_id=bk_biz_id, source=source
+            data_source=data_source,
+            storage_cluster_name=storage_cluster_name,
+            bk_biz_id=bk_biz_id,
+            source=source,
+            extra_source=extra_source,
         )
         data_link_ins.sync_basereport_metadata(
-            bk_biz_id=bk_biz_id, storage_cluster_name=storage_cluster_name, source=source, datasource=data_source
+            bk_biz_id=bk_biz_id,
+            storage_cluster_name=storage_cluster_name,
+            source=source,
+            datasource=data_source,
+            extra_source=extra_source,
         )
         logger.info(
             "create_basereport_datalink_for_bkcc: data link applied successfully,for bk_biz_id->[%s]", bk_biz_id
@@ -1268,6 +1721,27 @@ def create_base_event_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
     if not settings.ENABLE_MULTI_TENANT_MODE:
         logger.error("create_base_event_datalink_for_bkcc: multi tenant mode is not enabled,return!")
         return
+
+    # 如果内置数据链路是按租户申请的，则只有业务ID等于租户下的运营业务时，才创建数据链路
+    # 如果是按租户申请的，数据源需要设置为公共数据源
+    is_platform_data_id = False
+    if settings.SPACE_BUILTIN_DATA_LINK_MODE == "tenant":
+        try:
+            default_biz_id = get_tenant_default_biz_id(bk_tenant_id)
+        except ValueError:
+            logger.error(
+                "create_base_event_datalink_for_bkcc: get tenant default biz id failed, bk_tenant_id->[%s], return!",
+                bk_tenant_id,
+            )
+            return
+        if bk_biz_id != default_biz_id:
+            logger.info(
+                "create_base_event_datalink_for_bkcc: bk_biz_id->[%s] is not the operation business of bk_tenant_id->[%s],return!",
+                bk_biz_id,
+                bk_tenant_id,
+            )
+            return
+        is_platform_data_id = True
 
     if storage_cluster_name:
         storage_cluster_id = models.ClusterInfo.objects.get(
@@ -1308,6 +1782,7 @@ def create_base_event_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
             bk_biz_id=bk_biz_id,
             bk_tenant_id=bk_tenant_id,
             created_from=DataIdCreatedFromSystem.BKDATA.value,
+            is_platform_data_id=is_platform_data_id,
         )
 
     logger.info(
@@ -1519,133 +1994,6 @@ def create_base_event_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stora
     )
 
 
-def _get_bk_biz_internal_data_ids(bk_tenant_id: str, bk_biz_id: int) -> list[dict[str, int | str]]:
-    """
-    获取业务内置数据ID
-    """
-    result: list[dict[str, int | str]] = []
-
-    # 系统指标
-    system_metric_data_source = DataSource.objects.filter(data_name=f"{bk_tenant_id}_{bk_biz_id}_sys_base").first()
-    if system_metric_data_source:
-        result.append({"task": "basereport", "dataid": system_metric_data_source.bk_data_id})
-
-    # 系统事件
-    system_event_data_source = DataSource.objects.filter(data_name=f"base_{bk_biz_id}_agent_event").first()
-    if system_event_data_source:
-        result.append({"task": "exceptionbeat", "dataid": system_event_data_source.bk_data_id})
-
-    # 系统进程
-    system_proc_data_source = DataSource.objects.filter(
-        data_name=SYSTEM_PROC_DATA_LINK_CONFIGS["perf"]["data_name_tpl"].format(bk_biz_id=bk_biz_id)
-    ).first()
-    if system_proc_data_source:
-        result.append({"task": "processbeat_perf", "dataid": system_proc_data_source.bk_data_id})
-
-    system_proc_port_data_source = DataSource.objects.filter(
-        data_name=SYSTEM_PROC_DATA_LINK_CONFIGS["port"]["data_name_tpl"].format(bk_biz_id=bk_biz_id)
-    ).first()
-    if system_proc_port_data_source:
-        result.append({"task": "processbeat_port", "dataid": system_proc_port_data_source.bk_data_id})
-
-    return result
-
-
-@app.task(ignore_result=True, queue="celery_metadata_task_worker")
-def process_gse_slot_message(message_id: str, bk_agent_id: str, content: str, received_at: str):
-    """
-    Celery异步任务--处理GSE投递的数据
-
-    {
-        # type 格式为 "动作名称"/"影响范围"/"操作内容"
-        "type": "fetch/host/dataid", # 请求类型，暂时只有一种，后续可能扩展
-        "cloudid": 0, # 发起请求的采集器主机 cloudid
-        "bk_agent_id": "02000000005254003dd2ea1700473962076n", # 发起请求的采集器主机 agentid
-        "ip": "127.0.0.1", # 发起请求的采集器主机 ip
-        "bk_tenant_id" : "my-tenant_id", # 采集器读到的 CMDB 下发的文件中的租户 ID
-        "params": "..." # 请求参数，不同的 type 对应着不同的参数
-    }
-
-    type: fetch/host/dataid
-    {
-        # metadata 可以内置这批 tasks 的数据格式以及元信息等，编写成一个独立的任务。
-        "tasks": [
-            "basereport", # 原 1001 dataid
-            "processbeat_perf", # 原 1007 dataid
-            "processbeat_port", # 原 1013 dataid
-            "global_heartbeat", # 原 1100001 dataid
-            "gather_up_beat",  # 原 1100017 dataid
-            "timesync", # 原 1100030 dataid
-            "dmesg", # 原 1100031 dataid
-            "exceptionbeat", # 原 1000 dataid
-        ]
-    }
-    """
-    from alarm_backends.core.cache.cmdb import HostManager
-
-    try:
-        content_data = json.loads(content)
-    except (ValueError, TypeError):
-        logger.error(
-            "process_gse_slot_message: content is not a valid json, message_id->%s, bk_agent_id->%s, content->%s",
-            message_id,
-            bk_agent_id,
-            content,
-        )
-        return
-
-    # 解析Content，Content内容为采集器与Metadata约定的协议
-    if content_data.get("type") == "fetch/host/dataid":
-        logger.info("process_gse_slot_message: start to fetch host dataid")
-
-        bk_tenant_id = content_data.get("bk_tenant_id")
-
-        if not bk_tenant_id:
-            logger.warning(
-                "process_gse_slot_message: bk_tenant_id is not found,message_id->%s,content->%s",
-                message_id,
-                content,
-            )
-            return
-
-        host = HostManager.get_by_agent_id(bk_tenant_id=bk_tenant_id, bk_agent_id=bk_agent_id)
-        if not host:
-            logger.warning(
-                "process_gse_slot_message: host not found,bk_tenant_id->%s,bk_agent_id->%s",
-                bk_tenant_id,
-                bk_agent_id,
-            )
-            return
-
-        result: list[dict[str, int | str]] = _get_bk_biz_internal_data_ids(
-            bk_tenant_id=bk_tenant_id, bk_biz_id=host.bk_biz_id
-        )
-
-        # 回调GSE接口,告知DataId
-        api.gse.dispatch_message(
-            bk_tenant_id=bk_tenant_id,
-            message_id=message_id,
-            agent_id_list=[bk_agent_id],
-            content=json.dumps({"code": 0, "data": result}),
-        )
-        logger.info(
-            "process_gse_slot_message: callback gse interface,message_id->%s,bk_agent_id->%s,content->%s,received_at->%s,result->%s",
-            message_id,
-            bk_agent_id,
-            content,
-            received_at,
-            result,
-        )
-    else:
-        logger.warning(
-            "process_gse_slot_message: unknown content type,message_id->%s,bk_agent_id->%s,content->%s,received_at->%s",
-            message_id,
-            bk_agent_id,
-            content,
-            received_at,
-        )
-
-
 @app.task(ignore_result=True, queue="celery_metadata_task_worker")
 def create_system_proc_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, storage_cluster_name: str | None = None):
     """
@@ -1663,6 +2011,27 @@ def create_system_proc_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stor
     # 如果未开启多租户模式，则不创建
     if not settings.ENABLE_MULTI_TENANT_MODE:
         return
+
+    # 如果内置数据链路是按租户申请的，则只有业务ID等于租户下的运营业务时，才创建数据链路
+    # 如果是按租户申请的，数据源需要设置为公共数据源
+    is_platform_data_id = False
+    if settings.SPACE_BUILTIN_DATA_LINK_MODE == "tenant":
+        try:
+            default_biz_id = get_tenant_default_biz_id(bk_tenant_id)
+        except ValueError:
+            logger.error(
+                "create_system_proc_datalink_for_bkcc: get tenant default biz id failed, bk_tenant_id->[%s], return!",
+                bk_tenant_id,
+            )
+            return
+        if bk_biz_id != default_biz_id:
+            logger.info(
+                "create_system_proc_datalink_for_bkcc: bk_biz_id->[%s] is not the operation business of bk_tenant_id->[%s],return!",
+                bk_biz_id,
+                bk_tenant_id,
+            )
+            return
+        is_platform_data_id = True
 
     # 如果未指定存储集群，则使用默认的VM集群
     if not storage_cluster_name:
@@ -1711,6 +2080,7 @@ def create_system_proc_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stor
                 bk_biz_id=bk_biz_id,
                 bk_tenant_id=bk_tenant_id,
                 created_from=DataIdCreatedFromSystem.BKDATA.value,
+                is_platform_data_id=is_platform_data_id,
             )
 
         # 创建结果表
@@ -1817,85 +2187,6 @@ def create_system_proc_datalink_for_bkcc(bk_tenant_id: str, bk_biz_id: int, stor
     logger.info(
         "create_system_proc_datalink_for_bkcc: create system proc datalink for bk_biz_id->[%s] success", bk_biz_id
     )
-
-
-def check_bkcc_space_builtin_datalink(biz_list: list[tuple[str, int]]):
-    """
-    检查业务内置数据链路
-    """
-
-    # 如果未开启新版数据链路或空间内置数据链路，则不检查
-    if not (settings.ENABLE_V2_VM_DATA_LINK and settings.ENABLE_SPACE_BUILTIN_DATA_LINK) or not biz_list:
-        return
-
-    logger.info("check_bkcc_space_builtin_datalink: start to check bkcc space builtin datalink")
-
-    # 获取已存在的数据源名称
-    exists_data_names: set[str] = set(
-        DataSource.objects.filter(
-            Q(data_name__endswith="_agent_event")
-            | Q(data_name__endswith="_sys_base")
-            | Q(data_name__endswith="_system_proc_port")
-            | Q(data_name__endswith="_system_proc_perf")
-        ).values_list("data_name", flat=True)
-    )
-
-    # 获取已存在的DataLink名称
-    data_link_name_to_namespaces: dict[str, str] = dict(DataLink.objects.values_list("data_link_name", "namespace"))
-
-    # 数据源名称模板到任务的映射
-    data_name_tpl_to_task: dict[tuple[str, tuple[str, ...]], Any] = {
-        ("bkmonitor", ("{bk_tenant_id}_{bk_biz_id}_sys_base",)): create_basereport_datalink_for_bkcc,
-        ("bklog", ("base_{bk_biz_id}_agent_event",)): create_base_event_datalink_for_bkcc,
-        ("bkmonitor", ("base_{bk_biz_id}_system_proc_port",)): create_system_proc_datalink_for_bkcc,
-        ("bkmonitor", ("base_{bk_biz_id}_system_proc_perf",)): create_system_proc_datalink_for_bkcc,
-    }
-
-    # 遍历业务列表，检查是否存在对应的数据源名称，如果不存在，则执行对应任务创建数据源
-    for bk_tenant_id, bk_biz_id in biz_list:
-        for (namespace, data_name_tpls), task in data_name_tpl_to_task.items():
-            data_names: list[str] = [
-                data_name_tpl.format(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id) for data_name_tpl in data_name_tpls
-            ]
-            for data_name in data_names:
-                if data_name not in exists_data_names:
-                    logger.info(
-                        "check_bkcc_space_builtin_datalink: data_source(%s) not found, bk_tenant_id->[%s], bk_biz_id->[%s], run task->[%s] to create",
-                        data_name,
-                        bk_tenant_id,
-                        bk_biz_id,
-                        task,
-                    )
-                    task(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id)
-                    break
-
-                if data_name not in data_link_name_to_namespaces:
-                    # 如果数据链路不存在，则创建数据链路
-                    logger.info(
-                        "check_bkcc_space_builtin_datalink: data_link(%s) not found, bk_tenant_id->[%s], bk_biz_id->[%s], run task->[%s] to create",
-                        data_name,
-                        bk_tenant_id,
-                        bk_biz_id,
-                    )
-                    task(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id)
-                    break
-                elif data_link_name_to_namespaces[data_name] != namespace:
-                    # 如果数据链路存在，但命名空间不匹配，则调整命名空间后重建
-                    datalink_ins = DataLink.objects.get(data_link_name=data_name)
-                    datalink_ins.namespace = namespace
-                    datalink_ins.save()
-                    logger.info(
-                        "check_bkcc_space_builtin_datalink: data_link(%s) namespace mismatch, bk_tenant_id->[%s], bk_biz_id->[%s], run task->[%s] to rebuild",
-                        data_name,
-                        bk_tenant_id,
-                        bk_biz_id,
-                        task,
-                    )
-                    for component_class in DataLink.STRATEGY_RELATED_COMPONENTS[datalink_ins.data_link_strategy]:
-                        component_class.objects.filter(data_link_name=data_name).update(namespace=namespace)
-                    task(bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id)
-
-    logger.info("check_bkcc_space_builtin_datalink: check bkcc space builtin datalink success")
 
 
 def create_single_tenant_system_datalink(

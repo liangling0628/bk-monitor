@@ -315,6 +315,7 @@ export default {
   基于策略选择: 'Policy-based selection',
   '可输入规则名称，标签搜索': 'Enter Rule name, label search',
   请输入搜索或筛选: 'Please enter search or filter',
+  支持正则匹配: 'Support regular expressions',
 
   '选择应用/服务': 'Select Application/Service',
   请输入关键字或标签: 'Please enter keywords or tags',
@@ -370,4 +371,18 @@ export default {
   '搜索 分组名': 'Search Groups Name',
   '搜索 收藏名称': 'Search Favorite Name',
   '请输入 关键字': 'Please enter keywords',
+  '搜索 字段名称': 'Search Field Name',
+  '搜索 名称、别名': 'Search Name, Alias',
+  '搜索 指标名、别名': 'Search Metric Name, Alias',
+  输入告警ID进行变量渲染: 'Enter Alarm ID to render variables',
+  '搜索 告警关键词': 'Search Alarm Keywords',
+  '我要评论...': 'I want to comment...',
+  请选择负责人: 'Please select the person in charge',
+  请选择聚合维度: 'Please select aggregation dimension',
+  不选则按策略整体聚合: 'Aggregate by strategy as a whole if left empty',
+
+  '自定义拆分依据，例如：同一蓝盾发布后集中出现':
+    'Custom split criteria, e.g. Same BlueShift release after a consolidated appearance',
+  '自定义新增合并依据，例如：同一蓝盾发布后集中出现':
+    'Custom add merge criteria, e.g. Same BlueShift release after a consolidated appearance',
 };

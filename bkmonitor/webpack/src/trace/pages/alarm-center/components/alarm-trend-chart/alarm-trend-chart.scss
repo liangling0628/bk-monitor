@@ -1,0 +1,32 @@
+.alarm-trend-chart-comp {
+  .chart-collapse-header {
+    .header-custom {
+      display: flex;
+      align-items: center;
+      height: 100%;
+
+      .title-description {
+        color: #63656e; /// apm下此处样式受到污染，此处手动设置颜色覆盖
+
+        .count {
+          color: #E71818;
+        }
+      }
+
+      .interval-select {
+        margin-right: 12px;
+        margin-left: auto;
+      }
+    }
+  }
+
+  .alarm-trend-chart-container {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+
+    .explore-chart {
+      width: 100%;
+    }
+  }
+}  

@@ -148,7 +148,11 @@ export default defineComponent({
           }}
         >
           <div class='key-wrap'>
-            <span class='key-name'>{`${this.localValue.key.name} (${this.localValue.key.id})`}</span>
+            <span class='key-name'>
+              {this.localValue.key.id === this.localValue.key.name
+                ? this.localValue.key.id
+                : `${this.localValue.key.name} (${this.localValue.key.id})`}
+            </span>
             <span class={['key-method', { 'red-text': NOT_TYPE_METHODS.includes(this.localValue.method.id) }]}>
               {this.localValue.method.name}
             </span>
@@ -171,7 +175,7 @@ export default defineComponent({
                     key={`${index}_key`}
                     class='value-name'
                   >
-                    {['string', 'number'].includes(typeof item.name) ? item.name : NULL_VALUE_NAME}
+                    {['string', 'number', 'boolean'].includes(typeof item.name) ? `${item.name}` : NULL_VALUE_NAME}
                   </span>,
                 ])}
                 {this.hideCount > 0 && <span class='value-condition'>{`+${this.hideCount}`}</span>}
@@ -179,16 +183,19 @@ export default defineComponent({
             )}
           </div>
           <div class='btn-wrap'>
-            <div
-              class='hide-btn'
-              onClick={this.handleHide}
-            >
-              {this.isHide ? (
-                <span class='icon-monitor icon-mc-invisible' />
-              ) : (
-                <span class='icon-monitor icon-guanchazhong' />
-              )}
-            </div>
+            {this.hasTagHidden && (
+              <div
+                class='hide-btn'
+                onClick={this.handleHide}
+              >
+                {this.isHide ? (
+                  <span class='icon-monitor icon-mc-invisible' />
+                ) : (
+                  <span class='icon-monitor icon-guanchazhong' />
+                )}
+              </div>
+            )}
+
             <div
               class='delete-btn'
               onClick={this.handleDelete}

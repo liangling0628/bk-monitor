@@ -27,7 +27,7 @@
 import type { ShallowRef } from 'vue';
 
 import { formatDuration } from './duration-input-utils';
-import { type IFilterItem, type IWhereItem, ECondition, EMethod } from './typing';
+import { type IFilterItem, type INormalWhere, type IWhereItem, ECondition, EMethod } from './typing';
 
 export const fieldTypeMap = {
   all: {
@@ -77,6 +77,24 @@ export const fieldTypeMap = {
     icon: 'icon-monitor icon-Others',
     color: '#B59D8D',
     bgColor: '#EBE0D9',
+  },
+  duration: {
+    name: window.i18n.t('数字'),
+    icon: 'icon-monitor icon-number1',
+    color: '#60A087',
+    bgColor: '#DDEBE6',
+  },
+  input: {
+    name: window.i18n.t('字符串'),
+    icon: 'icon-monitor icon-Str',
+    color: '#6498B3',
+    bgColor: '#D9E5EB',
+  },
+  object: {
+    name: window.i18n.t('对象'),
+    icon: 'icon-monitor icon-Object',
+    color: 'rgb(232, 234, 240)',
+    bgColor: 'rgb(151, 155, 165)',
   },
 };
 
@@ -133,6 +151,7 @@ export function getTitleAndSubtitle(str) {
 export function isNumeric(str) {
   return /^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(str);
 }
+
 /**
  * @description 合并where条件 （不相同的条件往后添加）
  * @param source
@@ -150,8 +169,7 @@ export function mergeWhereList(source: IWhereItem[], target: IWhereItem[]) {
     const sourceItem = sourceMap.get(item.key);
     if (
       !(
-        sourceItem &&
-        sourceItem.key === item.key &&
+        sourceItem?.key === item.key &&
         (sourceItem?.method || null) === (item?.method || null) &&
         JSON.stringify(sourceItem.value) === JSON.stringify(item.value) &&
         (sourceItem?.options?.is_wildcard || null) === (item?.options?.is_wildcard || null) &&
@@ -165,7 +183,6 @@ export function mergeWhereList(source: IWhereItem[], target: IWhereItem[]) {
   result = [...source, ...localTarget];
   return result;
 }
-
 export function onClickOutside(element, callback, { once = false } = {}) {
   const handler = (event: MouseEvent) => {
     let isInside = false;
@@ -191,8 +208,6 @@ export function setCacheUIData(v: IFilterItem[]) {
   localStorage.setItem(RETRIEVAL_FILTER_UI_DATA_CACHE_KEY, JSON.stringify(v));
 }
 
-export const TIME_CONSUMING_REGEXP = /^([1-9][0-9]*|0)(\.[0-9]*[1-9])?(ns|μs|ms|s|m|h|d)$/;
-
 export const traceWhereFormatter = (where: IWhereItem[]) => {
   return where.map(item => ({
     key: item.key,
@@ -200,9 +215,20 @@ export const traceWhereFormatter = (where: IWhereItem[]) => {
     value: item.value,
     condition: ECondition.and,
     options: item?.options || {},
-  })) as IWhereItem[];
+  })) as INormalWhere[];
 };
-export const equalWhere = (source: IWhereItem[], target: IWhereItem[]) => {
+export const traceWhereChangeFormatter = (where: INormalWhere[]) => {
+  const traceWhere = where
+    .filter(item => !!item)
+    .map(item => ({
+      key: item.key,
+      operator: item.method,
+      value: item.value,
+      options: item?.options || undefined,
+    }));
+  return traceWhere;
+};
+export const equalWhere = (source: INormalWhere[], target: INormalWhere[]) => {
   let result = true;
   let index = -1;
   if (target.length !== source.length) {
@@ -233,18 +259,6 @@ export const equalWhere = (source: IWhereItem[], target: IWhereItem[]) => {
   return result;
 };
 
-export const DURATION_KEYS = ['trace_duration', 'elapsed_time'];
-export const TRACE_DEFAULT_RESIDENT_SETTING_KEY = [
-  'trace_id',
-  'trace_duration',
-  'resource.service.name',
-  'collections.resource.service.name',
-  'span_name',
-  'collections.span_name',
-];
-export const SPAN_DEFAULT_RESIDENT_SETTING_KEY = ['trace_id', 'elapsed_time', 'resource.service.name', 'span_name'];
-export const INPUT_TAG_KEYS = ['span_id', 'trace_id'];
-
 export function getDurationDisplay(value: Array<number | string>) {
   const str = value.map(v => (v ? `${formatDuration(Number(v))}` : '0ms')).join('~');
   return str;
@@ -266,8 +280,35 @@ export function getTopDocument(node = document) {
   // 返回最终的顶层 document
   return currentRoot === document ? document : currentRoot;
 }
+/**
+ * 判断元素是否在视口中可见且无遮挡
+ * @param {HTMLElement} element - 要检查的元素
+ * @returns {boolean} - 元素是否可见
+ */
+export function isElementVisibleAndUnobstructed(element) {
+  if (!element) return false;
+  // 获取元素的位置信息
+  const rect = element.getBoundingClientRect();
+  // 检查元素是否在视口中
+  const isInViewport =
+    rect.top >= 0 &&
+    rect.left >= 0 &&
+    rect.bottom <= (window.innerHeight || getTopDocument().documentElement.clientHeight) &&
+    rect.right <= (window.innerWidth || getTopDocument().documentElement.clientWidth);
+
+  if (!isInViewport) return false;
+  // 检查元素是否被其他元素遮挡
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const elementAtCenter = (element?.getRootNode?.() || document).elementFromPoint(centerX, centerY);
+  // 检查中心点是否属于当前元素或其子元素
+  return element.contains(elementAtCenter);
+}
+
 export function triggerShallowRef<T>(shallowRef: ShallowRef<T>) {
-  shallowRef.value = structuredClone(shallowRef.value);
+  if (typeof shallowRef.value === 'object') {
+    shallowRef.value = JSON.parse(JSON.stringify(shallowRef.value));
+  }
 }
 
 /* 通配符字段key */
@@ -283,7 +324,3 @@ export const DEFAULT_GROUP_RELATION = 'OR';
 /* 空值的id和name */
 export const NULL_VALUE_NAME = `- ${window.i18n.t('空')} -`;
 export const NULL_VALUE_ID = '';
-/* Span 不支持弹出枚举值的字段 */
-export const SPAN_NOT_SUPPORT_ENUM_KEYS = ['time', 'start_time', 'end_time', 'parent_span_id', 'span_id', 'trace_id'];
-/* Trace 不支持弹出枚举值的字段 */
-export const TRACE_NOT_SUPPORT_ENUM_KEYS = ['min_start_time', 'max_end_time', 'trace_id', 'root_span_id'];

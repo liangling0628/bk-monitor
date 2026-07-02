@@ -363,9 +363,13 @@ VARIABLES = [
         "items": [
             {"name": "alarm.id", "desc": _lazy("告警ID"), "example": "163800442000001"},
             {"name": "alarm.name", "desc": _lazy("告警名称"), "example": "CPU总使用率告警"},
-            {"name": "alarm.dimensions['dimension_name'].display_name", "desc": _lazy("维度名"), "example": "目标IP"},
             {
-                "name": "alarm.dimensions['dimension_name'].display_value",
+                "name": "alarm.display_dimensions['tags.dimension_name'].display_name",
+                "desc": _lazy("维度名"),
+                "example": "目标IP",
+            },
+            {
+                "name": "alarm.display_dimensions['tags.dimension_name'].display_value",
                 "desc": _lazy("维度值"),
                 "example": "127.0.0.1",
             },
@@ -388,9 +392,6 @@ VARIABLES = [
             },
             {"name": "alarm.collect_count", "desc": _lazy("汇总事件数量"), "example": "10"},
             {"name": "alarm.notice_from", "desc": _lazy("消息来源"), "example": _lazy("蓝鲸监控")},
-            {"name": "alarm.company", "desc": _lazy("企业标识"), "example": _lazy("蓝鲸")},
-            {"name": "alarm.data_source_name", "desc": _lazy("数据来源名称"), "example": _lazy("计算平台")},
-            {"name": "alarm.data_source", "desc": _lazy("数据来源"), "example": "BKMONITOR"},
             {"name": "alarm.current_value", "desc": _lazy("当前值"), "example": "1.1"},
             {"name": "alarm.target_type", "desc": _lazy("目标类型"), "example": "IP/INSTANCE/TOPO"},
             {"name": "alarm.target_type_name", "desc": _lazy("目标类型名称"), "example": _lazy("IP/实例/节点")},
@@ -480,7 +481,6 @@ VARIABLES = [
             {"name": "action_instance.plugin_type_name", "desc": _lazy("套餐类型"), "example": _lazy("作业平台")},
             {"name": "action_instance.assignees", "desc": _lazy("负责人"), "example": "admin,yunweixiaoge"},
             {"name": "action_instance.operate_target_string", "desc": _lazy("执行对象"), "example": "127.0.0.1"},
-            {"name": "action_instance.bk_biz_id", "desc": _lazy("业务ID"), "example": "2"},
             {"name": "action_instance.start_time", "desc": _lazy("开始时间"), "example": "1970-08-01 10:00:00+08:00"},
             {"name": "action_instance.duration", "desc": _lazy("执行耗时(秒)"), "example": "130"},
             {"name": "action_instance.duration_string", "desc": _lazy("执行耗时字符串"), "example": "2m 10s"},
@@ -671,10 +671,10 @@ class NoticeWay:
         MAIL: _lazy("邮件"),
         WEIXIN: _lazy("微信"),
         QY_WEIXIN: _lazy("企业微信"),
-        VOICE: _lazy("电话"),
-        WX_BOT: _lazy("企业微信机器人"),
+        VOICE: _lazy("语音"),
+        WX_BOT: _lazy("群机器人"),
         BK_CHAT: _lazy("蓝鲸信息流"),
-        "bkchat|wxwork-bot": _lazy("蓝鲸信息流(企业微信机器人)"),
+        "bkchat|wxwork-bot": _lazy("蓝鲸信息流(群机器人)"),
         "bkchat|WEWORK": _lazy("蓝鲸信息流(企业微信服务号)"),
         "bkchat|SLACK": _lazy("蓝鲸信息流(SLACK机器人)"),
         "bkchat|SLACK_WEBHOOK": _lazy("蓝鲸信息流(SLACK)"),
@@ -691,7 +691,7 @@ class NoticeChannel:
     WX_BOT = "wxwork-bot"
     BK_CHAT = "bkchat"
 
-    NOTICE_CHANNEL_MAPPING = {USER: _lazy("内部用户"), WX_BOT: _lazy("企业微信机器人"), BK_CHAT: _lazy("蓝鲸信息流")}
+    NOTICE_CHANNEL_MAPPING = {USER: _lazy("内部用户"), WX_BOT: _lazy("群机器人"), BK_CHAT: _lazy("蓝鲸信息流")}
 
     NOTICE_CHANNEL_CHOICE = [(key, value) for key, value in NOTICE_CHANNEL_MAPPING.items()]
 

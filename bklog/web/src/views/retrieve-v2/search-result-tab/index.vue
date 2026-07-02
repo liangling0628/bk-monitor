@@ -1,5 +1,6 @@
 <script setup>
 import $http from '@/api';
+import { getFeatureToggleStatus, isFeatureToggleOn } from '@/hooks/use-feature-toggle';
 import useLocale from '@/hooks/use-locale';
 import useStore from '@/hooks/use-store';
 import { computed, defineEmits, defineProps, onMounted, ref, watch } from 'vue';
@@ -36,33 +37,29 @@ const isAiopsToggle = computed(() => {
     return false;
   }
 
-  // 日志聚类总开关
-  const { bkdata_aiops_toggle: bkdataAiopsToggle } = window.FEATURE_TOGGLE;
-  const aiopsBizList = window.FEATURE_TOGGLE_WHITE_LIST?.bkdata_aiops_toggle;
   const isLocalToggle = (indexSetItems.value?.some(i => i.scenario_id === 'log' && i.collector_config_id !== null))
     || indexSetItems.value?.some(i => i.scenario_id === 'bkdata');
+  const status = getFeatureToggleStatus('bkdata_aiops_toggle');
 
-  switch (bkdataAiopsToggle) {
-    case 'on':
-      return isLocalToggle;
-    case 'off':
-      return false;
-    default:
-      return aiopsBizList ? aiopsBizList.some(item => item.toString() === bkBizId.value) : isLocalToggle;
+  if (status === 'on') {
+    return isLocalToggle;
   }
+
+  return isFeatureToggleOn('bkdata_aiops_toggle', String(bkBizId.value), { defaultEnabled: isLocalToggle });
 });
 
 const isChartEnable = computed(() => !store.getters.isUnionSearch && indexSetItems.value?.[0]?.support_doris);
 const isGrepEnable = computed(() => !store.getters.isUnionSearch && indexSetItems.value?.[0]?.support_doris);
 
 const isExternal = computed(() => window.IS_EXTERNAL === true);
+const isSceneMode = computed(() => store.getters.isSceneMode);
 // 可切换Tab数组
 const panelList = computed(() => {
   return [
     { name: 'origin', label: $t('原始日志'), disabled: false },
-    { name: 'clustering', label: $t('日志聚类'), disabled: !isAiopsToggle.value },
-    { name: 'graph_analysis', label: $t('图表分析'), disabled: !isChartEnable.value },
-    { name: 'grep', label: $t('Grep模式'), disabled: !isGrepEnable.value },
+    { name: 'clustering', label: $t('日志聚类'), disabled: !isAiopsToggle.value || isSceneMode.value },
+    { name: 'graph_analysis', label: $t('图表分析'), disabled: !isChartEnable.value || isSceneMode.value },
+    { name: 'grep', label: $t('Grep模式'), disabled: !isGrepEnable.value || isSceneMode.value },
   ];
 });
 
@@ -94,6 +91,7 @@ const handleDialogUpdate = (newVal) => {
 const handleCollectionSuccess = () => {
   console.log('收藏成功');
 };
+
 const handleAddAlertPolicy = async () => {
   const params = {
     bizId: store.state.bkBizId,
@@ -124,13 +122,10 @@ const handleAddAlertPolicy = async () => {
 
   const urlArr = [];
   for (const key in params) {
-    if (key === 'dimension' || key === 'condition') {
-      urlArr.push(`${key}=${encodeURI(JSON.stringify(params[key]))}`);
-    } else {
-      urlArr.push(`${key}=${params[key]}`);
-    }
+    const value = typeof params[key] === 'object' ? JSON.stringify(params[key]) : params[key];
+    urlArr.push(`${key}=${value}`);
   }
-  window.open(`${window.MONITOR_URL}/?${urlArr.join('&')}#/strategy-config/add`, '_blank');
+  window.open(`${window.MONITOR_URL}/?${urlArr.join('&')}#/strategy-config/add`, '_blank', 'noopener,noreferrer');
 };
 const handleAddAlertDashboard = async () => {
   showDialog.value = true;
@@ -149,12 +144,22 @@ watch(
     if (['clustering', 'graphAnalysis', 'grep', 'graph_analysis'].includes(route.query.tab)) {
       if (
         (!grepEnable && route.query.tab === 'grep')
-        || (!graphEnable && route.query.tab === 'graphAnalysis'
-        || route.query.tab === 'graph_analysis')
+        || (!graphEnable && (route.query.tab === 'graphAnalysis'
+        || route.query.tab === 'graph_analysis'))
         || (!aiopsEnable && route.query.tab === 'clustering')
       ) {
         handleActive('origin');
       }
+    }
+  },
+);
+
+// 场景化检索模式切换时，若当前不在原始日志 tab，自动切回原始日志
+watch(
+  () => isSceneMode.value,
+  (isSceneMode) => {
+    if (isSceneMode && normalizedValue.value !== 'origin') {
+      emit('input', 'origin', false);
     }
   },
 );
@@ -178,6 +183,7 @@ onMounted(() => {
     </div>
     <div class="retrieve2-tab-right">
       <div
+        v-if="!isSceneMode"
         class="btn-alert-dashboard btn-spacing"
         @click="handleAddAlertDashboard"
       >
@@ -188,7 +194,7 @@ onMounted(() => {
         <span>{{ $t('添加到仪表盘') }}</span>
       </div>
       <div
-        v-if="!isExternal"
+        v-if="!isExternal && !isSceneMode"
         class="btn-alert-policy btn-spacing"
         @click="handleAddAlertPolicy"
       >

@@ -19,17 +19,16 @@ from apm_web.trace.resources import (
     GetFieldsOptionValuesResource,
     ListFlattenSpanResource,
     ListFlattenTraceResource,
+    ListLinkResource,
     ListOptionValuesResource,
-    ListServiceStatisticsResource,
     ListSpanHostInstancesResource,
     ListSpanResource,
-    ListSpanStatisticsResource,
     ListStandardFilterFieldsResource,
     ListTraceComparisonResource,
     ListTraceResource,
     ListTraceViewConfigResource,
     SpanDetailResource,
-    TraceChatsResource,
+    TraceChartsResource,
     TraceDetailResource,
     TraceDiagramResource,
     TraceFieldStatisticsGraphResource,
@@ -63,6 +62,7 @@ class TraceQueryViewSet(ResourceViewSet):
             "list_flatten_traces",
             "list_flatten_spans",
             "list_spans",
+            "list_links",
         ]:
             return [
                 InstanceActionForDataPermission(
@@ -139,23 +139,7 @@ class TraceQueryViewSet(ResourceViewSet):
                 user_visit_record,
             ],
         ),
-        ResourceRoute(
-            "POST",
-            ListSpanStatisticsResource,
-            endpoint="list_span_statistics",
-            decorators=[
-                user_visit_record,
-            ],
-        ),
-        ResourceRoute(
-            "POST",
-            ListServiceStatisticsResource,
-            endpoint="list_service_statistics",
-            decorators=[
-                user_visit_record,
-            ],
-        ),
-        ResourceRoute("GET", TraceChatsResource, "trace_charts"),
+        ResourceRoute("GET", TraceChartsResource, "trace_charts"),
         ResourceRoute("GET", TraceOptionsResource, "trace_options"),
         ResourceRoute("GET", ListStandardFilterFieldsResource, "standard_fields"),
         ResourceRoute("GET", ListTraceViewConfigResource, "view_config"),
@@ -172,6 +156,7 @@ class TraceQueryViewSet(ResourceViewSet):
         ResourceRoute("POST", TraceFieldStatisticsInfoResource, "field_statistics_info"),
         ResourceRoute("POST", TraceFieldStatisticsGraphResource, "field_statistics_graph"),
         ResourceRoute("POST", TraceGenerateQueryStringResource, "generate_query_string"),
+        ResourceRoute("POST", ListLinkResource, endpoint="list_links"),
     ]
 
     @action(methods=["POST"], detail=False, url_path="download_topk")

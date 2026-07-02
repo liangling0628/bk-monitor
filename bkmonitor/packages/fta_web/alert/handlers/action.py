@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
 Copyright (C) 2017-2025 Tencent. All rights reserved.
@@ -8,11 +7,11 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import operator
 import time
 from collections import defaultdict
 from functools import reduce
-from typing import Dict, List
 
 from django.utils.translation import gettext as _
 from django.utils.translation import gettext_lazy as _lazy
@@ -102,14 +101,14 @@ class ActionQueryHandler(BaseBizQueryHandler):
 
     def __init__(
         self,
-        bk_biz_ids: List[int] = None,
-        alert_ids: List[str] = None,
-        status: List[str] = None,
+        bk_biz_ids: list[int] = None,
+        alert_ids: list[str] = None,
+        status: list[str] = None,
         parent_action_id=None,
         username: str = "",
         **kwargs,
     ):
-        super(ActionQueryHandler, self).__init__(bk_biz_ids, username, **kwargs)
+        super().__init__(bk_biz_ids, username, **kwargs)
         self.alert_ids = alert_ids
         self.status = [status] if isinstance(status, str) else status
         self.search_parent_action_id = None
@@ -254,16 +253,18 @@ class ActionQueryHandler(BaseBizQueryHandler):
         queries = []
         if self.authorized_bizs is not None and self.bk_biz_ids:
             # 进行我有权限的告警过滤
-            queries.append(Q("terms", **{"bk_biz_id": self.authorized_bizs}))
+            authorized_query = self.build_es_terms_query("bk_biz_id", self.authorized_bizs)
+            if authorized_query is not None:
+                queries.append(authorized_query)
 
         if self.bk_biz_ids == []:
             # 如果不带任何业务信息，表示获取跟自己相关的告警
             queries.append(Q("term", operator=self.request_username))
 
         if self.unauthorized_bizs and self.request_username:
-            queries.append(
-                Q(Q("terms", **{"bk_biz_id": self.unauthorized_bizs}) & Q("term", operator=self.request_username))
-            )
+            unauthorized_query = self.build_es_terms_query("bk_biz_id", self.unauthorized_bizs)
+            if unauthorized_query is not None:
+                queries.append(unauthorized_query & Q("term", operator=self.request_username))
         if queries:
             return search_object.filter(reduce(operator.or_, queries))
         return search_object
@@ -325,17 +326,12 @@ class ActionQueryHandler(BaseBizQueryHandler):
         return cleaned_data
 
     def parse_condition_item(self, condition: dict) -> Q:
-        if condition["key"] == "duration":
-            # 对 key 为 stage 进行特殊处理
-            return reduce(
-                operator.or_,
-                [
-                    Q("range", duration=self.DurationOption.FILTER[value])
-                    for value in condition["value"]
-                    if value in self.DurationOption.FILTER
-                ],
-            )
-        return super(ActionQueryHandler, self).parse_condition_item(condition)
+        if condition["origin_key"] == "action_name":
+            condition["key"] = "action_name.raw"
+        if condition["origin_key"] == "strategy_name":
+            condition["key"] = "strategy_name.raw"
+
+        return super().parse_condition_item(condition)
 
     def add_overview(self, search_object):
         # 总览聚合
@@ -353,7 +349,7 @@ class ActionQueryHandler(BaseBizQueryHandler):
         result = {
             "id": "action",
             "name": _("处理记录"),
-            "count": search_result.hits.total.value,
+            "count": 0,
             "children": [],
         }
 
@@ -372,6 +368,8 @@ class ActionQueryHandler(BaseBizQueryHandler):
                     "count": bucket_dict.get(status, 0),
                 }
             )
+
+            result["count"] += bucket_dict.get(status, 0)
 
         return result
 
@@ -456,10 +454,10 @@ class ActionQueryHandler(BaseBizQueryHandler):
 
         return result_data
 
-    def top_n(self, fields: List, size=10, translators: Dict[str, AbstractTranslator] = None, char_add_quotes=True):
+    def top_n(self, fields: list, size=10, translators: dict[str, AbstractTranslator] = None, char_add_quotes=True):
         translators = {
             "signal": ActionSignalTranslator(),
             "action_plugin_type": ActionPluginTypeTranslator(),
             "bk_biz_id": BizTranslator(),
         }
-        return super(ActionQueryHandler, self).top_n(fields, size, translators, char_add_quotes)
+        return super().top_n(fields, size, translators, char_add_quotes)

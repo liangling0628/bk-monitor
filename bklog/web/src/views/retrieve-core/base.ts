@@ -32,6 +32,7 @@ import type OptimizedHighlighter from './optimized-highlighter';
 import type RetrieveEvent from './retrieve-events';
 import { EventEmitter } from './event';
 import { reportRouteLog } from '@/store/modules/report-helper.ts';
+import { formatTimeZoneString } from '@/global/utils/time';
 
 
 export default class extends EventEmitter<RetrieveEvent> {
@@ -63,6 +64,9 @@ export default class extends EventEmitter<RetrieveEvent> {
   // 趋势图高度
   trendGraphHeight: number;
 
+  // 场景筛选面板高度
+  sceneFilterPanelHeight: number;
+
   // 索引集id列表
   indexSetIdList: string[];
 
@@ -86,7 +90,7 @@ export default class extends EventEmitter<RetrieveEvent> {
 
   logRowsContainerId: string;
 
-  RGBA_LIST: string[];
+  RGBA_LIST: string[][];
 
   isSearching = false;
 
@@ -134,6 +138,73 @@ export default class extends EventEmitter<RetrieveEvent> {
     return data;
   }
 
+  /**
+   * 格式化时间戳，支持时区转换
+   * @param data 时间戳或时间字符串（支持 ISO 8601 格式，如 2024-11-01T08:56:24.274552Z）
+   * @param fieldType 字段类型，date 或 date_nanos
+   * @param timezone 时区
+   * @returns 格式化后的时间戳
+   */
+  formatTimeZoneValue(data: number | string, fieldType: string, timezone: string = 'Asia/Shanghai') {
+    if (data === null || data === undefined || data === '' || data === '--') {
+      return '--';
+    }
+
+    if (['date', 'date_nanos', 'date_time', 'time'].includes(fieldType)) {
+      let format = 'YYYY-MM-DD HH:mm:ss';
+      if (fieldType === 'date_nanos' || fieldType === 'date') {
+        const dataStr = `${data}`;
+        const decimalPart = dataStr.split('.')[1]?.replace(/[^0-9]/g, '') ?? '';
+        const decimalLen = decimalPart.length;
+
+        if (decimalLen > 0) {
+          format = `YYYY-MM-DD HH:mm:ss.${'S'.repeat(Math.min(decimalLen, 9))}`;
+        } else {
+          const pureDigits = dataStr.replace(/^<mark>|<\/mark>$/gi, '');
+          const extraDigits = /^\d+$/.test(pureDigits) ? Math.min(Math.max(pureDigits.length - 10, 0), 9) : 0;
+
+          // date_nanos 无小数时默认毫秒精度；date 仅在超出秒级部分非全0时补充精度
+          if (fieldType === 'date_nanos') {
+            format = `YYYY-MM-DD HH:mm:ss.${'S'.repeat(extraDigits || 3)}`;
+          } else if (extraDigits > 0 && !/^.{10}0+$/.test(pureDigits)) {
+            format = `YYYY-MM-DD HH:mm:ss.${'S'.repeat(extraDigits)}`;
+          }
+        }
+      }
+
+      if (`${data}`.startsWith('<mark>')) {
+        const value = `${data}`.replace(/^<mark>/i, '').replace(/<\/mark>$/i, '');
+
+        if (value === '' || value === '--') {
+          return '<mark>--</mark>';
+        }
+
+        const markFormatValue = /^\d+$/.test(value)
+          ? formatTimeZoneString(this.normalizeTimestampToMs(Number(value)), timezone, format, false)
+          : formatTimeZoneString(value, timezone, format, false);
+        return '<mark>' + (markFormatValue === 'Invalid Date' ? value : markFormatValue) + '</mark>';
+      }
+
+      if (/^\d+$/.test(String(data))) {
+        const formatValue = formatTimeZoneString(this.normalizeTimestampToMs(Number(data)), timezone, format, false);
+        return formatValue === 'Invalid Date' ? data : formatValue || data || '--';
+      }
+
+      const formatValue = formatTimeZoneString(data, timezone, format, false);
+      return formatValue === 'Invalid Date' ? data : formatValue || data || '--';
+    }
+
+    return data || '--';
+  }
+
+
+  private normalizeTimestampToMs(ts: number): number {
+    const len = `${ts}`.length;
+    if (len <= 10) return ts * 1000;
+    if (len <= 13) return ts;
+    if (len <= 16) return Math.floor(ts / 1000);
+    return Math.floor(ts / 1000000);
+  }
 
   getRegExp(reg: RegExp | boolean | number | string, flgs?: string, fullMatch = false, formatRegStr = true): RegExp {
     return StaticUtil.getRegExp(reg, flgs, fullMatch, formatRegStr);

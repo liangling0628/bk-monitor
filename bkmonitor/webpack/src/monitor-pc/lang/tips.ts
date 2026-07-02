@@ -160,6 +160,7 @@ export default {
     'The current space does not support this function. If you need to use it, please contact the administrator',
   '当前空间未开启故障诊断功能, 请联系': 'The current space does not support this function. please contact',
   BK助手: 'BK Assistant',
+  'BK 助手': 'BK Assistant',
   当前告警关联故障: 'Current alarm associated fault',
   当前告警无关联故障: 'The current alarm has no associated faults',
   当前无异常事件: 'Currently no abnormal events',
@@ -182,8 +183,10 @@ export default {
   对比的TraceID相同: 'The compared TraceID is the same',
   '打开后，除了采集启用的指标还会采集未来新增的指标。':
     'After opening, in addition to collecting enabled indicators, future new indicators will also be collected.',
-  '因为当前是旧的存储模式，开启采集新增指标后会切换成新的存储模式，旧的历史数据会丢失，请确认是否继续。':
-    'Because the current storage mode is old, after enabling the collection of new indicators, it will switch to the new storage mode, and the old historical data will be lost. Please confirm whether to continue.',
+  '开启自动发现，已有数据不会丢失，但可能会导致维度爆炸问题，请确认维度数据':
+    'After opening automatic discovery, existing data will not be lost, but it may cause dimension explosion problems, please confirm the dimension data',
+  '关闭自动发现，将以手动维护的指标和维度为准，其他数据将被丢弃':
+    'After closing automatic discovery, the indicators and dimensions maintained manually will be used as the standard, and other data will be discarded',
   '添加新的屏蔽范围将会覆盖之前的屏蔽内容，确定覆盖？':
     'Adding a new blocking range will overwrite the previous blocked content, are you sure to proceed?',
   '批量粘贴请使用;进行分隔': 'Please use bulk pasting; Separate',
@@ -198,6 +201,8 @@ export default {
   去检索: 'To retrieve',
   '监控数据维度未配置("目标IP"和"云区域ID")，监控目标无法命中目标':
     'The monitoring data dimensions are not configured ("target IP" and "cloud region ID"), and the monitoring target cannot hit the target',
+  '每次检测任务出现新的维度值 {dimensions} 时，都会倒推过去 {window} 内是否出现过相同维度值，如果没有则告警，出现过则不告警。':
+    'Whenever new dimension values ({dimensions}) appear in a detection task, the system retroactively checks whether the same dimension values occurred within the past {window}. If not, an alert is triggered; otherwise, no alert is issued.',
   '监控数据维度未配置("服务实例")， 监控目标无法命中目标':
     'The monitoring data dimension is not configured ("service instance"), and the monitoring target cannot hit the target',
   存在关联的告警组: 'There is an associated alarm group',
@@ -373,6 +378,7 @@ export default {
   修改通知对象: 'Modify Notify Target',
   通知对象不能为空: 'Notify target cannot be empty',
   暂无选项: 'No options',
+  '（找到 {0} 条结果，用时 {1} 毫秒）': '(Found {0} results, took {1} milliseconds)',
   PromQL助手: 'PromQL Helper',
   '指标/PromQL语句': 'Metric/PromQL',
   用户指令: 'User Instruction',
@@ -386,6 +392,11 @@ export default {
   调试数据范围取当前时间窗口前1000条数据:
     'The debugging data range takes the previous 1000 entries from the current time window',
   只有数值类型的字段可作为监控指标: 'Only fields of numeric type can be used as monitoring indicators',
+  '尚未开放自主接入，请联系管理员': 'Self-service access is not yet open, please contact the administrator',
+  '当前选择，包含 {0} 个空间未开启故障分析功能，':
+    'The currently selected {0} spaces have not enabled the fault analysis function,',
+  查看相关接入指引: 'View related access guidelines',
+  打开故障功能: 'open fault function',
 
   // 查询模板
   无法删除: 'Cannot delete',
@@ -406,6 +417,10 @@ export default {
   '仪表盘 Panel 级别的定位，需要一定的时间同步，如有需要请点击':
     'The positioning at the panel level of the dashboard requires a certain amount of time to synchronize. If necessary, please click',
 
+  // 告警中心
+  'PromQL 策略暂时不支持维度分析': 'PromQL strategies do not support dimension analysis',
+  异常点: 'Abnormal point',
+
   // APM-告警模板
   查看各服务告警情况: 'View alarm situation of each service',
   查看全部关联服务: 'View all related services',
@@ -423,6 +438,8 @@ export default {
   '再次勾选「已配置」的策略，可重新下发，覆盖原有的策略':
     'After checking the strategy that has been applied, you can re-issue it to override the existing strategy',
   请先选择模版: 'Please select a template first',
+  '经过 {0} 分析，发现以下可疑维度（组合）：':
+    'After {0} analysis, the following suspicious dimensions (combinations) were found:',
   '解除关联后，{0}服务下将不会配置该策略':
     'After unassociating, the strategy will not be configured on the {0} service',
   模板: 'Template',
@@ -437,5 +454,55 @@ export default {
     'After disabling the automatic issuance feature, new services will not automatically configure this strategy',
   '并行：组间同时拨打，组内顺序依次拨打；<br>串行：多个用户组人员顺序合并后依次拨打，<br>重复人员以前置组优先':
     'Parallel: Calls are made simultaneously between groups, and sequentially within each group.<br>Serial: The personnel from multiple user groups are merged in sequence and called one by one, <br>with repeated personnel given priority based on their earlier group.',
+  上报数据后方可配置策略: 'The strategy can only be configured after reporting the data',
+  '手动选择或筛选后的结果作为分组对象。':
+    'The results of manual selection or filtering are used as the grouping object',
+  请先选择指标: 'Please select the metric first',
+  自动匹配规则: 'Automatic matching rules',
   当前业务时区: 'Current business time zone',
+  '输入 $ 可以插入变量': 'Input $ to insert variables',
+
+  // ISSUES
+  新类问题: 'New Issue',
+  回归问题: 'Regression Issue',
+  新类: 'New',
+  回归: 'Regression',
+  待审核: 'Pending Review',
+  归档: 'Archived',
+  '确认批量标记为"已解决"？': 'Confirm batch marking as "Resolved"?',
+  '确认标记为“已解决”？': 'Confirm marking as "Resolved"?',
+  '确认重新打开？': 'Confirm reopening?',
+  '确认归档？': 'Confirm archiving?',
+  '确认恢复？': 'Confirm restoring?',
+  指派责任人成功: 'Assign responsible person successfully',
+  添加跟进信息成功: 'Add follow-up information successfully',
+  告警事件数: 'Alarm Event Count',
+  标记为已解决成功: 'Mark as resolved successfully',
+  已配置issue聚合: 'Issue aggregation already configured',
+  '该服务已关联{0}个告警策略': 'This service has been associated with{0}alarm policies',
+  归档成功: 'Archive successfully',
+  恢复成功: 'Restore successfully',
+  重新打开成功: 'Reopen successfully',
+  请选择Issue聚合生效告警级别: 'Please select effective alert level for Issue aggregation',
+  '请先选择 Issue': 'Please select Issue first',
+  '请至少选择 2 个 Issue': 'Please select at least 2 Issues',
+  '主 Issue 不支持再并入其他主 Issue': 'The main Issue does not support being merged into other main Issues',
+  '合并了 {n} 个 Issue，点击查看合并明细': 'Merged {n} Issues, click to view merge details',
+  拆分: 'Split',
+
+  '选择或填写拆分依据后，再确认拆分为新 Issue。':
+    'After selecting or filling in the split basis, confirm the split as a new Issue.',
+  合并后保留: 'After merging, retain',
+  合并后隐藏: 'After merging, hide',
+  '由执行合并的用户指定，合并后会沉淀到主 Issue 的合并来源种，便于后续复盘。':
+    'Specified by the user who performs the merge, and will be retained as the merge source in the main Issue.',
+  '只能继续作为主 Issue，不支持再合并入其他 Issue；':
+    'Only continue as the main Issue, and cannot be merged into other Issues.',
+  '事件数、影响范围会并入主 Issue；': 'Event count and impact scope will be merged into the main Issue.',
+  '默认保留第 1 条选中的 Issue 作为主 Issue，也可以在下方表单切换；':
+    'By default, the first selected Issue is retained as the main Issue, and can be switched in the form below.',
+
+  '已授权 TAPD 项目列表 · 已关联 {count} 个项目': 'Authorized TAPD Project List · {count} Projects Associated',
+  '开启后，当本单据在外部平台进入「已完成」类状态{0}时，本 Issue 将自动流转为「已解决」。':
+    'After opening, when this document enters the "Completed" status {0} on the external platform, this issue will automatically flow to "Resolved".',
 };

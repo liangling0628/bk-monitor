@@ -56,7 +56,7 @@ interface IClusterItem {
   /** 存储集群ID */
   storage_cluster_id: number;
   /** 存储集群名称 */
-  storage_cluster_name: string;
+  storage_display_name: string;
   /** 存储总量（字节） */
   storage_total: number;
   /** 存储使用率（百分比，0-100） */
@@ -121,6 +121,11 @@ export default defineComponent({
       type: Boolean,
       default: false,
     },
+    /** 是否显示集群说明 */
+    showDesc: {
+      type: Boolean,
+      default: true,
+    },
   },
   emits: ['choose'],
 
@@ -139,19 +144,18 @@ export default defineComponent({
     const currentRow = ref<IClusterItem | null>(null);
     /** 当前选中集群的配置信息 */
     const setupConfig = ref<ISetupConfig | null>(null);
-    // showBizCount
     const columns = computed(() => {
       const baseColumns = [
         {
-          title: t('采集名'),
-          colKey: 'storage_cluster_name',
+          title: t('集群名'),
+          colKey: 'storage_display_name',
           cell: (h, { row }: { row: IClusterItem }) => (
             <bk-radio checked={isSelected(row)}>
               <div
                 class='overflow-tips'
                 v-bk-overflow-tips
               >
-                <span class='cluster-name'>{row.storage_cluster_name}</span>
+                <span class='cluster-name'>{row.storage_display_name}</span>
               </div>
             </bk-radio>
           ),
@@ -222,6 +226,7 @@ export default defineComponent({
      * 当有选中的集群且该集群存在于列表中时显示
      */
     const isShowDesc = computed(() => {
+      if (!props.showDesc) return false;
       if (!props.clusterSelect) {
         return false;
       }
@@ -309,7 +314,6 @@ export default defineComponent({
       },
       { deep: true },
     );
-
     // ==================== 渲染函数 ====================
 
     /**

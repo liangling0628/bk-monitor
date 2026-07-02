@@ -18,15 +18,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 We undertake not to change the open source license (MIT license) applicable to the current version of
 the project delivered to anyone in the future.
 """
-from typing import List
 
-from apps.api import BkDataAuthApi, BkLogApi, TransferApi
+from apps.api import BkLogApi, TransferApi
 from apps.api.modules.utils import (
     get_bkcc_biz_id_related_spaces,
     get_non_bkcc_space_related_bkcc_biz_id,
 )
 from apps.feature_toggle.handlers.toggle import FeatureToggleObject
 from apps.feature_toggle.plugins.constants import UNIFY_QUERY_SEARCH
+from apps.log_databus.models import CollectorConfig
 from apps.log_search.constants import TraceMatchFieldType, TraceMatchResult
 from apps.log_search.exceptions import (
     FieldsTypeConsistencyException,
@@ -47,6 +47,7 @@ from apps.utils.db import array_group
 from apps.utils.local import get_request_username
 from apps.utils.thread import MultiExecuteFunc
 from bkm_space.utils import space_uid_to_bk_biz_id
+import builtins
 
 
 class ResultTableHandler(APIModel):
@@ -111,13 +112,6 @@ class ResultTableHandler(APIModel):
                 all_rt_ids.add(index["result_table_id"])
         result = dedupe_result
 
-        # 如果是数据平台则只显示用户有管理权限的RT列表
-        if self.scenario_id == Scenario.BKDATA:
-            scopes = BkDataAuthApi.get_user_perm_scope(
-                {"user_id": self.username, "action_id": "result_table.manage_auth", "show_admin_scopes": True}
-            )
-            authorized_tables = {scope["result_table_id"] for scope in scopes if scope.get("result_table_id")}
-            result = [index for index in result if index["result_table_id"] in authorized_tables]
         return result
 
     def retrieve(self, result_table_id):
@@ -139,8 +133,9 @@ class ResultTableHandler(APIModel):
                 # 如果未指定集群ID，则从最后一个结果表中获取，scenario_id 为 log 时，一般只会传一个result_table_id
                 if not _cluster_id:
                     last_result_table_id = _result_table_id.split(",")[-1]
+                    storage_cluster_type = CollectorConfig.get_storage_cluster_type_by_table_id(last_result_table_id)
                     storage_info = TransferApi.get_result_table_storage(
-                        {"result_table_list": last_result_table_id, "storage_type": "elasticsearch"}
+                        {"result_table_list": last_result_table_id, "storage_type": storage_cluster_type}
                     )[last_result_table_id]
                     cluster_config = storage_info.get("cluster_config", {})
                     _cluster_id = cluster_config.get("cluster_id")
@@ -190,7 +185,7 @@ class ResultTableHandler(APIModel):
         )
         return index_retrieve
 
-    def adapt(self, basic_indices: List[str], append_index):
+    def adapt(self, basic_indices: builtins.list[str], append_index):
         """
         1、检查两索引字段类型是否一致；
         2、检查两索引时间字段和类型是否一致；

@@ -71,7 +71,12 @@ export default defineComponent({
       if (content === 'text') {
         text = traceId;
       } else {
-        const hash = `#${window.__BK_WEWEB_DATA__?.parentRoute || '/'}home/?app_name=${
+        // #if IS_APM_MONITOR
+        const parentRoute = '/trace/';
+        // #else
+        const parentRoute = window.__BK_WEWEB_DATA__?.parentRoute || '/';
+        // #endif
+        const hash = `#${parentRoute}home/?app_name=${
           props.appName
         }&search_type=accurate&sceneMode=trace&trace_id=${traceId}`;
         text = location.href.replace(location.hash, hash);
@@ -133,8 +138,12 @@ export default defineComponent({
               app_name: this.appName,
               bk_biz_id: (window.bk_biz_id || window.cc_biz_id) as string,
             }}
+            tips={{
+              content: getAIBluekingShortcutTips(AI_BLUEKING_SHORTCUTS_ID.TRACING_ANALYSIS),
+              theme: 'light',
+              placement: 'right',
+            }}
             shortcutId={AI_BLUEKING_SHORTCUTS_ID.TRACING_ANALYSIS}
-            tips={getAIBluekingShortcutTips(AI_BLUEKING_SHORTCUTS_ID.TRACING_ANALYSIS)}
           />
         </div>
 

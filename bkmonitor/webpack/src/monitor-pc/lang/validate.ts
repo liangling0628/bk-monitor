@@ -279,6 +279,7 @@ export default {
   '标签长度不能超过 120 字符': 'The label length cannot exceed 120 characters',
   各数据源的可用算法不兼容: 'The available algorithms of each data source are incompatible',
   至少选择2个指标: 'Select at least 2 metrics',
+  最少选择一个负责人: 'Select at least one responsible person',
   策略名已存在: 'Strategy name already exists',
   配置名称不能为空: 'Configuration name cannot be empty',
   必填: 'Required',
@@ -297,8 +298,10 @@ export default {
   '变量名仅支持大小写字符、数字、下划线、点（.），50个字符以内':
     'Variable name only supports case-sensitive characters, numbers, underscores, and dots (.), up to 50 characters',
   请输入业务ID: 'Please enter the business ID',
-  '被调服务、被调service、被调接口组合值唯一':
-    'The combination value of the called service, called service, and called interface is unique',
+  '被调服务、被调 Service、被调接口、是否全局的组合值须唯一':
+    'The combination value of the called service, called Service, called interface and whether it is global must be unique',
+  '类型、被调服务、被调Service、被调接口、是否全局的组合值须唯一':
+    'The combination value of the type, called service, called Service, called interface, and whether it is global must be unique',
   返回码格式错误: 'Return code format error',
   检测规则必须开启一个级别: 'The detection rule must be enabled at one level',
   '触发周期数 >=1 且 >= 检测数': 'Trigger cycle number >=1 and >= detection number',
@@ -306,5 +309,7 @@ export default {
   克隆配置不能和源模板一致: 'Cloned configuration cannot be consistent with the source template',
   静态阈值算法只能添加一次: 'Static threshold algorithm can only be added once',
   同环比算法最多添加三个级别: 'Algorithm for adding three levels at most',
+  新维度值检测最多支持三个告警级别: 'New dimension value detection supports at most three alarm levels',
   必须选择一个检测规则: 'You must select a detection rule',
+  时间不能为空且必须大于0: 'Time cannot be empty and must be greater than 0',
 };

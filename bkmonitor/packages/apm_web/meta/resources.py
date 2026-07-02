@@ -29,7 +29,6 @@ from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace import StatusCode
 from rest_framework import serializers
 
-from api.cmdb.define import Business
 from apm_web.constants import (
     APM_APPLICATION_DEFAULT_METRIC,
     DB_SYSTEM_TUPLE,
@@ -51,14 +50,15 @@ from apm_web.constants import (
     SceneEventKey,
     ServiceRelationLogTypeChoices,
     StorageStatus,
+    SyncScope,
     TopoNodeKind,
     nodata_error_strategy_config_mapping,
 )
 from apm_web.db.db_utils import build_filter_params, get_service_from_params
-from apm_web.handlers import metric_group
 from apm_web.handlers.application_handler import ApplicationHandler
 from apm_web.handlers.backend_data_handler import telemetry_handler_registry
 from apm_web.handlers.component_handler import ComponentHandler
+from apm_web.handlers.config_handler.code import CodeRemarkHandler
 from apm_web.handlers.db_handler import DbComponentHandler
 from apm_web.handlers.endpoint_handler import EndpointHandler
 from apm_web.handlers.instance_handler import InstanceHandler
@@ -89,8 +89,6 @@ from apm_web.models import (
     Application,
     ApplicationCustomService,
     ApplicationRelationInfo,
-    AppServiceRelation,
-    CMDBServiceRelation,
     LogServiceRelation,
     UriServiceRelation,
 )
@@ -101,9 +99,7 @@ from apm_web.serializers import (
     AsyncSerializer,
     CustomServiceConfigSerializer,
 )
-from apm_web.service.resources import CMDBServiceTemplateResource
 from apm_web.service.serializers import (
-    AppServiceRelationSerializer,
     LogServiceRelationOutputSerializer,
 )
 from apm_web.topo.handle.relation.relation_metric import RelationMetricHandler
@@ -114,6 +110,7 @@ from apm_web.models import StrategyTemplate
 from apm_web.strategy.constants import StrategyTemplateSystem, StrategyTemplateType
 from bkm_space.api import SpaceApi
 from bkmonitor.data_source.unify_query.builder import QueryConfigBuilder, UnifyQuerySet
+from bkmonitor.data_source.utils.apm import TraceDatasourceTarget, TraceQueryGuard
 from bkmonitor.share.api_auth_resource import ApiAuthResource
 from bkmonitor.utils import group_by
 from bkmonitor.utils.ip import is_v6
@@ -127,17 +124,19 @@ from bkmonitor.utils.user import (
 from common.log import logger
 from constants.alert import DEFAULT_NOTICE_MESSAGE_TEMPLATE, EventSeverity
 from constants.apm import (
+    CallSide,
     FlowType,
     FormatType,
     OtlpKey,
     OtlpProtocol,
+    SpanKind,
     SpanStandardField,
     StandardFieldCategory,
     TailSamplingSupportMethod,
     TelemetryDataType,
 )
 from constants.common import DEFAULT_TENANT_ID
-from constants.data_source import ApplicationsResultTableLabel, DataSourceLabel, DataTypeLabel
+from constants.data_source import ApplicationsResultTableLabel
 from constants.result_table import ResultTableField
 from core.drf_resource import Resource, api, resource
 from monitor.models import ApplicationConfig
@@ -466,6 +465,10 @@ class ApplicationInfoResource(Resource):
             data[Application.SAMPLER_CONFIG_KEY] = self.convert_sampler_config(
                 instance.bk_biz_id, instance.app_name, data[Application.SAMPLER_CONFIG_KEY]
             )
+            # 补充关联日志配置
+            data["application_log_relation_configs"] = LogServiceRelationOutputSerializer(
+                instance=LogServiceRelation.get_relation_qs(instance.bk_biz_id, instance.app_name, [], True), many=True
+            ).data
             return data
 
     def perform_request(self, validated_request_data):
@@ -705,6 +708,20 @@ class SetupResource(Resource):
             subscription_id = serializers.IntegerField(label="订阅任务id", required=False)
             bk_data_id = serializers.IntegerField(label="数据id", required=False)
 
+        class LogRelationSerializer(serializers.Serializer):
+            log_type = serializers.CharField(label=_("日志类型"))
+            related_bk_biz_id = serializers.IntegerField(label=_("关联业务ID"))
+            value_list = serializers.ListField(child=serializers.IntegerField(), label=_("日志值列表"))
+
+            def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+                if attrs["log_type"] == ServiceRelationLogTypeChoices.BK_LOG:
+                    if not attrs["related_bk_biz_id"]:
+                        raise serializers.ValidationError(_("关联日志平台日志需要选择业务"))
+                else:
+                    attrs["related_bk_biz_id"] = None
+
+                return super().validate(attrs)
+
         application_id = serializers.IntegerField(label="应用id")
         app_alias = serializers.CharField(label="应用别名", max_length=255, required=False)
         description = serializers.CharField(label="应用描述", max_length=255, allow_blank=True, required=False)
@@ -715,6 +732,9 @@ class SetupResource(Resource):
         application_instance_name_config = InstanceNameConfigSerializer(required=False)
         application_dimension_config = DimensionConfigSerializer(required=False)
         application_db_config = serializers.ListField(label="db配置", child=DbConfigSerializer(), default=[])
+        application_log_relation_configs = serializers.ListField(
+            label=_("日志关联配置"), child=LogRelationSerializer(), default=[]
+        )
 
         no_data_period = serializers.IntegerField(label="无数据周期", required=False)
         plugin_config = PluginConfigSerializer(required=False)
@@ -722,6 +742,7 @@ class SetupResource(Resource):
 
         def validate(self, attrs):
             res = super().validate(attrs)
+
             if attrs.get("trace_datasource_option") and not attrs.get("trace_datasource_option", {}).get(
                 "es_slice_size"
             ):
@@ -764,6 +785,10 @@ class SetupResource(Resource):
             for key in self.update_key:
                 if key not in self._params:
                     return
+
+            if TraceQueryGuard.is_shared_table(self._application.trace_result_table_id):
+                raise ValueError("共享数据源的应用不支持修改链路信息")
+
             Application.setup_datasource(
                 self._application.application_id,
                 {"trace_datasource_option": self._params["trace_datasource_option"]},
@@ -868,6 +893,26 @@ class SetupResource(Resource):
             )
             self._application.event_config = self._params[Application.EVENT_CONFIG_KEY]
 
+    class LogRelationProcessor(SetupProcessor):
+        update_key = ["application_log_relation_configs"]
+
+        def setup(self):
+            bk_biz_id: int = self._application.bk_biz_id
+            app_name: str = self._application.app_name
+            records: list[dict[str, Any]] = [
+                {
+                    "bk_biz_id": bk_biz_id,
+                    "app_name": app_name,
+                    "service_name": "",
+                    "is_global": True,
+                    "log_type": relation_config["log_type"],
+                    "related_bk_biz_id": relation_config["related_bk_biz_id"],
+                    "value_list": relation_config["value_list"],
+                }
+                for relation_config in self._params["application_log_relation_configs"]
+            ]
+            LogServiceRelation.sync_relations(bk_biz_id, app_name, records=records, scope=SyncScope.GLOBAL)
+
     def perform_request(self, validated_data):
         try:
             application = Application.objects.get(application_id=validated_data["application_id"])
@@ -887,6 +932,7 @@ class SetupResource(Resource):
                 self.NoDataPeriodProcessor,
                 self.DbSetupProcessor,
                 self.QPSSetupProcessor,
+                self.LogRelationProcessor,
             ]
         ]
 
@@ -1204,9 +1250,6 @@ class ServiceDetailResource(Resource):
                 }.items()
             ]
 
-        # 暂时用不上，并需注意方法体逻辑已过时
-        # self.add_service_relation(data["bk_biz_id"], data["app_name"], node_info)
-
         return [
             {
                 "name": self.key_name_map()[TopoNodeKind.SERVICE].get(item, item),
@@ -1221,52 +1264,6 @@ class ServiceDetailResource(Resource):
             }.items()
             if item in self.key_name_map()[TopoNodeKind.SERVICE].keys()
         ]
-
-    def add_service_relation(self, bk_biz_id, app_name, service):
-        query_params = {"bk_biz_id": bk_biz_id, "app_name": app_name, "service_name": service["topo_key"]}
-        # -- 添加cmdb关联信息
-        cmdb_query = CMDBServiceRelation.objects.filter(**query_params)
-        if cmdb_query.exists():
-            instance = cmdb_query.first()
-            bk_biz_id = instance.bk_biz_id
-            template_id = instance.template_id
-            template = {t["id"]: t for t in CMDBServiceTemplateResource.get_templates(bk_biz_id)}.get(template_id, {})
-            service.update(
-                {
-                    "cmdb_template_name": template.get("name"),
-                    "cmdb_first_category": template.get("first_category", {}).get("name"),
-                    "cmdb_second_category": template.get("second_category", {}).get("name"),
-                }
-            )
-
-        # -- 添加日志关联
-        log_query = LogServiceRelation.objects.filter(**query_params)
-        if log_query.exists():
-            log_data = LogServiceRelationOutputSerializer(instance=log_query.first()).data
-            if log_data["log_type"] == ServiceRelationLogTypeChoices.BK_LOG:
-                service.update(
-                    {
-                        "log_type": log_data["log_type_alias"],
-                        "log_related_bk_biz_name": log_data["related_bk_biz_name"],
-                        "log_value_alias": log_data["value_alias"],
-                    }
-                )
-            else:
-                service.update({"log_type": log_data["log_type_alias"], "log_value": log_data["value"]})
-
-        # -- 添加app关联
-        app_query = AppServiceRelation.objects.filter(**query_params)
-        if app_query.exists():
-            instance = app_query.first()
-            res = AppServiceRelationSerializer(instance=instance).data
-            relate_bk_biz_id = instance.relate_bk_biz_id
-            biz = {i.bk_biz_id: i for i in api.cmdb.get_business(bk_biz_ids=[relate_bk_biz_id])}.get(relate_bk_biz_id)
-            service.update(
-                {
-                    "app_related_bk_biz_name": biz.bk_biz_name if isinstance(biz, Business) else None,
-                    "app_related_app_name": res["relate_app_name"],
-                }
-            )
 
 
 class EndpointDetailResource(Resource):
@@ -2447,6 +2444,10 @@ class QueryEndpointStatisticsResource(PageListResource):
         no_match_res = []
         for summary, items in summary_mappings.items():
             request_count = sum(i.get("doc_count", 0) for i in items)
+            if request_count <= 0:
+                # 不展示请求量为 0 的记录。
+                continue
+
             sum_duration = sum(i["sum_duration"]["value"] for i in items)
 
             (no_match_res, match_res)[summary[-1]].append(
@@ -2464,10 +2465,13 @@ class QueryEndpointStatisticsResource(PageListResource):
         # 匹配到正则的结果优先展示
         return match_res + no_match_res
 
-    def perform_request(self, validated_data):
+    def perform_request(self, validated_data: dict[str, Any]):
         """
         根据app_name service_name查询span 遍历span然后取db.system,http.method..等等这些字段 没有就为空
         """
+        bk_biz_id: int = validated_data["bk_biz_id"]
+        app_name: str = validated_data["app_name"]
+
         if validated_data.get("span_keys", []):
             self.span_keys = validated_data.get("span_keys")
         # 设置默认排序
@@ -2476,35 +2480,33 @@ class QueryEndpointStatisticsResource(PageListResource):
         filter_params = self.build_filter_params(validated_data["filter_params"])
         service_name = get_service_from_params(filter_params)
         is_component = False
-        uri_queryset = UriServiceRelation.objects.filter(
-            bk_biz_id=validated_data["bk_biz_id"], app_name=validated_data["app_name"]
-        )
+        uri_queryset = UriServiceRelation.get_relation_qs(bk_biz_id, app_name)
 
         if service_name:
             node = ServiceHandler.get_node(
-                validated_data["bk_biz_id"],
-                validated_data["app_name"],
+                bk_biz_id,
+                app_name,
                 service_name,
                 raise_exception=False,
             )
             if ComponentHandler.is_component_by_node(node):
                 ComponentHandler.build_component_filter_params(
-                    validated_data["bk_biz_id"],
-                    validated_data["app_name"],
+                    bk_biz_id,
+                    app_name,
                     service_name,
                     filter_params,
                     validated_data.get("component_instance_id"),
                 )
                 is_component = True
             else:
-                uri_queryset.filter(service_name=service_name)
+                uri_queryset = uri_queryset.filter(service_name=service_name)
                 if ServiceHandler.is_remote_service_by_node(node):
                     filter_params = ServiceHandler.build_remote_service_filter_params(service_name, filter_params)
 
         buckets = api.apm_api.query_span(
             {
-                "bk_biz_id": validated_data["bk_biz_id"],
-                "app_name": validated_data["app_name"],
+                "bk_biz_id": bk_biz_id,
+                "app_name": app_name,
                 "start_time": validated_data["start_time"],
                 "end_time": validated_data["end_time"],
                 "filter_params": filter_params,
@@ -2554,6 +2556,12 @@ class QueryEndpointStatisticsResource(PageListResource):
 
 class QueryExceptionDetailEventResource(PageListResource):
     UNKNOWN = "unknown"
+    CODE_REMARK_KIND_MAPPING = {
+        SpanKind.SPAN_KIND_CLIENT: CallSide.CALLER.value,
+        SpanKind.SPAN_KIND_PRODUCER: CallSide.CALLER.value,
+        SpanKind.SPAN_KIND_SERVER: CallSide.CALLEE.value,
+        SpanKind.SPAN_KIND_CONSUMER: CallSide.CALLEE.value,
+    }
 
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField(label="业务id")
@@ -2563,6 +2571,7 @@ class QueryExceptionDetailEventResource(PageListResource):
         start_time = serializers.IntegerField(required=True, label="数据开始时间")
         end_time = serializers.IntegerField(required=True, label="数据结束时间")
         exception_type = serializers.CharField(label="异常类型", required=False, default="")
+        exception_refer = serializers.CharField(label="异常来源字段", required=False, default="", allow_blank=True)
         filter_params = serializers.DictField(required=False, label="过滤参数", default={})
         keyword = serializers.CharField(required=False, default="", label="关键词", allow_blank=True)
         sort = serializers.CharField(required=False, label="排序条件", allow_blank=True)
@@ -2600,56 +2609,77 @@ class QueryExceptionDetailEventResource(PageListResource):
                 if ServiceHandler.is_remote_service_by_node(node):
                     filter_params = ServiceHandler.build_remote_service_filter_params(service_name, filter_params)
 
-        query_dict = {
+        filter_params.extend(
+            SpanHandler.build_exception_params(
+                validated_data["exception_type"],
+                validated_data["exception_refer"],
+            )
+        )
+
+        query_dict: dict[str, Any] = {
             "start_time": validated_data["start_time"],
             "end_time": validated_data["end_time"],
             "app_name": validated_data["app_name"],
             "bk_biz_id": validated_data["bk_biz_id"],
             "filter_params": filter_params,
         }
-        exception_spans = api.apm_api.query_span(query_dict)
-        res = []
+        exception_spans: list[dict[str, Any]] = api.apm_api.query_span(query_dict)
+        res: list[dict[str, Any]] = []
+        remark_configs: list[dict[str, Any]] | None = None
+        code_remark_config_cache: dict[tuple[str, str], dict[str, str]] = {}
         for span in exception_spans:
-            # 异常信息有两个来源: events.attributes.exception_stacktrace or status.message
-            subtitle = span.get("status", {}).get("message")
-            if span["events"]:
-                for event in span["events"]:
-                    exception_type = event.get(OtlpKey.ATTRIBUTES, {}).get(SpanAttributes.EXCEPTION_TYPE, self.UNKNOWN)
-                    stacktrace = (
-                        event.get(OtlpKey.ATTRIBUTES, {}).get(SpanAttributes.EXCEPTION_STACKTRACE, "").split("\n")
-                    )
-                    if not subtitle:
-                        exception_message = event.get(OtlpKey.ATTRIBUTES, {}).get(SpanAttributes.EXCEPTION_MESSAGE, "")
-                        subtitle = f"{exception_type}: {exception_message}"
-                    # 无过滤条件 -> 显示全部
-                    res.append(
-                        {
-                            "title": f"{span_time_strft(event['timestamp'])}  {exception_type}",
-                            "subtitle": subtitle,
-                            "content": stacktrace,
-                            "timestamp": int(event["timestamp"]),
-                            "exception_type": exception_type,
-                            "trace_id": span.get("trace_id", ""),
-                        }
-                    )
-            else:
+            # 返回码错误优先展示返回码消息，其他错误沿用 span status message。
+            subtitle: str = (span.get(OtlpKey.STATUS) or {}).get("message", "")
+            for exception_event in SpanHandler.get_matched_exception_events(
+                span,
+                validated_data["exception_type"],
+                validated_data["exception_refer"],
+                include_unknown=True,
+            ):
+                exception_type: str = exception_event["exception_type"]
+                exception_refer: str = exception_event["exception_refer"]
+                exception_alias: str = exception_event["exception_alias"]
+                stacktrace: list[str] = exception_event["stacktrace"].splitlines()
+                current_subtitle: str = subtitle
+                if exception_refer in SpanHandler.RPC_EXCEPTION_FIELDS:
+                    current_subtitle = exception_event["exception_message"] or current_subtitle
+                    span_service_name: str = (span.get(OtlpKey.RESOURCE) or {}).get(ResourceAttributes.SERVICE_NAME, "")
+                    code_remark_kind: str | None = self.CODE_REMARK_KIND_MAPPING.get(span.get(OtlpKey.KIND))
+                    if span_service_name and code_remark_kind:
+                        # 首次备注配置为空时，去查询应用级备注配置
+                        if remark_configs is None:
+                            remark_configs = CodeRemarkHandler.get_app_remark_configs(
+                                validated_data["bk_biz_id"], validated_data["app_name"]
+                            )
+
+                        # 同一服务和调用方向复用最终生效的备注配置
+                        cache_key: tuple[str, str] = (span_service_name, code_remark_kind)
+                        if cache_key not in code_remark_config_cache:
+                            code_remark_config_cache[cache_key] = CodeRemarkHandler.build_service_code_remark_config(
+                                remark_configs,
+                                span_service_name,
+                                code_remark_kind,
+                            )
+
+                        code_remark_config: dict[str, str] = code_remark_config_cache[cache_key]
+                        remark: str = code_remark_config.get(exception_type, "")
+                        if remark:
+                            exception_alias = f"{exception_alias}（{remark}）"
+                elif exception_type != self.UNKNOWN and not current_subtitle:
+                    current_subtitle = f"{exception_type}: {exception_event['exception_message']}"
                 res.append(
                     {
-                        "title": f"{span_time_strft(span['start_time'])}  {self.UNKNOWN}",
-                        "subtitle": subtitle,
-                        "content": [],
-                        "timestamp": int(span["start_time"]),
-                        "exception_type": self.UNKNOWN,
+                        "title": f"{span_time_strft(exception_event['timestamp'])}  {exception_alias}",
+                        "subtitle": current_subtitle,
+                        "content": stacktrace,
+                        "timestamp": exception_event["timestamp"],
+                        "exception_type": exception_type,
                         "trace_id": span.get("trace_id", ""),
                     }
                 )
 
-        # exception_type 过滤
-        if validated_data["exception_type"]:
-            res = [i for i in res if i["exception_type"] == validated_data["exception_type"]]
-
-        # 对 res 基于 timestamp 字段排序 (倒序)
-        res = sorted(res, key=lambda x: x["timestamp"], reverse=True)
+        # 优先展示有堆栈的异常，同类异常再按时间倒序。
+        res = sorted(res, key=lambda item: (bool(item["content"]), item["timestamp"]), reverse=True)
         for index, r in enumerate(res, 1):
             r["id"] = index
 
@@ -2666,22 +2696,23 @@ class QueryExceptionEndpointResource(Resource):
         start_time = serializers.IntegerField(required=True, label="数据开始时间")
         end_time = serializers.IntegerField(required=True, label="数据结束时间")
         exception_type = serializers.CharField(label="异常类型", required=False, default="")
+        exception_refer = serializers.CharField(label="异常来源字段", required=False, default="", allow_blank=True)
         filter_params = serializers.DictField(required=False, label="过滤条件", default={})
         component_instance_id = serializers.ListSerializer(
             child=serializers.CharField(), required=False, label="组件实例id(组件页面下有效)"
         )
 
-    def build_filter_params(self, filter_dict):
-        result = [{"key": "status.code", "op": "=", "value": ["2"]}]
+    def build_filter_params(self, filter_dict: dict[str, Any]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = [{"key": "status.code", "op": "=", "value": ["2"]}]
         for key, value in filter_dict.items():
             if value == "undefined":
                 continue
             result.append({"key": key, "op": "=", "value": value if isinstance(value, list) else [value]})
         return result
 
-    def perform_request(self, validated_data):
-        filter_params = self.build_filter_params(validated_data["filter_params"])
-        service_name = get_service_from_params(filter_params)
+    def perform_request(self, validated_data: dict[str, Any]) -> dict[str, Any]:
+        filter_params: list[dict[str, Any]] = self.build_filter_params(validated_data["filter_params"])
+        service_name: str | None = get_service_from_params(filter_params)
         if service_name:
             node = ServiceHandler.get_node(
                 validated_data["bk_biz_id"],
@@ -2701,64 +2732,55 @@ class QueryExceptionEndpointResource(Resource):
                 if ServiceHandler.is_remote_service_by_node(node):
                     filter_params = ServiceHandler.build_remote_service_filter_params(service_name, filter_params)
 
-        query_dict = {
+        filter_params.extend(
+            SpanHandler.build_exception_params(
+                validated_data["exception_type"],
+                validated_data["exception_refer"],
+            )
+        )
+
+        query_dict: dict[str, Any] = {
             "start_time": validated_data["start_time"],
             "end_time": validated_data["end_time"],
             "app_name": validated_data["app_name"],
             "bk_biz_id": validated_data["bk_biz_id"],
             "filter_params": filter_params,
-            "fields": ["resource.service.name", "span_name", "trace_id", "events.attributes.exception.type"],
+            "fields": SpanHandler.ERROR_SPAN_FIELDS,
         }
 
-        exception_spans = api.apm_api.query_span(query_dict)
-        indentify_mapping = {}
+        exception_spans: list[dict[str, Any]] = api.apm_api.query_span(query_dict)
+        identifier_mapping: dict[str, dict[str, Any]] = {}
         colors = ServiceColorClassifier()
 
         for span in exception_spans:
             service_name = span[OtlpKey.RESOURCE].get(ResourceAttributes.SERVICE_NAME, self.UNKNOWN_EXCEPTION)
-            span_name = span[OtlpKey.SPAN_NAME]
+            span_name: str = span[OtlpKey.SPAN_NAME]
+            matched_event_count: int = len(
+                SpanHandler.get_matched_exception_events(
+                    span,
+                    validated_data["exception_type"],
+                    validated_data["exception_refer"],
+                    include_unknown=True,
+                )
+            )
+            if not matched_event_count:
+                continue
 
-            if span.get("events"):
-                for event in span["events"]:
-                    exception_type = event.get(OtlpKey.ATTRIBUTES, {}).get(
-                        SpanAttributes.EXCEPTION_TYPE, self.UNKNOWN_EXCEPTION
-                    )
-                    if (
-                        validated_data["exception_type"] and exception_type == validated_data["exception_type"]
-                    ) or not validated_data["exception_type"]:
-                        indentify = f"{service_name}: {span_name}"
-                        if indentify in indentify_mapping:
-                            indentify_mapping[indentify]["value"] += 1
-                        else:
-                            color = colors.next(indentify)
+            identifier: str = f"{service_name}: {span_name}"
+            if identifier in identifier_mapping:
+                identifier_mapping[identifier]["value"] += matched_event_count
+                continue
 
-                            indentify_mapping[indentify] = {
-                                "name": indentify,
-                                "service_name": service_name,
-                                "value": 1,
-                                "color": color,
-                                "borderColor": color,
-                            }
-            else:
-                exception_type = self.UNKNOWN_EXCEPTION
-                if (
-                    validated_data["exception_type"] and exception_type == validated_data["exception_type"]
-                ) or not validated_data["exception_type"]:
-                    indentify = f"{service_name}: {span_name}"
-                    if indentify in indentify_mapping:
-                        indentify_mapping[indentify]["value"] += 1
-                    else:
-                        color = colors.next(indentify)
+            color: str = colors.next(identifier)
+            identifier_mapping[identifier] = {
+                "name": identifier,
+                "service_name": service_name,
+                "value": matched_event_count,
+                "color": color,
+                "borderColor": color,
+            }
 
-                        indentify_mapping[indentify] = {
-                            "name": indentify,
-                            "service_name": service_name,
-                            "value": 1,
-                            "color": color,
-                            "borderColor": color,
-                        }
-
-        return {"name": _("服务+接口"), "data": list(indentify_mapping.values())}
+        return {"name": _("服务+接口"), "data": list(identifier_mapping.values())}
 
 
 class QueryExceptionTypeGraphResource(Resource):
@@ -2772,14 +2794,15 @@ class QueryExceptionTypeGraphResource(Resource):
         start_time = serializers.IntegerField(required=True, label="数据开始时间")
         end_time = serializers.IntegerField(required=True, label="数据结束时间")
         exception_type = serializers.CharField(label="异常类型", required=False, default="")
+        exception_refer = serializers.CharField(label="异常来源字段", required=False, default="", allow_blank=True)
         filter_params = serializers.DictField(required=False, label="过滤条件", default={})
         component_instance_id = serializers.ListSerializer(
             child=serializers.CharField(), required=False, label="组件实例id(组件页面下有效)"
         )
 
-    def build_filter_params(self, filter_dict):
-        result = []
-        service_name = None
+    def build_filter_params(self, filter_dict: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+        result: list[dict[str, Any]] = []
+        service_name: str | None = None
         for key, value in filter_dict.items():
             if value == "undefined":
                 continue
@@ -2789,26 +2812,29 @@ class QueryExceptionTypeGraphResource(Resource):
                 result.append({"key": key, "op": "=", "value": value if isinstance(value, list) else [value]})
         return result, service_name
 
-    def perform_request(self, validated_data):
+    def perform_request(self, validated_data: dict[str, Any]) -> dict[str, Any]:
         app = Application.objects.get(bk_biz_id=validated_data["bk_biz_id"], app_name=validated_data["app_name"])
+        # 接入 TraceQueryGuard 做共享数据源查询隔离改造
+        target: TraceDatasourceTarget = TraceDatasourceTarget.build(
+            app.bk_biz_id, app.app_name, app.trace_result_table_id
+        )
         q: QueryConfigBuilder = (
-            QueryConfigBuilder((DataTypeLabel.LOG, DataSourceLabel.BK_APM))
+            TraceQueryGuard.get_q([target])
             .metric(method="COUNT", field="_index", alias="a")
-            .table(app.trace_result_table_id)
             .filter(**{OtlpKey.STATUS_CODE: StatusCode.ERROR.value})
             .interval(get_interval_number(validated_data["start_time"], validated_data["end_time"]))
         )
 
         # Step1: 根据错误类型过滤
-        if validated_data["exception_type"] and validated_data["exception_type"] != "unknown":
-            q = q.filter(
-                **{
-                    f"{OtlpKey.EVENTS}.name": "exception",
-                    f"{OtlpKey.EVENTS}.attributes.exception.type": validated_data["exception_type"],
-                }
-            )
+        for filter_param in SpanHandler.build_exception_params(
+            validated_data["exception_type"],
+            validated_data["exception_refer"],
+        ):
+            q = q.filter(**{filter_param["key"]: filter_param["value"][0]})
 
         # Step2: 区分服务和组件，生成对应查询条件
+        filter_params: list[dict[str, Any]]
+        service_name: str | None
         filter_params, service_name = self.build_filter_params(validated_data["filter_params"])
         if service_name:
             node = ServiceHandler.get_node(
@@ -3198,21 +3224,3 @@ class SimpleServiceList(Resource):
             }
             for service in services
         ]
-
-
-class ServiceConfigResource(Resource):
-    bk_biz_id = serializers.IntegerField(label="业务id")
-    app_name = serializers.CharField(label="应用名称")
-    service_name = serializers.CharField(label="应用名称")
-    start_time = serializers.IntegerField(label="开始时间", required=False)
-    end_time = serializers.IntegerField(label="结束时间", required=False)
-
-    def perform_request(self, validate_data):
-        group: metric_group.TrpcMetricGroup = metric_group.MetricGroupRegistry.get(
-            metric_group.GroupEnum.TRPC, validate_data["bk_biz_id"], validate_data["app_name"]
-        )
-        return group.get_server_config(
-            server=validate_data["service_name"],
-            start_time=validate_data.get("start_time"),
-            end_time=validate_data.get("end_time"),
-        )

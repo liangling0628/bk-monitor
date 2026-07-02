@@ -138,7 +138,14 @@ class BaseSender:
         content_template = notice_template_class(content_template_path)
         self.encoding = None if self.notice_way in self.NoEncoding else self.Utf8Encoding
         self.context["encoding"] = self.encoding
-        self.title = title_template.render(context_dict)
+        try:
+            self.title = title_template.render(context_dict)
+        except Exception as e:
+            # 标题渲染失败（如模板渲染收窄误伤）不应阻断整条通知发送。
+            # 下游 CMSI 的 title/heading 为非空 CharField，空标题同样会被拒绝，
+            # 因此回退到系统通知标题，并以固定文案兜底保证非空。
+            logger.exception("failed to render notice title, fallback to default title: %s", e)
+            self.title = context_dict.get("notice_title") or _("蓝鲸监控")
         try:
             self.content = content_template.render(context_dict)
         except Exception as e:
@@ -225,7 +232,7 @@ class BaseSender:
         try:
             get_template(lang_template_path)
         except TemplateDoesNotExist:
-            logger.info(f"use default template because language template file {lang_template_path} load fail")
+            logger.debug(f"use default template because language template file {lang_template_path} load fail")
             return template_path
         logger.info(f"use special language template {lang_template_path} for notice")
         return lang_template_path
@@ -766,7 +773,41 @@ class Sender(BaseSender):
             sender = self.get_sender(self.context)
             if sender:
                 notice_way = "wecom_robot"
+
+        # 开启 ENABLE_CMSI_SEND_RTX 后，仅 rtx 通道改走 CMSI 专用 send_rtx 接口
+        # wecom_robot 通道仍走 send_default，不受影响
+        if settings.ENABLE_CMSI_SEND_RTX and (notice_way == "rtx" or sender is None):
+            return self._send_via_cmsi_rtx(notice_receivers)
+
         return self.send_default(notice_way, notice_receivers, sender)
+
+    def _send_via_cmsi_rtx(self, notice_receivers: list[str]) -> dict[str, Any]:
+        """
+        调用 CMSI 专用 send_rtx 接口发送消息。
+
+        仅在 settings.ENABLE_CMSI_SEND_RTX 开启时使用。
+        相比通用 send_msg，该接口的 receiver__username 为列表而非逗号分隔字符串，且不携带 msg_type。
+        """
+        notice_way = "rtx"
+        logger.info(
+            f"{self._blocked_notice_log_prefix}send.{notice_way}({','.join(notice_receivers)})[cmsi_send_rtx]: "
+            f"\ntitle: {self.title}\ncontent: {self.content}"
+        )
+
+        msg_data = dict(
+            receiver__username=list(notice_receivers),
+            title=self.title,
+            content=self.content,
+        )
+        retry_params = {
+            "api_module": "api.cmsi.default",
+            "resource": "SendRtx",
+            "args": (),
+            "kwargs": dict(bk_tenant_id=self.bk_tenant_id, **msg_data),
+        }
+        self._check_blocked_and_raise(notice_way, retry_params)
+        api_result = api.cmsi.send_rtx(bk_tenant_id=self.bk_tenant_id, **msg_data)
+        return self.handle_api_result(api_result, notice_receivers)
 
     def send_default(self, notice_way, notice_receivers, sender=None):
         """
@@ -999,6 +1040,7 @@ class IncidentSender(Sender):
             if response["errcode"] != 0:
                 result = False
                 message = response["errmsg"]
+                logger.error(f"send.wxwork_group failed, errcode={response['errcode']}, errmsg={message}")
         except Exception as e:
             result = False
             message = str(e)

@@ -24,16 +24,26 @@
  * IN THE SOFTWARE.
  */
 
-import { random } from '@/components/monitor-echarts/utils';
 
 import http from '@/api';
+import { transformSceneConfigs } from '@/store/scene-filter-config';
+
+const random = (length = 10) => {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return result;
+};
+
 
 /**
  * 索引集列表初始化
  * @param {*} indexSetList 索引集列表
  * @param {*} pid 父节点id
  */
-const resolveIndexItemAttr = (indexSetList = [], parent_node = null) => {
+const resolveIndexItemAttr = (indexSetList = [], parentNode = null) => {
   const s1 = [];
   const s2 = [];
   indexSetList?.forEach(item => {
@@ -42,9 +52,9 @@ const resolveIndexItemAttr = (indexSetList = [], parent_node = null) => {
       index_set_id: `${item.index_set_id}`,
       indexName: item.index_set_name,
       lightenName: ` (${item.indices.map(item => item.result_table_id).join(';')})`,
-      unique_id: `${parent_node?.index_set_id ?? '#'}_${item.index_set_id}`,
-      is_child_node: parent_node !== null,
-      parent_node,
+      unique_id: `${parentNode?.index_set_id ?? '#'}_${item.index_set_id}`,
+      is_child_node: parentNode !== null,
+      parent_node: parentNode,
     });
 
     // 这里只有两层，数据结构固定为 parent_id#child_id
@@ -72,6 +82,7 @@ export default {
     flatIndexSetList: [],
     isIndexSetLoading: false,
     isTrendDataLoading: false,
+    isTotalCountLoaded: false,
     trendDataCount: 0,
     catchFieldCustomConfig: {
       fieldsWidth: {},
@@ -82,6 +93,15 @@ export default {
       sortList: [],
     },
     activeVersion: 'v2',
+    /** 场景化检索配置列表 */
+    sceneConfigs: {
+      is_loading: false,
+      data: [],
+    },
+  },
+  getters: {
+    /** 转换后的场景配置列表 */
+    sceneConfigList: state => transformSceneConfigs(state.sceneConfigs?.data ?? []),
   },
   mutations: {
     updateActiveVersion(state, version) {
@@ -89,6 +109,9 @@ export default {
     },
     updateTrendDataLoading(state, payload) {
       state.isTrendDataLoading = payload;
+    },
+    updateTotalCountLoaded(state, payload) {
+      state.isTotalCountLoaded = payload;
     },
     updateTrendDataCount(state, payload) {
       state.trendDataCount = payload;
@@ -126,6 +149,7 @@ export default {
           filterSetting: [],
           filterAddition: [],
           sortList: [],
+          contextDisplayFields: [],
         },
         payload ?? {},
       );
@@ -138,8 +162,66 @@ export default {
         state.catchFieldCustomConfig.filterAddition.push(...addition);
       }
     },
+    /** 更新场景化检索配置列表 */
+    updateSceneConfigs(state, payload) {
+      if (payload.is_loading !== undefined) {
+        state.sceneConfigs.is_loading = payload.is_loading;
+      }
+      if (payload.data !== undefined) {
+        state.sceneConfigs.data = payload.data ?? [];
+      }
+    },
+    /**
+     * 清理检索页运行态大对象。
+     * 检索页切到管理页后不再需要索引集树、场景配置和字段配置缓存，
+     * 若继续常驻 Vuex，会保留大量响应式对象，导致多次路由切换后 heap 无法及时回落。
+     */
+    resetRuntimeState(state) {
+      state.indexSetList = [];
+      state.flatIndexSetList = [];
+      state.isIndexSetLoading = false;
+      state.isTrendDataLoading = false;
+      state.isTotalCountLoaded = false;
+      state.trendDataCount = 0;
+      state.catchFieldCustomConfig = {
+        fieldsWidth: {},
+        displayFields: [],
+        filterSetting: [],
+        filterAddition: [],
+        fixedFilterAddition: false,
+        sortList: [],
+        contextDisplayFields: [],
+      };
+      state.sceneConfigs = {
+        is_loading: false,
+        data: [],
+      };
+    },
   },
   actions: {
+    /** 请求场景化检索配置列表 */
+    requestSceneConfigs({ commit, rootState }) {
+      commit('updateSceneConfigs', { is_loading: true });
+      return http
+        .request('retrieve/getSceneConfigs', {
+          query: {
+            bk_biz_id: rootState?.bkBizId,
+          },
+        })
+        .then((resp) => {
+          const data = resp.data ?? resp ?? [];
+          commit('updateSceneConfigs', { data });
+          return data;
+        })
+        .catch((err) => {
+          console.error('requestSceneConfigs error:', err);
+          commit('updateSceneConfigs', { data: [] });
+          return [];
+        })
+        .finally(() => {
+          commit('updateSceneConfigs', { is_loading: false });
+        });
+    },
     getIndexSetList(ctx, payload) {
       const { spaceUid, isLoading = true, is_group } = payload;
       if (isLoading) ctx.commit('updateIndexSetLoading', true);

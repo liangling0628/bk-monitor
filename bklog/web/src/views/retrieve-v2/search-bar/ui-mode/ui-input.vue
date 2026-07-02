@@ -1,8 +1,7 @@
 <script setup>
-import { computed, ref, set } from 'vue';
+import { computed, ref, set, watch } from 'vue';
 
 import {
-  formatDateTimeField,
   getOperatorKey,
 } from '@/common/util';
 import useFieldNameHook from '@/hooks/use-field-name';
@@ -20,12 +19,17 @@ import {
 } from '../utils/const.common';
 import useFocusInput from '../utils/use-focus-input';
 import UiInputOptions from './ui-input-option.vue';
+import RetrieveHelper from '@/views/retrieve-helper';
 
 const props = defineProps({
   value: {
     type: Array,
     required: true,
     default: () => [],
+  },
+  popupAppendToBody: {
+    type: Boolean,
+    default: false,
   },
 });
 
@@ -63,11 +67,14 @@ const setMorePopoverRef = (el, index) => {
 };
 const inputValueLength = ref(0);
 
+// const isAiAssistantActive = computed(() => store.state.features.isAiAssistantActive);
+
 // 动态设置placeHolder
 const inputPlaceholder = computed(() => {
   if (inputValueLength.value === 0) {
     // return `${t('请输入检索内容')}, / ${t('唤起')} ...`;
-    return ` / ${t('唤起')}，${t('输入检索内容')}（${t('Tab 可切换为 AI 模式')}）`;
+    return window.__IS_MONITOR_APM__ || window.__IS_MONITOR_TRACE__
+      ? `${t('快捷键')} /，${t('请输入')}...` : ` / ${t('唤起')}，${t('输入检索内容')}（${t('Tab 可切换为 AI 模式')}）`;
   }
 
   return '';
@@ -184,6 +191,7 @@ const {
   delayShowInstance,
   repositionTippyInstance,
   hideTippyInstance,
+  handleInputBlur,
   getTippyUtil,
 } = useFocusInput(props, {
   refContent: refPopInstance,
@@ -195,6 +203,9 @@ const {
   onShowFn: () => {
     setIsDocumentMousedown(true);
     refPopInstance.value?.beforeShowndFn?.();
+
+    syncPopupWidth();
+
     emit('popup-change', { isShow: true });
   },
   onHiddenFn: () => {
@@ -209,6 +220,7 @@ const {
       clearTimeout(delayBlurTimer);
       delayBlurTimer = null;
     }
+    inputValueLength.value = 0;
     queryItem.value = '';
     activeIndex.value = null;
   },
@@ -216,6 +228,29 @@ const {
     hideOnClick: true,
     placement: 'top',
     delay: [0, 300],
+    appendTo: props.popupAppendToBody || window.__IS_MONITOR_TRACE__ ? document.body : undefined,
+    zIndex: props.popupAppendToBody || window.__IS_MONITOR_TRACE__ ? 99999 : undefined,
+    popperOptions: props.popupAppendToBody
+      ? {
+        strategy: 'fixed',
+        modifiers: [
+          {
+            name: 'preventOverflow',
+            options: {
+              boundary: document.body,
+              padding: 8,
+            },
+          },
+          {
+            name: 'flip',
+            options: {
+              boundary: document.body,
+              padding: 8,
+            },
+          },
+        ],
+      }
+      : undefined,
     onHide: () => {
       refPopInstance.value?.beforeHideFn?.();
     },
@@ -224,7 +259,7 @@ const {
 });
 
 const debounceShowInstance = () => {
-  const target = refSearchInput.value?.closest(".search-item");
+  const target = refSearchInput.value?.closest('.search-item');
   if (target) {
     delayShowInstance(target);
   }
@@ -235,6 +270,21 @@ const closeTippyInstance = () => {
   hideTippyInstance();
 };
 
+const syncPopupWidth = () => {
+  const fuzzyFlag = refPopInstance.value?.isFuzzyMatchAvailable;
+  const isFuzzyMatch = typeof fuzzyFlag === 'object' && fuzzyFlag !== null ? fuzzyFlag.value : !!fuzzyFlag;
+  getTippyUtil()?.setProps?.({ maxWidth: isFuzzyMatch ? 1000 : 800 });
+};
+
+watch(
+  () => refPopInstance.value?.isFuzzyMatchAvailable?.value,
+  () => {
+    if (isInstanceShown()) {
+      syncPopupWidth();
+      repositionTippyInstance();
+    }
+  },
+);
 
 /**
  * 执行点击弹出操作项方法
@@ -365,7 +415,7 @@ const isComposing = ref(false);
 const handleGlobalSaveQueryClick = (payload) => {
   isGlobalKeyEnter.value = true;
   handleSaveQueryClick(payload);
-  refSearchInput.value.style.setProperty('width', '12px');
+  handleInputBlur();
 };
 
 /**
@@ -382,7 +432,7 @@ const handleInputValueEnter = (e) => {
   if (!isGlobalKeyEnter.value) {
     handleSaveQueryClick(undefined);
     repositionTippyInstance();
-    e.target.style.setProperty('width', '12px');
+    handleInputBlur(e);
   }
 
   isGlobalKeyEnter.value = false;
@@ -403,20 +453,30 @@ const handleCancelClick = () => {
   closeTippyInstance();
 };
 
+const syncFullTextInputStateAfterBlur = () => {
+  setIsInputTextFocus(false);
+  inputValueLength.value = 0;
+  queryItem.value = '';
+};
+
 let delayBlurTimer = null;
 
 const handleFullTextInputBlur = (e) => {
+  // DOM value/width 的清理由 useFocusInput 统一处理，避免组件内重复维护 input 细节。
+  handleInputBlur(e);
+
   delayBlurTimer && clearTimeout(delayBlurTimer);
   delayBlurTimer = setTimeout(() => {
-    setIsInputTextFocus(false);
-    inputValueLength.value = 0;
-    e.target.style.setProperty('width', '12px');
-    e.target.value = '';
-    queryItem.value = '';
+    const input = refSearchInput.value;
+    if (!input) return;
+
+    // 若 input 已重新获得焦点，只保留 useFocusInput 已完成的 DOM 清理，不重置 focus 状态。
+    if (document.activeElement === input) return;
+
+    syncFullTextInputStateAfterBlur();
+    delayBlurTimer = null;
   }, 300);
 };
-
-
 
 const handleInputValueChange = (e) => {
   const currentLength = e.target.value.length;
@@ -514,6 +574,12 @@ const handleBatchInputChange = (isShow) => {
     instance.setProps({ hideOnClick: !isShow });
   }
 };
+
+const formatDateTimeField = (value, fieldType) => {
+  const timezone = store.state.indexItem.timezone;
+  return RetrieveHelper.formatTimeZoneValue(value, fieldType, timezone);
+};
+
 </script>
 
 <template>
@@ -881,7 +947,6 @@ const handleBatchInputChange = (isShow) => {
           padding: 0 4px;
           font-weight: 500;
           background-image: linear-gradient(128deg, #235DFA 0%, #E28BED 100%);
-          background-clip: text;
           background-clip: text;
           -webkit-text-fill-color: transparent;
         }

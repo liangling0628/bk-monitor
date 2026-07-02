@@ -136,3 +136,23 @@ class RegexTemplateReferencedException(BaseClusteringException):
 class ClusteringOwnersNotExistException(BaseClusteringException):
     ERROR_CODE = "025"
     MESSAGE = _("日志聚类-告警创建责任人不存在")
+
+
+class DorisStorageNotExistException(BaseClusteringException):
+    ERROR_CODE = "026"
+    MESSAGE = _("日志聚类-Doris 存储集群配置不存在: {index_set_id}")
+
+
+class PlaceholderAnalysisNotSupportedException(BaseClusteringException):
+    ERROR_CODE = "027"
+    MESSAGE = _("当前 Pattern 暂不支持占位符分析: {reason}")
+
+
+class ModelFileUnpickleForbiddenException(BaseClusteringException):
+    ERROR_CODE = "028"
+    MESSAGE = _("AIOPS 模型文件反序列化被白名单拒绝: {detail}")
+
+
+class ModelFileStructureInvalidException(BaseClusteringException):
+    ERROR_CODE = "029"
+    MESSAGE = _("AIOPS 模型文件结构非法: {detail}")

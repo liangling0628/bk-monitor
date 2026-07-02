@@ -11,9 +11,11 @@ specific language governing permissions and limitations under the License.
 import base64
 import json
 import logging
+import re
 import tempfile
 import time
 import uuid
+from collections import defaultdict
 from itertools import chain
 from typing import Any
 
@@ -23,7 +25,7 @@ from confluent_kafka import KafkaError, KafkaException
 from confluent_kafka import TopicPartition as ConfluentTopicPartition
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.db.models.query import QuerySet
 from django.utils.translation import gettext as _
 from kafka import KafkaConsumer, TopicPartition
@@ -59,10 +61,14 @@ from metadata.models.constants import (
     STRICT_NANO_ES_FORMAT,
     DataIdCreatedFromSystem,
 )
+from metadata.models.data_link.constants import BKBASE_NAMESPACE_BK_LOG
+from metadata.models.data_link.data_link_configs import DataIdConfig
 from metadata.models.data_link.utils import (
+    compose_bkdata_data_id_name,
     get_bkbase_raw_data_name_for_v3_datalink,
     get_data_source_related_info,
 )
+from metadata.models.result_table import ResultTableOption
 from metadata.models.space.constants import SPACE_UID_HYPHEN, EtlConfigs, SpaceTypes
 from metadata.models.space.space_table_id_redis import SpaceTableIDRedis
 from metadata.service.data_source import (
@@ -241,6 +247,7 @@ class CreateResultTableResource(Resource):
         time_option = serializers.DictField(required=False, label="时间字段选项配置", default=None)
         is_sync_db = serializers.BooleanField(required=False, label="是否需要同步创建真实表", default=True)
         data_label = serializers.CharField(required=False, label="数据标签", default="")
+        labels = serializers.DictField(required=False, label="扩展标签", default=dict)
 
     def perform_request(self, request_data):
         query_alias_settings = request_data.pop("query_alias_settings", [])
@@ -410,6 +417,7 @@ class ModifyResultTableResource(Resource):
         is_reserved_check = serializers.BooleanField(required=False, label="检查内置字段", default=True)
         time_option = serializers.DictField(required=False, label="时间字段选项配置", default=None, allow_null=True)
         data_label = serializers.CharField(required=False, label="数据标签", default=None)
+        labels = serializers.DictField(required=False, label="扩展标签", default=None)
         need_delete_storages = serializers.DictField(required=False, label="需要删除的额外存储", default=None)
 
     def perform_request(self, validated_request_data: dict[str, Any]) -> dict[str, Any]:
@@ -532,18 +540,34 @@ class ModifyResultTableResource(Resource):
         bk_data_id = models.DataSourceResultTable.objects.get(table_id=table_id, bk_tenant_id=bk_tenant_id).bk_data_id
         ds = models.DataSource.objects.get(bk_data_id=bk_data_id)
 
-        if ds.created_from == DataIdCreatedFromSystem.BKDATA.value:
-            try:
-                result_table.notify_bkdata_log_data_id_changed(data_id=bk_data_id)
-                logger.info(
-                    "ModifyResultTableResource: notify bkdata successfully,table_id->[%s],data_id->[%s]",
-                    table_id,
-                    bk_data_id,
-                )
-            except RetryError as e:
-                logger.warning("notify_log_data_id_changed error, table_id->[%s],error->[%s]", table_id, e.__cause__)
-            except Exception as e:  # pylint: disable=broad-except
-                logger.warning("notify_log_data_id_changed error, table_id->[%s],error->[%s]", table_id, e)
+        # 如果数据源没有接入BKDATA，则不需要通知bkdata
+        if ds.created_from != DataIdCreatedFromSystem.BKDATA.value:
+            return
+
+        # 如果是主动配置的V4链路，不再需要通知bkdata
+        # bklog需要存在rtoption，并且option中存在 OPTION_ENABLE_V4_LOG_DATA_LINK且值为True
+        # custom_event需要存在rtoption，并且option中存在 OPTION_ENABLE_V4_EVENT_GROUP_DATA_LINK且值为True
+        v4_option_names = [
+            ResultTableOption.OPTION_ENABLE_V4_LOG_DATA_LINK,
+            ResultTableOption.OPTION_ENABLE_V4_EVENT_GROUP_DATA_LINK,
+        ]
+        options = models.ResultTableOption.objects.filter(
+            table_id=table_id, bk_tenant_id=bk_tenant_id, name__in=v4_option_names
+        )
+        if options and any(option.get_value() for option in options):
+            return
+
+        try:
+            result_table.notify_bkdata_log_data_id_changed(data_id=bk_data_id)
+            logger.info(
+                "ModifyResultTableResource: notify bkdata successfully,table_id->[%s],data_id->[%s]",
+                table_id,
+                bk_data_id,
+            )
+        except RetryError as e:
+            logger.warning("notify_log_data_id_changed error, table_id->[%s],error->[%s]", table_id, e.__cause__)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("notify_log_data_id_changed error, table_id->[%s],error->[%s]", table_id, e)
 
     def _push_es_route(self, result_table: models.ResultTable, bk_tenant_id: str) -> None:
         """推送ES路由信息"""
@@ -929,7 +953,7 @@ class GetResultTableStorageResult(Resource):
             result[result_table] = storage_info.consul_config
 
             # 判断是否需要明文返回链接信息
-            if not validated_request_data["is_plain_text"]:
+            if not validated_request_data.get("is_plain_text", False):
                 result[result_table]["auth_info"] = base64.b64encode(
                     json.dumps(result[result_table]["auth_info"]).encode("utf-8")
                 )
@@ -1261,6 +1285,7 @@ class CreateTimeSeriesGroupResource(Resource):
         default_storage_config = serializers.DictField(required=False, label="默认存储参数")
         additional_options = serializers.DictField(required=False, label="附带创建的ResultTableOption")
         data_label = serializers.CharField(label="数据标签", required=False, default="")
+        metric_group_dimensions = serializers.JSONField(required=False, label="指标分组的维度key配置")
 
     def perform_request(self, validated_request_data):
         # 默认都是返回已经删除的内容
@@ -1280,6 +1305,8 @@ class ModifyTimeSeriesGroupResource(Resource):
         metric_info_list = serializers.ListField(required=False, label="metric信息", default=None)
         enable_field_black_list = serializers.BooleanField(required=False, label="黑名单的启用状态", default=None)
         data_label = serializers.CharField(label="数据标签", required=False, default=None)
+        options = serializers.DictField(required=False, label="结果表选项内容", default=None)
+        metric_group_dimensions = serializers.JSONField(required=False, label="指标分组的维度key配置")
 
     def perform_request(self, validated_request_data):
         bk_tenant_id = validated_request_data.pop("bk_tenant_id")
@@ -1411,6 +1438,541 @@ class QueryTimeSeriesGroupResource(Resource):
         return list(chain.from_iterable(instance.to_json_v2() for instance in query_set))
 
 
+class CreateOrUpdateTimeSeriesMetricResource(Resource):
+    """批量创建或更新自定义时序指标"""
+
+    class RequestSerializer(serializers.Serializer):
+        class MetricSerializer(serializers.Serializer):
+            """单个指标的序列化器"""
+
+            field_id = serializers.IntegerField(required=False, label="字段ID")
+            field_name = serializers.CharField(required=False, label="指标字段名称", max_length=255)
+            field_scope = serializers.CharField(required=False, label="指标数据分组", max_length=255)
+            tag_list = serializers.ListField(
+                required=False, label="Tag列表", child=serializers.CharField(), allow_null=True
+            )
+            field_config = serializers.DictField(required=False, label="字段其他配置", allow_null=True)
+            label = serializers.CharField(required=False, label="指标监控对象", max_length=255, allow_null=True)
+            scope_id = serializers.IntegerField(required=True, label="指标分组ID")
+
+        bk_tenant_id = TenantIdField(label="租户ID")
+        group_id = serializers.IntegerField(required=True, label="自定义时序数据源ID")
+        metrics = serializers.ListField(
+            required=True,
+            label="批量指标列表",
+            child=MetricSerializer(),
+            allow_empty=False,
+        )
+
+    def perform_request(self, validated_request_data):
+        """执行批量创建或更新时序指标的请求"""
+        bk_tenant_id = validated_request_data.pop("bk_tenant_id")
+        group_id = validated_request_data.pop("group_id")
+        metrics = validated_request_data.pop("metrics")
+
+        models.TimeSeriesMetric.batch_create_or_update(metrics, bk_tenant_id, group_id)
+
+
+class TimeSeriesMetricConditionQueryMixin:
+    def _apply_search_filters(self, query_set, validated_request_data):
+        """应用搜索过滤条件"""
+        conditions = validated_request_data.get("conditions", [])
+        mandatory_conditions = validated_request_data.get("mandatory_conditions", [])
+        connector = validated_request_data.get("condition_connector", "and")
+
+        user_query = None
+        for condition in conditions:
+            condition_query = self._build_condition_query(condition)
+            if condition_query:
+                if user_query is None:
+                    user_query = condition_query
+                elif connector == "or":
+                    user_query = user_query | condition_query
+                else:
+                    user_query = user_query & condition_query
+
+        mandatory_query = None
+        for condition in mandatory_conditions:
+            condition_query = self._build_condition_query(condition)
+            if condition_query:
+                if mandatory_query is None:
+                    mandatory_query = condition_query
+                else:
+                    mandatory_query = mandatory_query & condition_query
+
+        final_query = None
+        if mandatory_query and user_query:
+            final_query = mandatory_query & user_query
+        elif mandatory_query:
+            final_query = mandatory_query
+        elif user_query:
+            final_query = user_query
+
+        return query_set.filter(final_query) if final_query else query_set
+
+    def _apply_mandatory_filters(self, query_set, mandatory_conditions):
+        for condition in mandatory_conditions:
+            condition_query = self._build_condition_query(condition)
+            if condition_query:
+                query_set = query_set.filter(condition_query)
+        return query_set
+
+    @staticmethod
+    def _normalize_search_type(key: str, search_type: str | None) -> str:
+        if key not in {"name", "field_config_alias"}:
+            return "exact"
+        return search_type or "fuzzy"
+
+    @staticmethod
+    def _build_name_query(value: str, search_type: str) -> Q:
+        if search_type == "regex_case_sensitive":
+            return Q(field_name__regex=value)
+        elif search_type == "regex":
+            return Q(field_name__iregex=value)
+        elif search_type == "fuzzy_case_sensitive":
+            return Q(field_name__contains=value)
+        elif search_type == "fuzzy":
+            return Q(field_name__icontains=value)
+        elif search_type == "exact_case_sensitive":
+            return Q(field_name=value)
+        elif search_type == "startswith":
+            return Q(field_name__startswith=value)
+        return Q(field_name__iregex=rf"^{re.escape(value)}$")
+
+    @staticmethod
+    def _build_alias_query(value: str, search_type: str) -> Q:
+        if search_type == "regex_case_sensitive":
+            return Q(field_config__alias__regex=value)
+        elif search_type == "regex":
+            return Q(field_config__alias__iregex=value)
+        elif search_type == "fuzzy_case_sensitive":
+            return Q(field_config__alias__contains=value)
+        elif search_type == "fuzzy":
+            return Q(field_config__alias__icontains=value)
+        elif search_type == "exact_case_sensitive":
+            return Q(field_config__alias=value)
+        elif search_type == "startswith":
+            return Q(field_config__alias__startswith=value)
+        return Q(field_config__alias__iexact=value)
+
+    @staticmethod
+    def _build_condition_query(condition):
+        key = condition["key"]
+        values = condition["values"]
+        search_type = TimeSeriesMetricConditionQueryMixin._normalize_search_type(key, condition.get("search_type"))
+        negate = condition.get("negate", False)
+
+        if not values:
+            return None
+
+        condition_query = None
+        for value in values:
+            q_obj = None
+
+            if key == "name":
+                q_obj = TimeSeriesMetricConditionQueryMixin._build_name_query(value, search_type)
+            elif key == "field_config_alias":
+                q_obj = TimeSeriesMetricConditionQueryMixin._build_alias_query(value, search_type)
+            elif key == "field_scope":
+                q_obj = Q(field_scope=value)
+            elif key == "field_config_unit":
+                q_obj = Q(field_config__unit__iexact=value)
+            elif key == "field_config_aggregate_method":
+                q_obj = Q(field_config__aggregate_method__iexact=value)
+            elif key in ("field_config_hidden", "field_config_disabled"):
+                field_key = key.replace("field_config_", "")
+                if value.lower() in ("true", "1"):
+                    q_obj = Q(**{f"field_config__{field_key}": True})
+                else:
+                    q_obj = Q(**{f"field_config__{field_key}__isnull": True}) | Q(
+                        **{f"field_config__{field_key}": False}
+                    )
+            elif key == "scope_id":
+                q_obj = Q(scope_id=int(value))
+            elif key == "field_id":
+                q_obj = Q(field_id=int(value))
+
+            if q_obj:
+                condition_query = q_obj if condition_query is None else condition_query | q_obj
+
+        if condition_query and negate:
+            condition_query = ~condition_query
+
+        return condition_query
+
+
+class QueryTimeSeriesMetricResource(TimeSeriesMetricConditionQueryMixin, Resource):
+    """
+    查询自定义时序指标列表
+
+    支持分页、搜索和排序功能
+    """
+
+    # 排序字段映射
+    ORDER_FIELD_MAPPING = {
+        "name": "field_name",
+        "update_time": "last_modify_time",
+        "-name": "-field_name",
+        "-update_time": "-last_modify_time",
+    }
+
+    class RequestSerializer(PageSerializer):
+        class QueryTimeSeriesMetricConditionSerializer(serializers.Serializer):
+            """搜索条件序列化器"""
+
+            key = serializers.ChoiceField(
+                choices=[
+                    "name",
+                    "field_scope",
+                    "field_config_alias",
+                    "field_config_unit",
+                    "field_config_aggregate_method",
+                    "field_config_hidden",
+                    "field_config_disabled",
+                    "scope_id",
+                    "field_id",
+                ],
+                required=True,
+                label="搜索字段",
+            )
+            values = serializers.ListField(
+                child=serializers.CharField(),
+                required=True,
+                label="搜索值列表（多个值用OR连接）",
+                min_length=0,
+            )
+            search_type = serializers.ChoiceField(
+                choices=[
+                    "regex",
+                    "regex_case_sensitive",
+                    "fuzzy",
+                    "fuzzy_case_sensitive",
+                    "exact",
+                    "exact_case_sensitive",
+                    "startswith",
+                ],
+                required=False,
+                default="fuzzy",
+                label="搜索类型：regex-正则表达式，regex_case_sensitive-区分大小写正则，fuzzy-模糊搜索，fuzzy_case_sensitive-区分大小写模糊搜索，exact-精确匹配，exact_case_sensitive-区分大小写精确匹配（仅对 name 和 field_config_alias 生效）",
+            )
+            negate = serializers.BooleanField(
+                required=False,
+                default=False,
+                label="是否取反：为 true 时对整个条件取反（NOT），默认为 false",
+            )
+
+        bk_tenant_id = TenantIdField(label="租户ID")
+        group_id = serializers.IntegerField(required=True, label="自定义时序数据源ID")
+        page = serializers.IntegerField(default=1, required=False, label="页数", min_value=1)
+        page_size = serializers.IntegerField(
+            default=10, required=False, label="页长，-1 表示不分页", min_value=-1, max_value=100000
+        )
+        conditions = serializers.ListField(
+            child=QueryTimeSeriesMetricConditionSerializer(),
+            required=False,
+            label="搜索条件列表，同一字段的多个值用OR，不同字段之间的连接方式由condition_connector决定",
+            allow_empty=True,
+        )
+        mandatory_conditions = serializers.ListField(
+            child=QueryTimeSeriesMetricConditionSerializer(),
+            required=False,
+            label="强制过滤条件列表，始终以 AND 方式与其他条件组合，不受 condition_connector 影响",
+            allow_empty=True,
+        )
+        condition_connector = serializers.ChoiceField(
+            choices=["and", "or"],
+            required=False,
+            default="and",
+            label="不同字段之间的连接方式：and-且（交集），or-或（并集）",
+        )
+        # 排序参数
+        order_by = serializers.ChoiceField(
+            choices=["name", "update_time", "-name", "-update_time"],
+            required=False,
+            default="-update_time",
+            label="排序字段：name-按名称升序，update_time-按更新时间升序，-name-按名称降序，-update_time-按更新时间降序",
+        )
+        count_only = serializers.BooleanField(
+            required=False,
+            default=False,
+            label="仅返回数量：为 true 时只返回 total，不返回 metrics 列表",
+        )
+
+    def perform_request(self, validated_request_data):
+        bk_tenant_id = validated_request_data.pop("bk_tenant_id")
+        group_id = validated_request_data["group_id"]
+        page = validated_request_data["page"]
+        page_size = validated_request_data["page_size"]
+        order_by = validated_request_data["order_by"]
+        count_only = validated_request_data.get("count_only", False)
+
+        # 验证group_id是否存在
+        if not models.TimeSeriesGroup.objects.filter(
+            time_series_group_id=group_id, bk_tenant_id=bk_tenant_id, is_delete=False
+        ).exists():
+            raise ValueError(_("自定义时序分组不存在，请确认后重试"))
+
+        # 构建查询集
+        query_set = models.TimeSeriesMetric.objects.filter(group_id=group_id).exclude(
+            scope_id=models.TimeSeriesMetric.DISABLE_SCOPE_ID
+        )
+
+        # 应用搜索条件
+        query_set = self._apply_search_filters(query_set, validated_request_data)
+
+        # 仅返回数量
+        total = query_set.count()
+        if count_only:
+            return {"metrics": [], "total": total}
+
+        # 应用排序，仅返回必要字段
+        query_set = query_set.order_by(self.ORDER_FIELD_MAPPING.get(order_by)).only(
+            "field_id",
+            "scope_id",
+            "field_name",
+            "tag_list",
+            "field_config",
+            "field_scope",
+            "create_time",
+            "last_modify_time",
+        )
+        if page_size != -1:
+            offset = (page - 1) * page_size
+            paginated_query_set = query_set[offset : offset + page_size]
+        else:
+            paginated_query_set = query_set
+
+        # 批量获取scope信息
+        scope_ids = list(paginated_query_set.values_list("scope_id", flat=True))
+        scopes = models.TimeSeriesScope.objects.filter(id__in=scope_ids, group_id=group_id).values("id", "scope_name")
+        scope_map = {scope["id"]: {"id": scope["id"], "name": scope["scope_name"]} for scope in scopes}
+
+        # 构建响应数据
+        results = []
+        for metric in paginated_query_set:
+            scope_info = None
+            if metric.scope_id:
+                scope_info = scope_map.get(metric.scope_id, {"id": metric.scope_id, "name": ""})
+
+            results.append(
+                {
+                    "field_id": metric.field_id,
+                    "scope": scope_info,
+                    "name": metric.field_name,
+                    "tag_list": metric.tag_list or [],
+                    "field_config": metric.field_config or {},
+                    "field_scope": metric.field_scope,
+                    "create_time": metric.create_time.timestamp() if metric.create_time else None,
+                    "update_time": metric.last_modify_time.timestamp() if metric.last_modify_time else None,
+                }
+            )
+        return {"metrics": results, "total": total}
+
+
+class CreateOrUpdateTimeSeriesScopeResource(Resource):
+    """
+    批量创建或更新自定义时序指标分组
+    如果指标分组已存在则更新，不存在则创建
+    """
+
+    class RequestSerializer(serializers.Serializer):
+        bk_tenant_id = TenantIdField(label="租户ID")
+        group_id = serializers.IntegerField(required=True, label="自定义时序数据源ID")
+
+        class ScopeSerializer(serializers.Serializer):
+            scope_id = serializers.IntegerField(required=False, label="指标分组ID")
+            scope_name = serializers.CharField(required=False, label="指标分组名", max_length=255)
+            dimension_config = serializers.DictField(required=False, allow_null=True, label="分组下的维度配置")
+            auto_rules = serializers.ListField(required=False, label="自动分组的匹配规则列表")
+
+        scopes = serializers.ListField(
+            required=True, child=ScopeSerializer(), label="批量创建或更新的分组列表", min_length=1
+        )
+
+    def perform_request(self, validated_request_data):
+        bk_tenant_id = validated_request_data.pop("bk_tenant_id")
+        group_id = validated_request_data.pop("group_id")
+        scopes = validated_request_data["scopes"]
+
+        # 使用统一的事务方法批量创建或更新
+        results = models.TimeSeriesScope.bulk_create_or_update_scopes(
+            bk_tenant_id=bk_tenant_id,
+            group_id=group_id,
+            scopes=scopes,
+        )
+
+        return results
+
+
+class DeleteTimeSeriesScopeResource(Resource):
+    """
+    批量删除自定义时序指标分组
+    """
+
+    class RequestSerializer(serializers.Serializer):
+        bk_tenant_id = TenantIdField(label="租户ID")
+        group_id = serializers.IntegerField(required=True, label="自定义时序数据源ID")
+
+        class ScopeSerializer(serializers.Serializer):
+            scope_name = serializers.CharField(required=True, label="指标分组名", max_length=255)
+
+        scopes = serializers.ListField(required=True, child=ScopeSerializer(), label="批量删除的分组列表", min_length=1)
+
+    def perform_request(self, validated_request_data):
+        bk_tenant_id = validated_request_data.pop("bk_tenant_id")
+        group_id = validated_request_data.pop("group_id")
+        scopes = validated_request_data["scopes"]
+
+        models.TimeSeriesScope.bulk_delete_scopes(
+            bk_tenant_id=bk_tenant_id,
+            group_id=group_id,
+            scopes=scopes,
+        )
+
+
+class QueryTimeSeriesScopeResource(TimeSeriesMetricConditionQueryMixin, Resource):
+    """
+    查询自定义时序指标分组列表
+
+    支持通过 group_id 和 scope_ids 进行查询，返回列表结果
+    """
+
+    class RequestSerializer(serializers.Serializer):
+        class QueryTimeSeriesScopeConditionSerializer(serializers.Serializer):
+            key = serializers.ChoiceField(
+                choices=["name", "field_config_disabled"],
+                required=True,
+                label="搜索字段",
+            )
+            values = serializers.ListField(
+                child=serializers.CharField(),
+                required=True,
+                label="搜索值列表",
+                min_length=0,
+            )
+            search_type = serializers.ChoiceField(
+                choices=[
+                    "regex",
+                    "regex_case_sensitive",
+                    "fuzzy",
+                    "fuzzy_case_sensitive",
+                    "exact",
+                    "exact_case_sensitive",
+                    "startswith",
+                ],
+                required=False,
+                default="fuzzy",
+                label="搜索类型",
+            )
+            negate = serializers.BooleanField(required=False, default=False, label="是否取反")
+
+        bk_tenant_id = TenantIdField(label="租户ID")
+        group_id = serializers.IntegerField(required=True, label="自定义时序数据源ID")
+        scope_ids = serializers.ListField(
+            child=serializers.IntegerField(), required=False, label="指标分组ID列表", allow_empty=True
+        )
+        scope_name = serializers.CharField(required=False, label="指标分组名称")
+        include_metrics = serializers.BooleanField(required=False, default=False, label="是否返回指标数据")
+        mandatory_conditions = serializers.ListField(
+            child=QueryTimeSeriesScopeConditionSerializer(),
+            required=False,
+            label="强制过滤条件列表",
+            allow_empty=True,
+        )
+
+    def perform_request(self, validated_request_data):
+        bk_tenant_id = validated_request_data.pop("bk_tenant_id")
+        group_id = validated_request_data.get("group_id")
+        scope_ids = validated_request_data.get("scope_ids")
+        scope_name = validated_request_data.get("scope_name")
+        include_metrics = validated_request_data.get("include_metrics")
+
+        if not models.TimeSeriesGroup.objects.filter(
+            time_series_group_id=group_id, bk_tenant_id=bk_tenant_id, is_delete=False
+        ).exists():
+            raise ValueError(_("自定义时序分组不存在，请确认后重试"))
+
+        query_set = models.TimeSeriesScope.objects.all()
+        if group_id is not None:
+            query_set = query_set.filter(group_id=group_id)
+        if scope_ids:
+            query_set = query_set.filter(id__in=scope_ids)
+        if scope_name:
+            query_set = query_set.filter(scope_name__icontains=scope_name)
+        results = self._build_grouped_results(
+            query_set,
+            group_id,
+            include_metrics,
+            validated_request_data.get("mandatory_conditions", []),
+        )
+
+        return results
+
+    def _build_grouped_results(self, query_set, group_id, include_metrics, mandatory_conditions):
+        # 使用 values() 直接获取字典数据，避免 ORM 对象创建开销
+        scopes = list(query_set.values("id", "group_id", "scope_name", "dimension_config", "auto_rules", "create_from"))
+        if not scopes:
+            return []
+
+        scope_ids = [scope["id"] for scope in scopes]
+        metrics_query_set = models.TimeSeriesMetric.objects.filter(group_id=group_id, scope_id__in=scope_ids)
+        metrics_query_set = self._apply_mandatory_filters(metrics_query_set, mandatory_conditions)
+
+        metrics_by_scope = defaultdict(list)
+        metric_count_map = defaultdict(int)
+
+        if include_metrics:
+            all_metrics = metrics_query_set.values(
+                "field_name",
+                "field_id",
+                "field_scope",
+                "tag_list",
+                "field_config",
+                "create_time",
+                "last_modify_time",
+                "group_id",
+                "scope_id",
+            )
+
+            for metric in all_metrics.iterator(chunk_size=500):
+                key = (metric["group_id"], metric["scope_id"])
+                metric_count_map[metric["scope_id"]] += 1
+                metrics_by_scope[key].append(
+                    {
+                        "metric_name": metric["field_name"],
+                        "field_id": metric["field_id"],
+                        "field_scope": metric["field_scope"],
+                        "tag_list": metric["tag_list"],
+                        "field_config": metric["field_config"] or {},
+                        "create_time": metric["create_time"].timestamp() if metric["create_time"] else None,
+                        "last_modify_time": metric["last_modify_time"].timestamp()
+                        if metric["last_modify_time"]
+                        else None,
+                    }
+                )
+        else:
+            metric_count_map.update(
+                {
+                    item["scope_id"]: item["metric_count"]
+                    for item in metrics_query_set.values("scope_id").annotate(metric_count=Count("field_id"))
+                }
+            )
+
+        return [
+            {
+                "scope_id": scope["id"],
+                "group_id": scope["group_id"],
+                "scope_name": scope["scope_name"],
+                "dimension_config": scope["dimension_config"] or {},
+                "auto_rules": scope["auto_rules"],
+                "metric_list": metrics_by_scope.get((scope["group_id"], scope["id"]), []),
+                "create_from": scope["create_from"],
+                "metric_count": metric_count_map.get(scope["id"], 0),
+            }
+            for scope in scopes
+        ]
+
+
 class QueryBCSMetricsResource(Resource):
     """查询bcs相关指标"""
 
@@ -1500,10 +2062,32 @@ class QueryBCSMetricsResource(Resource):
             bk_tenant_id=bk_tenant_id, bk_data_id__in=data_ids, is_delete=False
         )
 
-        for time_series_group in query_set:
+        groups = list(query_set)
+
+        # 无维度过滤的批量场景下（如指标缓存按业务全量重建，单业务可达上百个 group），
+        # 批量预取关联数据，避免在 get_metric_info_list_with_label 中逐 group 触发 N+1 查询
+        field_map_by_table = scope_map_by_group = metrics_by_group = None
+        if not (dimension_name or dimension_value) and groups:
+            (
+                field_map_by_table,
+                scope_map_by_group,
+                metrics_by_group,
+            ) = models.TimeSeriesGroup.batch_get_metric_info_maps(groups, bk_tenant_id)
+
+        for time_series_group in groups:
             # 基于group的dataid，对数据补充集群id字段
             cluster_id = data_id_cluster_map[time_series_group.bk_data_id]
-            metrics = time_series_group.get_metric_info_list_with_label(dimension_name, dimension_value)
+            if metrics_by_group is not None:
+                # 命中批量预取：直接复用预取数据，避免逐 group 查询
+                metrics = time_series_group.get_metric_info_list_with_label(
+                    dimension_name,
+                    dimension_value,
+                    field_map=field_map_by_table.get(time_series_group.table_id, {}),
+                    scope_map=scope_map_by_group.get(time_series_group.time_series_group_id, {}),
+                    metrics=metrics_by_group.get(time_series_group.time_series_group_id, []),
+                )
+            else:
+                metrics = time_series_group.get_metric_info_list_with_label(dimension_name, dimension_value)
             # 获取是否为内置指标，用于判断是否存在于文件白名单中
             is_built_in_metric = time_series_group.bk_data_id in data_id_cluster_map["built_in_metric_data_id_list"]
             # 遍历该group自定义k8s指标，记录其cluster_id和维度信息
@@ -1893,9 +2477,43 @@ class CreateResultTableSnapshotResource(Resource):
         target_snapshot_repository_name = serializers.CharField(required=True, label="目标es集群快照仓库")
         snapshot_days = serializers.IntegerField(required=True, label="快照存储时间配置", min_value=0)
         operator = serializers.CharField(required=True, label="操作者")
+        status = serializers.ChoiceField(
+            required=False,
+            label="快照状态",
+            choices=[models.EsSnapshot.ES_RUNNING_STATUS, models.EsSnapshot.ES_STOPPED_STATUS],
+            default=models.EsSnapshot.ES_RUNNING_STATUS,
+        )
 
     def perform_request(self, validated_request_data):
         return models.EsSnapshot.create_snapshot(**validated_request_data).to_json()
+
+
+class BulkCreateResultTableSnapshotResource(Resource):
+    """
+    Es结果表快照配置批量创建
+    """
+
+    class RequestSerializer(serializers.Serializer):
+        bk_tenant_id = TenantIdField(label="租户ID")
+        table_ids = serializers.ListField(
+            child=serializers.CharField(trim_whitespace=True, allow_blank=False),
+            required=True,
+            label="结果表IDs",
+            allow_empty=False,
+        )
+        target_snapshot_repository_name = serializers.CharField(required=True, label="目标es集群快照仓库")
+        snapshot_days = serializers.IntegerField(required=True, label="快照存储时间配置", min_value=0)
+        operator = serializers.CharField(required=True, label="操作者")
+        status = serializers.ChoiceField(
+            required=False,
+            label="快照状态",
+            choices=[models.EsSnapshot.ES_RUNNING_STATUS, models.EsSnapshot.ES_STOPPED_STATUS],
+            default=models.EsSnapshot.ES_RUNNING_STATUS,
+        )
+
+    def perform_request(self, validated_request_data):
+        models.EsSnapshot.bulk_create_snapshot(**validated_request_data)
+        return validated_request_data
 
 
 class ModifyResultTableSnapshotResource(Resource):
@@ -1908,10 +2526,42 @@ class ModifyResultTableSnapshotResource(Resource):
         table_id = serializers.CharField(required=True, label="结果表ID")
         snapshot_days = serializers.IntegerField(required=True, label="快照存储时间配置", min_value=0)
         operator = serializers.CharField(required=True, label="操作者")
-        status = serializers.CharField(required=False, label="操作者")
+        status = serializers.ChoiceField(
+            required=False,
+            label="快照状态",
+            choices=[models.EsSnapshot.ES_RUNNING_STATUS, models.EsSnapshot.ES_STOPPED_STATUS],
+        )
+        target_snapshot_repository_name = serializers.CharField(required=False, label="目标es集群快照仓库")
 
     def perform_request(self, validated_request_data):
         models.EsSnapshot.modify_snapshot(**validated_request_data)
+        return validated_request_data
+
+
+class BulkModifyResultTableSnapshotResource(Resource):
+    """
+    Es结果表快照配置修改
+    """
+
+    class RequestSerializer(serializers.Serializer):
+        bk_tenant_id = TenantIdField(label="租户ID")
+        table_ids = serializers.ListField(
+            child=serializers.CharField(trim_whitespace=True, allow_blank=False),
+            required=True,
+            label="结果表IDs",
+            allow_empty=False,
+        )
+        snapshot_days = serializers.IntegerField(required=True, label="快照存储时间配置", min_value=0)
+        operator = serializers.CharField(required=True, label="操作者")
+        status = serializers.ChoiceField(
+            required=False,
+            label="快照状态",
+            choices=[models.EsSnapshot.ES_RUNNING_STATUS, models.EsSnapshot.ES_STOPPED_STATUS],
+        )
+        target_snapshot_repository_name = serializers.CharField(required=False, label="目标es集群快照仓库")
+
+    def perform_request(self, validated_request_data):
+        models.EsSnapshot.bulk_modify_snapshot(**validated_request_data)
         return validated_request_data
 
 
@@ -1924,6 +2574,7 @@ class DeleteResultTableSnapshotResource(Resource):
         bk_tenant_id = TenantIdField(label="租户ID")
         table_id = serializers.CharField(required=True, label="结果表ID")
         is_sync = serializers.BooleanField(required=False, label="是否需要同步", default=False)
+        target_snapshot_repository_name = serializers.CharField(required=False, label="目标es集群快照仓库")
 
     def perform_request(self, validated_request_data):
         models.EsSnapshot.delete_snapshot(**validated_request_data)
@@ -1939,6 +2590,7 @@ class RetryResultTableSnapshotResource(Resource):
         bk_tenant_id = TenantIdField(label="租户ID")
         table_id = serializers.CharField(required=True, label="结果表ID")
         is_sync = serializers.BooleanField(required=False, label="是否需要同步", default=False)
+        target_snapshot_repository_name = serializers.CharField(required=False, label="目标es集群快照仓库")
 
     def perform_request(self, validated_request_data):
         models.EsSnapshot.retry_snapshot(**validated_request_data)
@@ -1953,21 +2605,38 @@ class ListResultTableSnapshotResource(Resource):
     class RequestSerializer(serializers.Serializer):
         bk_tenant_id = TenantIdField(label="租户ID")
         table_ids = serializers.ListField(required=False, label="结果表IDs")
+        repository_names = serializers.ListField(
+            required=False,
+            label="快照仓库名称列表",
+            child=serializers.CharField(trim_whitespace=True, allow_blank=False),
+            default=list,
+        )
 
     def perform_request(self, validated_request_data):
         bk_tenant_id = validated_request_data["bk_tenant_id"]
         table_ids = validated_request_data.get("table_ids")
-        result_queryset = models.EsSnapshot.objects.filter(bk_tenant_id=bk_tenant_id)
+        repository_names = validated_request_data.get("repository_names")
+        query = Q(bk_tenant_id=bk_tenant_id)
+
         if table_ids:
-            result_queryset = result_queryset.filter(table_id__in=table_ids)
-        table_ids = [snapshot.table_id for snapshot in result_queryset]
+            query &= Q(table_id__in=table_ids)
+        if repository_names:
+            query &= Q(target_snapshot_repository_name__in=repository_names)
+
+        result_queryset = models.EsSnapshot.objects.filter(query)
+        snapshot_pairs = list(result_queryset.values_list("table_id", "target_snapshot_repository_name").distinct())
+        table_ids = list({table_id for table_id, _ in snapshot_pairs})
+        repository_names = list({repository_name for _, repository_name in snapshot_pairs})
+
         all_doc_count_and_store_size = models.EsSnapshotIndice.all_doc_count_and_store_size(
-            bk_tenant_id=bk_tenant_id, table_ids=table_ids
+            bk_tenant_id=bk_tenant_id, table_ids=table_ids, repository_names=repository_names
         )
         result = []
         for snapshot in result_queryset:
             snapshot_json = snapshot.to_self_json()
-            table_id_doc_count_and_store_size = all_doc_count_and_store_size.get(snapshot.table_id, {})
+            table_id_doc_count_and_store_size = all_doc_count_and_store_size.get(
+                (snapshot.table_id, snapshot.target_snapshot_repository_name), {}
+            )
             snapshot_json["doc_count"] = table_id_doc_count_and_store_size.get("doc_count", 0)
             snapshot_json["store_size"] = table_id_doc_count_and_store_size.get("store_size", 0)
             snapshot_json["index_count"] = table_id_doc_count_and_store_size.get("index_count", 0)
@@ -1983,11 +2652,22 @@ class ListResultTableSnapshotIndicesResource(Resource):
     class RequestSerializer(serializers.Serializer):
         bk_tenant_id = TenantIdField(label="租户ID")
         table_ids = serializers.ListField(required=True, label="结果表ID")
+        repository_names = serializers.ListField(
+            required=False,
+            label="快照仓库名称列表",
+            child=serializers.CharField(trim_whitespace=True, allow_blank=False),
+            default=list,
+        )
 
     def perform_request(self, validated_request_data):
         bk_tenant_id = validated_request_data["bk_tenant_id"]
         table_ids = validated_request_data.get("table_ids")
-        es_snapshots = models.EsSnapshot.objects.filter(table_id__in=table_ids, bk_tenant_id=bk_tenant_id)
+        repository_names = validated_request_data.get("repository_names")
+        query = Q(table_id__in=table_ids, bk_tenant_id=bk_tenant_id)
+        if repository_names:
+            query &= Q(target_snapshot_repository_name__in=repository_names)
+        es_snapshots = models.EsSnapshot.objects.filter(query)
+
         return [es_snapshot.to_json() for es_snapshot in es_snapshots]
 
 
@@ -2032,6 +2712,7 @@ class RestoreResultTableSnapshotResource(Resource):
         expired_time = serializers.DateTimeField(required=True, label="指定过期时间", format="%Y-%m-%d %H:%M:%S")
         operator = serializers.CharField(required=True, label="操作者")
         is_sync = serializers.BooleanField(required=False, label="是否需要同步", default=False)
+        repository_name = serializers.CharField(required=False, label="目标es集群快照仓库")
 
     def perform_request(self, validated_request_data):
         return models.EsSnapshotRestore.create_restore(**validated_request_data)
@@ -2104,12 +2785,20 @@ class ListRestoreResultTableSnapshotResource(Resource):
     class RequestSerializer(serializers.Serializer):
         bk_tenant_id = TenantIdField(label="租户ID")
         table_ids = serializers.ListField(required=False, label="结果表ID", default=[])
+        repository_names = serializers.ListField(
+            required=False,
+            label="快照仓库名称列表",
+            child=serializers.CharField(trim_whitespace=True, allow_blank=False),
+            default=list,
+        )
 
     def perform_request(self, validated_request_data):
         bk_tenant_id = validated_request_data["bk_tenant_id"]
         querysets = models.EsSnapshotRestore.objects.filter(is_deleted=False, bk_tenant_id=bk_tenant_id)
         if validated_request_data["table_ids"]:
             querysets = querysets.filter(table_id__in=validated_request_data["table_ids"])
+        if validated_request_data["repository_names"]:
+            querysets = querysets.filter(repository_name__in=validated_request_data["repository_names"])
         return [queryset.to_json() for queryset in querysets]
 
 
@@ -2184,16 +2873,28 @@ class KafkaTailResource(Resource):
         bk_data_id = serializers.IntegerField(required=False, label="数据源ID")
         size = serializers.IntegerField(required=False, label="拉取条数", default=10)
         namespace = serializers.CharField(required=False, label="命名空间", default="bkmonitor")
+        use_gse_config = serializers.BooleanField(required=False, label="是否使用GSE配置", default=False)
 
     def perform_request(self, validated_request_data):
         bk_tenant_id = validated_request_data["bk_tenant_id"]
         bk_data_id = validated_request_data.get("bk_data_id")
+        size = validated_request_data["size"]
         result_table = None
 
         # 参数处理,result_table / datasource
         if bk_data_id:
             logger.info("KafkaTailResource: got bk_data_id->[%s],try to tail kafka", bk_data_id)
-            datasource = models.DataSource.objects.get(bk_tenant_id=bk_tenant_id, bk_data_id=bk_data_id)
+            try:
+                datasource = models.DataSource.objects.get(bk_tenant_id=bk_tenant_id, bk_data_id=bk_data_id)
+            except models.DataSource.DoesNotExist:
+                logger.warning(
+                    "KafkaTailResource: DataSource not found, bk_tenant_id->[%s], bk_data_id->[%s], try gse config",
+                    bk_tenant_id,
+                    bk_data_id,
+                )
+                result = self._consume_with_gse_config_by_bk_data_id(bk_data_id, size)
+                result.reverse()
+                return result
             dsrt = models.DataSourceResultTable.objects.filter(bk_data_id=bk_data_id).first()
             if dsrt:
                 result_table = models.ResultTable.objects.get(table_id=dsrt.table_id)
@@ -2205,7 +2906,12 @@ class KafkaTailResource(Resource):
                 return []
             datasource = result_table.data_source
 
-        size = validated_request_data["size"]
+        # 如果使用GSE配置，则直接返回
+        if validated_request_data["use_gse_config"]:
+            result = self._consume_with_gse_config_by_bk_data_id(bk_data_id, size)
+            result.reverse()
+            return result
+
         mq_ins = models.ClusterInfo.objects.get(cluster_id=datasource.mq_cluster_id)
 
         # Kafka是否需要进行鉴权,如SCRAM-SHA-512协议
@@ -2214,7 +2920,30 @@ class KafkaTailResource(Resource):
         # 是否是V4数据链路
         elif datasource.datalink_version == DATA_LINK_V4_VERSION_NAME:
             # 若开启特性开关且存在RT且非日志数据，则V4链路使用BkBase侧的Kafka采样接口拉取数据
-            if result_table and datasource.etl_config != "bk_flat_batch":
+            if result_table and datasource.etl_config == EtlConfigs.BK_STANDARD_V2_EVENT.value:
+                data_id_config_name = compose_bkdata_data_id_name(datasource.data_name)
+                try:
+                    data_id_config = DataIdConfig.objects.get(
+                        bk_tenant_id=bk_tenant_id,
+                        namespace=BKBASE_NAMESPACE_BK_LOG,
+                        name=data_id_config_name,
+                    )
+                except DataIdConfig.DoesNotExist:
+                    logger.warning(
+                        "KafkaTailResource: DataIdConfig not found, bk_tenant_id->[%s], namespace->[%s], name->[%s]",
+                        bk_tenant_id,
+                        BKBASE_NAMESPACE_BK_LOG,
+                        data_id_config_name,
+                    )
+                    return []
+                res = api.bkdata.tail_kafka_data(
+                    bk_tenant_id=bk_tenant_id,
+                    namespace=BKBASE_NAMESPACE_BK_LOG,
+                    name=data_id_config.name,
+                    limit=size,
+                )
+                result = [json.loads(data) for data in res]
+            elif result_table and datasource.etl_config != "bk_flat_batch":
                 logger.info("KafkaTailResource: using bkdata kafka tail api,bk_data_id->[%s]", datasource.bk_data_id)
                 # TODO: 获取计算平台数据名称,待数据一致性实现后,统一通过BkBaseResultTable获取,不再进行复杂转换
                 vm_record = models.AccessVMRecord.objects.get(
@@ -2278,16 +3007,13 @@ class KafkaTailResource(Resource):
 
         for tp in topic_partitions:
             # 获取该分区最大偏移量
-            low, high = consumer.get_watermark_offsets(tp)
-            end_offset = high
-            if not end_offset:
+            low_offset, high_offset = consumer.get_watermark_offsets(tp)
+            if size <= 0 or high_offset <= low_offset:
                 continue
+            start_offset = max(low_offset, high_offset - size)
 
             # 设置消息消费偏移量
-            if end_offset >= size:
-                consumer.seek(ConfluentTopicPartition(topic, tp.partition, end_offset - size))
-            else:
-                consumer.seek(ConfluentTopicPartition(topic, tp.partition, 0))
+            consumer.seek(ConfluentTopicPartition(topic, tp.partition, start_offset))
 
             while len(result) < size:
                 messages = consumer.consume(num_messages=size - len(result), timeout=1.0)
@@ -2305,7 +3031,7 @@ class KafkaTailResource(Resource):
                             result.append(json.loads(msg.value().decode()))
                         except Exception:  # pylint: disable=broad-except
                             pass
-                    if msg.offset() == end_offset - 1:
+                    if msg.offset() >= high_offset - 1:
                         break
 
         consumer.close()
@@ -2404,15 +3130,14 @@ class KafkaTailResource(Resource):
         for partition in topic_partitions:
             # 获取该分区最大偏移量
             tp = TopicPartition(topic=datasource.mq_config.topic, partition=partition)
-            end_offset = consumer.end_offsets([tp])[tp]
-            if not end_offset:
+            low_offset = consumer.beginning_offsets([tp])[tp]
+            high_offset = consumer.end_offsets([tp])[tp]
+            if size <= 0 or high_offset <= low_offset:
                 continue
+            start_offset = max(low_offset, high_offset - size)
 
             # 设置消息消费偏移量
-            if end_offset >= size:
-                consumer.seek(tp, end_offset - size)
-            else:
-                consumer.seek_to_beginning()
+            consumer.seek(tp, start_offset)
             for msg in consumer:
                 try:
                     result.append(json.loads(msg.value.decode()))
@@ -2420,7 +3145,7 @@ class KafkaTailResource(Resource):
                     pass
                 if len(result) >= size:
                     return result
-                if msg.offset == end_offset - 1:
+                if msg.offset >= high_offset - 1:
                     break
 
         return result
@@ -2429,8 +3154,14 @@ class KafkaTailResource(Resource):
         """
         从gse获取V4链路的kafka集群信息
         """
+        return self._consume_with_gse_config_by_bk_data_id(datasource.bk_data_id, size)
+
+    def _consume_with_gse_config_by_bk_data_id(self, bk_data_id, size):
+        """
+        根据bk_data_id从gse获取V4链路的kafka集群信息
+        """
         route_params = {
-            "condition": {"channel_id": datasource.bk_data_id, "plat_name": config.DEFAULT_GSE_API_PLAT_NAME},
+            "condition": {"channel_id": bk_data_id, "plat_name": config.DEFAULT_GSE_API_PLAT_NAME},
             "operation": {"operator_name": settings.COMMON_USERNAME},
         }
 
@@ -2460,18 +3191,77 @@ class KafkaTailResource(Resource):
 
         kafka_config_list = api.gse.query_stream_to(**kafka_params)
 
-        # Todo: 当前只有1条kafka_addr
-        kafka_addr = None
-        for kafka_config in kafka_config_list:
-            kafka_addr_list = kafka_config.get("kafka", {}).get("storage_address", [])
+        kafka_config = None
+        kafka_addr_list = []
+        for config_item in kafka_config_list:
+            kafka = config_item.get("kafka", {})
+            kafka_addr_list = kafka.get("storage_address", [])
             if kafka_addr_list:
-                kafka_addr = kafka_addr_list[0]
+                kafka_config = kafka
                 break
-        if not (isinstance(kafka_addr, dict) and kafka_addr.get("ip") and kafka_addr.get("port")):
+        kafka_servers = [
+            f"{kafka_addr['ip']}:{kafka_addr['port']}"
+            for kafka_addr in kafka_addr_list
+            if isinstance(kafka_addr, dict) and kafka_addr.get("ip") and kafka_addr.get("port")
+        ]
+        if not (kafka_config and kafka_servers):
             return []
 
+        if kafka_config.get("sasl_username") and kafka_config.get("sasl_passwd"):
+            consumer_config = {
+                "bootstrap.servers": ",".join(kafka_servers),
+                "group.id": f"bkmonitor-{uuid.uuid4()}",
+                "session.timeout.ms": 6000,
+                "auto.offset.reset": "latest",
+                "security.protocol": kafka_config.get("security_protocol") or config.KAFKA_SASL_PROTOCOL,
+                "sasl.mechanisms": kafka_config.get("sasl_mechanisms") or config.KAFKA_SASL_MECHANISM,
+                "sasl.username": kafka_config["sasl_username"],
+                "sasl.password": kafka_config["sasl_passwd"],
+            }
+            consumer = ConfluentConsumer(consumer_config)
+            metadata = consumer.list_topics(topic)
+            partitions = metadata.topics[topic].partitions.keys()
+            topic_partitions = [ConfluentTopicPartition(topic, partition) for partition in partitions]
+            consumer.assign(topic_partitions)
+            consumer.poll(0.5)
+
+            result = []
+            errors = []
+            for tp in topic_partitions:
+                # 获取该分区最大偏移量
+                low_offset, high_offset = consumer.get_watermark_offsets(tp)
+                if size <= 0 or high_offset <= low_offset:
+                    continue
+                start_offset = max(low_offset, high_offset - size)
+
+                # 设置消息消费偏移量
+                consumer.seek(ConfluentTopicPartition(topic, tp.partition, start_offset))
+
+                while len(result) < size:
+                    messages = consumer.consume(num_messages=size - len(result), timeout=1.0)
+                    if not messages:
+                        break
+
+                    for msg in messages:
+                        if msg.error():
+                            if msg.error().code() == KafkaError._PARTITION_EOF:
+                                break
+                            errors.append(msg.error())
+                        else:
+                            try:
+                                result.append(json.loads(msg.value().decode()))
+                            except Exception:  # pylint: disable=broad-except
+                                pass
+                        if len(result) >= size or msg.offset() >= high_offset - 1:
+                            break
+
+            consumer.close()
+            if not result and errors:
+                raise KafkaException(errors)
+            return result
+
         consumer_config = {
-            "bootstrap_servers": f"{kafka_addr['ip']}:{kafka_addr['port']}",
+            "bootstrap_servers": kafka_servers,
             "request_timeout_ms": 1000,
             "consumer_timeout_ms": 1000,
         }
@@ -2480,30 +3270,32 @@ class KafkaTailResource(Resource):
         consumer.poll(size)
         topic_partitions = consumer.partitions_for_topic(topic)
         if not topic_partitions:
+            consumer.close()
             raise ValueError(_("partition获取失败"))
         result = []
         for partition in topic_partitions:
             # 获取该分区最大偏移量
             tp = TopicPartition(topic=topic, partition=partition)
-            end_offset = consumer.end_offsets([tp])[tp]
-            if not end_offset:
+            low_offset = consumer.beginning_offsets([tp])[tp]
+            high_offset = consumer.end_offsets([tp])[tp]
+            if size <= 0 or high_offset <= low_offset:
                 continue
+            start_offset = max(low_offset, high_offset - size)
 
             # 设置消息消费偏移量
-            if end_offset >= size:
-                consumer.seek(tp, end_offset - size)
-            else:
-                consumer.seek_to_beginning()
+            consumer.seek(tp, start_offset)
             for msg in consumer:
                 try:
                     result.append(json.loads(msg.value.decode()))
                 except Exception:  # pylint: disable=broad-except
                     pass
                 if len(result) >= size:
+                    consumer.close()
                     return result
-                if msg.offset == end_offset - 1:
+                if msg.offset >= high_offset - 1:
                     break
 
+        consumer.close()
         return result
 
 

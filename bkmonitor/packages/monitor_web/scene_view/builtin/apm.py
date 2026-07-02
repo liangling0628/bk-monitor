@@ -14,6 +14,7 @@ import logging
 import threading
 from typing import Any
 from collections.abc import Callable
+from urllib.parse import urljoin
 
 from django.conf import settings
 from django.core.cache import caches
@@ -25,14 +26,13 @@ from apm_web.handlers import metric_group
 from apm_web.handlers.component_handler import ComponentHandler
 from apm_web.handlers.host_handler import HostHandler
 from apm_web.handlers.service_handler import ServiceHandler
-from apm_web.metric.constants import SeriesAliasType
 from apm_web.models import Application
 from bkmonitor.models import MetricListCache
 from bkmonitor.utils.cache import CacheType, using_cache
 from bkmonitor.utils.common_utils import deserialize_and_decompress
 from bkmonitor.utils.tenant import bk_biz_id_to_bk_tenant_id
 from bkmonitor.utils.thread_backend import InheritParentThread, run_threads
-from constants.apm import MetricTemporality, TelemetryDataType, CommonMetricTag, DEFAULT_DATA_LABEL
+from constants.apm import MetricTemporality, TelemetryDataType, CommonMetricTag, DEFAULT_DATA_LABEL, CallSide
 from constants.data_source import DataSourceLabel, DataTypeLabel
 from monitor_web.models.scene_view import SceneViewModel, SceneViewOrderModel
 from monitor_web.scene_view.builtin import BuiltinProcessor, create_default_views
@@ -46,8 +46,8 @@ def get_rpc_service_config_from_metric_or_none(
     bk_biz_id: int, app_name: str, table_id: str, service_name: str
 ) -> dict[str, Any] | None:
     metric_fields: list[str] = [
-        metric_group.TrpcMetricGroup.METRIC_FIELDS[SeriesAliasType.CALLER.value]["rpc_handled_total"],
-        metric_group.TrpcMetricGroup.METRIC_FIELDS[SeriesAliasType.CALLEE.value]["rpc_handled_total"],
+        metric_group.TrpcMetricGroup.METRIC_FIELDS[CallSide.CALLER.value]["rpc_handled_total"],
+        metric_group.TrpcMetricGroup.METRIC_FIELDS[CallSide.CALLEE.value]["rpc_handled_total"],
     ]
     metric_exists: bool = MetricListCache.objects.filter(
         bk_tenant_id=bk_biz_id_to_bk_tenant_id(bk_biz_id),
@@ -68,7 +68,7 @@ def get_rpc_service_config_from_metric_or_none(
 
     discover_result: dict[str, dict[str, Any] | list[str]] = {}
     group: metric_group.TrpcMetricGroup = metric_group.MetricGroupRegistry.get(
-        metric_group.GroupEnum.TRPC, bk_biz_id, app_name
+        metric_group.GroupEnum.TRPC.value, bk_biz_id, app_name
     )
     run_threads([InheritParentThread(target=_fetch_server_list), InheritParentThread(target=_get_server_config)])
 
@@ -115,9 +115,11 @@ def discover_caller_callee(
         logger.info("[apm][discover_caller_callee] node not found: %s / %s / %s", bk_biz_id, app_name, service_name)
         return discover_result
 
-    server_config: dict[str, Any] | None = ServiceHandler.get_rpc_service_config_or_none(
-        node
-    ) or get_rpc_service_config_from_metric_or_none(bk_biz_id, app_name, table_id, service_name)
+    system: dict[str, Any] = ServiceHandler.get_system(node)
+    if system.get("is_support_call_analysis"):
+        server_config: dict[str, Any] | None = MetricTemporality.get_metric_config(system["temporality"])
+    else:
+        server_config = get_rpc_service_config_from_metric_or_none(bk_biz_id, app_name, table_id, service_name)
     if not server_config:
         return discover_result
 
@@ -148,11 +150,13 @@ class ApmBuiltinProcessor(BuiltinProcessor):
 
     filenames = [
         # ⬇️ APM观测场景视图
+        "apm_application-alarm_center",
         "apm_application-alarm_template",
         "apm_application-endpoint",
         "apm_application-error",
         "apm_application-overview",
         "apm_application-service",
+        "apm_application-trace",
         "apm_application-topo",
         "apm_service-component-default-error",
         "apm_service-component-default-instance",
@@ -167,12 +171,15 @@ class ApmBuiltinProcessor(BuiltinProcessor):
         "apm_service-service-default-container",
         "apm_service-service-default-instance",
         "apm_service-service-default-log",
+        "apm_service-service-default-trace",
         "apm_service-service-default-event",
         "apm_service-service-default-overview",
         "apm_service-service-default-profiling",
         "apm_service-service-default-topo",
         "apm_service-service-default-db",
         "apm_service-service-default-custom_metric",
+        "apm_service-service-default-custom_metric_v2",
+        "apm_service-service-default-alarm_center",
         "apm_service-remote_service-http-overview",
         # ⬇️ APMTrace检索场景视图
         "apm_trace-log",
@@ -247,6 +254,15 @@ class ApmBuiltinProcessor(BuiltinProcessor):
 
         builtin_view = f"{view.scene_id}-{view.id}"
         view_config = cls.builtin_views[builtin_view]
+
+        # APM自定义指标 V2: 根据白名单判断是否展示，需在 only_simple_info 提前返回之前设置
+        if builtin_view == "apm_service-service-default-custom_metric_v2":
+            view_config = {
+                **view_config,
+                "hidden": str(bk_biz_id) not in settings.APM_CUSTOM_METRIC_V2_ENABLED_LIST
+                and f"{bk_biz_id}-{app_name}" not in settings.APM_CUSTOM_METRIC_V2_ENABLED_LIST,
+            }
+
         if params.get("only_simple_info") and builtin_view not in cls.NEED_RENDER_IF_ONLY_SIMPLE_INFO:
             # ViewList 不需要渲染数据，直接返回。
             return view_config
@@ -293,25 +309,27 @@ class ApmBuiltinProcessor(BuiltinProcessor):
 
                 return cls._get_non_host_view_config(builtin_view, params)
             elif builtin_view == f"{cls.APM_TRACE_PREFIX}-log":
-                service_name = params.get("service_name")
                 span_id = params.get("span_id")
-                if not service_name or not span_id:
-                    raise ValueError(_("缺少ServiceName或者spanId参数"))
+                trace_id = params.get("trace_id")
+                service_name = params.get("service_name")
+
+                if not (service_name and span_id) and trace_id:
+                    # Trace 详情视角下的日志页面
+                    cls._walk_target_data(
+                        view_config, lambda data: [data.pop(k, None) for k in ("span_id", "service_name")]
+                    )
+                    view_config = cls._replace_variable(view_config, "${trace_id}", trace_id)
+                elif service_name and span_id:
+                    # Span 详情视角下的日志页面
+                    cls._walk_target_data(view_config, lambda data: data.pop("trace_id", None))
+                    view_config = cls._replace_variable(view_config, "${span_id}", span_id)
+                    view_config = cls._replace_variable(view_config, "${service_name}", service_name)
+                else:
+                    raise ValueError(_("缺少 TraceId 或 SpanId+ServiceName 参数"))
 
                 view_config = cls._replace_variable(view_config, "${app_name}", app_name)
-                view_config = cls._replace_variable(view_config, "${service_name}", service_name)
-                view_config = cls._replace_variable(view_config, "${span_id}", span_id)
             elif builtin_view == f"{cls.APM_TRACE_PREFIX}-container":
-                return cls.get_container_view(
-                    params,
-                    bk_biz_id,
-                    app_name,
-                    service_name,
-                    view,
-                    view_config,
-                    builtin_view,
-                    display_with_sidebar=False,
-                )
+                return cls.get_container_view_v2(params, bk_biz_id, app_name, service_name, view_config, builtin_view)
             return view_config
 
         # APM观测场景处
@@ -346,7 +364,7 @@ class ApmBuiltinProcessor(BuiltinProcessor):
 
         # k8s 场景
         if builtin_view == "apm_service-service-default-container":
-            return cls.get_container_view(params, bk_biz_id, app_name, service_name, view, view_config, builtin_view)
+            return cls.get_container_view_v2(params, bk_biz_id, app_name, service_name, view_config, builtin_view)
 
         # 主被调场景
         if builtin_view == "apm_service-service-default-caller_callee":
@@ -513,41 +531,33 @@ class ApmBuiltinProcessor(BuiltinProcessor):
         return view_config
 
     @classmethod
-    def get_container_view(
+    def get_container_view_v2(
         cls,
-        params,
-        bk_biz_id,
-        app_name,
-        service_name,
-        view,
-        view_config,
-        builtin_view,
-        display_with_sidebar=True,
-    ):
-        # display_with_sidebar: 是否页面配置展示为侧边栏(在观测场景处显示为侧边栏，在主机场景处显示为顶部栏下拉框)
-        # 获取观测场景或 span 检索处关联容器的图表配置
-        # 时间范围必传
-        start_time = params.get("start_time")
-        end_time = params.get("end_time")
-        if not start_time or not end_time:
-            raise ValueError("没有传递 start_time, end_time")
+        params: dict[str, Any],
+        bk_biz_id: int,
+        app_name: str,
+        service_name: str,
+        view_config: dict[str, Any],
+        builtin_view: str,
+    ) -> dict[str, Any]:
+        from apm_web.container.resources import ListServiceK8sTargetsResource
 
-        if app_name and service_name:
-            from apm_web.container.resources import ListServicePodsResource
+        if not app_name or not service_name:
+            return cls._get_non_container_view_config(builtin_view, params)
 
-            response = ListServicePodsResource()(
-                bk_biz_id=bk_biz_id,
-                app_name=app_name,
-                service_name=service_name,
-                start_time=start_time,
-                end_time=end_time,
-            )
+        request_params: dict[str, Any] = {
+            "bk_biz_id": bk_biz_id,
+            "app_name": app_name,
+            "service_name": service_name,
+        }
+        # Span 详情容器监控需透传 span_id，用于查询并优先展示关联的 Pod
+        if params.get("span_id"):
+            request_params["span_id"] = params["span_id"]
 
-            if response:
-                # 实际有 Pod 数据才返回
-                return cls._add_config_from_container(app_name, service_name, view, view_config, display_with_sidebar)
-
-        return cls._get_non_container_view_config(builtin_view, params)
+        target_list: list[dict[str, Any]] = ListServiceK8sTargetsResource()(**request_params).get("target_list", [])
+        if not target_list:
+            return cls._get_non_container_view_config(builtin_view, params)
+        return view_config
 
     @classmethod
     def _handle_current_target(cls, span_host, view_config):
@@ -641,68 +651,6 @@ class ApmBuiltinProcessor(BuiltinProcessor):
         cls._walk_target_data(view_config, _callback)
 
     @classmethod
-    def _add_config_from_container(cls, app_name, service_name, view, view_config, display_with_sidebar):
-        """获取容器 Pod 图表配置"""
-        from monitor_web.scene_view.builtin.kubernetes import KubernetesBuiltinProcessor
-
-        if not KubernetesBuiltinProcessor.builtin_views:
-            KubernetesBuiltinProcessor.load_builtin_views()
-
-        # 因为 kubernetes 场景不需要 type 字段(在接口处已处理) 这里查询 type 为空的数据
-        pod_view = SceneViewModel.objects.filter(
-            bk_biz_id=view.bk_biz_id,
-            scene_id="kubernetes",
-            name="pod",
-            type="",
-        )
-        if pod_view.exists():
-            pod_view = pod_view.first()
-        else:
-            create_default_views(bk_biz_id=view.bk_biz_id, scene_id="kubernetes", view_type="", existed_views=pod_view)
-            pod_view = pod_view.first()
-
-        pod_view_config = json.loads(json.dumps(KubernetesBuiltinProcessor.builtin_views["kubernetes-pod"]))
-        pod_view = KubernetesBuiltinProcessor.get_pod_view_config(pod_view, pod_view_config, view_position="APM")
-
-        # 调整配置
-        pod_view["id"], pod_view["name"] = view_config["id"], view_config["name"]
-        pod_view["options"] = view_config["options"]
-        pod_view["variables"] = view_config["variables"]
-        if "panels" in pod_view:
-            pod_view["overview_panels"] = pod_view["panels"]
-            del pod_view["panels"]
-
-        if display_with_sidebar:
-            pod_view["options"]["selector_panel"]["targets"][0]["data"].update(
-                {
-                    "app_name": app_name,
-                    "service_name": service_name,
-                }
-            )
-        else:
-            pod_view["variables"][0]["targets"][0]["data"].update(
-                {
-                    "app_name": app_name,
-                    "service_name": service_name,
-                }
-            )
-            # 将图表的维度全部改为显示在下方 而不是右边
-            for i in pod_view.get("overview_panels", []):
-                for j in i.get("panels", []):
-                    j.update({"options": {"legend": {"placement": "bottom", "displayMode": "list"}}})
-
-        # 不展示事件页面 和 图表为空列表的分类
-        o_views = []
-        for i in pod_view["overview_panels"]:
-            if i["id"] == "bk_monitor.time_series.k8s.events":
-                continue
-            if not i["panels"]:
-                continue
-            o_views.append(i)
-        pod_view["overview_panels"] = o_views
-        return pod_view
-
-    @classmethod
     def _add_config_from_host(cls, view, view_config):
         """从主机监控中获取并增加配置"""
         from monitor_web.scene_view.builtin.host import get_auto_view_panels
@@ -760,7 +708,19 @@ class ApmBuiltinProcessor(BuiltinProcessor):
                 bk_biz_id=bk_biz_id,
                 scene_id=scene_id,
                 type="",
-                defaults={"config": ["overview", "topo", "service", "endpoint", "db", "error", "alarm_template"]},
+                defaults={
+                    "config": [
+                        "overview",
+                        "topo",
+                        "service",
+                        "endpoint",
+                        "db",
+                        "error",
+                        "trace",
+                        "alarm_template",
+                        "alarm_center",
+                    ]
+                },
             )
         if scene_id == f"{cls.SCENE_ID}_service":
             SceneViewOrderModel.objects.update_or_create(
@@ -780,8 +740,11 @@ class ApmBuiltinProcessor(BuiltinProcessor):
                         "container",
                         "log",
                         "event",
+                        "trace",
                         "profiling",
                         "custom_metric",
+                        "custom_metric_v2",
+                        "alarm_center",
                     ]
                 },
             )
@@ -792,6 +755,18 @@ class ApmBuiltinProcessor(BuiltinProcessor):
 
     @classmethod
     def _get_non_container_view_config(cls, builtin_view, params):
+        service_config_link: str = "/service-config?app_name={app_name}&service_name={service_name}".format(
+            app_name=params.get("app_name", ""),
+            service_name=params.get("service_name", ""),
+        )
+        service_config_url: str = urljoin(
+            settings.BK_MONITOR_HOST,
+            "?bizId={bk_biz_id}#/apm{service_config_link}".format(
+                bk_biz_id=params.get("bk_biz_id"),
+                service_config_link=service_config_link,
+            ),
+        )
+
         return {
             "id": "container",
             "type": "overview",
@@ -808,14 +783,24 @@ class ApmBuiltinProcessor(BuiltinProcessor):
                             "data": {
                                 "type": "empty",
                                 "title": _("暂未发现关联 Pod"),
+                                "link": {
+                                    "target": "blank",
+                                    "value": _("关联容器负载"),
+                                    "url": service_config_url,
+                                },
                                 "subTitle": _(
-                                    "如何发现容器信息:\n"
-                                    "1. [推荐] 将上报地址切换为集群内上报，即可自动获取关联。\n"
-                                    "2. 手动补充以下全部集群信息字段，也可以进行关联："
-                                    "k8s.bcs.cluster.id(集群 Id), "
-                                    "k8s.pod.name(Pod 名称), "
-                                    "k8s.namespace.name(Pod 所在命名空间)。\n"
-                                    "如果还是没有数据，可能是由于所选时间段的 Pod 已经销毁。\n",
+                                    "如何关联容器信息:\n"
+                                    f"1. 快捷配置：前往 <a href='{service_config_url}' target='_blank'>服务配置</a>，"
+                                    "在「事件关联 -> 容器事件」手动关联具体 Workload，即可实现在 APM 查看服务所关联容器负载的监控、事件数据。\n\n"
+                                    "2. APM 支持与 BCS 打通，你可以通过以下方式简单配置：\n"
+                                    "- 方式 1（推荐 🌟）：将上报域名切换为集群内域名（bkm-collector.bkmonitor-operator），"
+                                    "端口、上报路径与之前一致，即可自动获取关联。\n"
+                                    "- 方式 2：在服务代码补充以下全部集群信息字段到 Span Resource，也可以进行关联：\n"
+                                    "   - k8s.bcs.cluster.id（集群 ID）\n"
+                                    "   - k8s.pod.name（Pod 名称）\n"
+                                    "   - k8s.namespace.name（Pod 所在命名空间）\n"
+                                    f"- 详见 <a href='{settings.APM_ACCESS_URL}' target='_blank'>应用性能监控（APM）数据接入指南</a>，"
+                                    "每个语言的接入文档中均有「如何自动发现容器信息」指引。\n"
                                 ),
                             }
                         }
@@ -898,13 +883,16 @@ class ApmBuiltinProcessor(BuiltinProcessor):
             2. apm_service_name
         APM Trace检索页面处:
             1. apm_span_id
+            2. apm_trace_id
         """
 
         if scene_id.startswith(cls.APM_TRACE_PREFIX):
             return {
                 "span_id": params.get("apm_span_id"),
+                "trace_id": params.get("apm_trace_id"),
                 "app_name": params.get("apm_app_name"),
                 "service_name": params.get("apm_service_name"),
+                "bk_biz_id": params.get("bk_biz_id"),
                 "only_simple_info": params.get("only_simple_info") or False,
                 "start_time": params.get("start_time"),
                 "end_time": params.get("end_time"),
@@ -913,6 +901,7 @@ class ApmBuiltinProcessor(BuiltinProcessor):
         converted_params = {
             "app_name": params.get("apm_app_name"),
             "service_name": params.get("apm_service_name"),
+            "bk_biz_id": params.get("bk_biz_id"),
             "only_simple_info": params.get("only_simple_info") or False,
             "view_switches": params.get("view_switches", {}),
         }

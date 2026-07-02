@@ -82,6 +82,7 @@ export default {
   进程端口: 'Process Port',
   时序预测: 'Forecasting',
   离群检测: 'Outlier Detection',
+  新维度值检测: 'New Dimension Value Detection',
   查看告警策略: 'View Rule',
   修改生效时间段: 'Edit Effective Time Period',
   // 管理端
@@ -127,6 +128,7 @@ export default {
   成本: 'Cost',
   '生成 “{0}” 选项': 'Generate "{0}" Options',
   '直接输入 "{0}"': 'Enter "{0}"',
+  '回车直接输入 "{0}"': 'Enter "{0}"',
   新开标签页: 'Open in New Tab',
   另存为新收藏: 'Save as New Favorite',
   覆盖当前收藏: 'Override Current Favorite',
@@ -141,5 +143,15 @@ export default {
   全部来源: 'All Sources',
   分享: 'Share',
   从分组中移除: 'Remove from Group',
+  分派给我的: 'Assigned to Me',
+  通知给我: 'Notify Me',
   自定义时间: 'Custom time',
+  用户操作: 'User Operation',
+  语音: 'Voice',
+
+  'Issue 名称': 'Issue Name',
+  '策略 ID': 'Strategy ID',
+  是否回归: 'Whether to return',
+  最近告警时间: 'Recent alarm time',
+  解决时间: 'resolution time',
 };

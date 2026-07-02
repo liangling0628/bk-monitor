@@ -258,14 +258,7 @@ class QueryConfigModel(Model):
         verbose_name = "查询配置表V2"
         verbose_name_plural = "查询配置表V2"
         db_table = "alarm_query_config_v2"
-        index_together = [
-            ("data_source_label", "data_type_label"),
-        ]
-
-    def to_obj(self):
-        from bkmonitor.strategy.new_strategy import QueryConfig
-
-        return QueryConfig.from_models([self])[0]
+        index_together = [("data_source_label", "data_type_label")]
 
     @classmethod
     def get_strategies_by_source_app(cls, source_app=None):
@@ -303,6 +296,12 @@ class StrategyLabel(Model):
         verbose_name_plural = "策略标签"
         db_table = "alarm_strategy_label"
         index_together = (("label_name", "strategy_id"),)
+        # 覆盖索引：标签计数查询按 strategy_id 过滤、label_name 聚合（见 get_strategy_label_list）。
+        # 原 index_together 的 leading 列是 label_name 而非过滤列 strategy_id，IN 过滤无法走索引 seek；
+        # 本索引以过滤列 strategy_id 为 leading 列并覆盖 label_name，使该计数查询成为覆盖索引 seek。
+        indexes = [
+            models.Index(fields=["strategy_id", "label_name"], name="idx_strlabel_sid_lname"),
+        ]
 
     @classmethod
     def get_label_dict(cls, strategy_id=None):

@@ -25,17 +25,19 @@ from rest_framework.exceptions import ValidationError
 from apm.constants import (
     GLOBAL_CONFIG_BK_BIZ_ID,
     AggregatedMethod,
+    ApmCacheType,
     ConfigTypes,
     EnabledStatisticsDimension,
     StatisticsProperty,
     VisibleEnum,
 )
+from apm.core.discover.instance import InstanceDiscover
 from apm.core.handlers.apm_cache_handler import ApmCacheHandler
-from apm.core.handlers.application_hepler import ApplicationHelper
+from apm.core.handlers.application_hepler import ApplicationHelper, SharedDatasourceRuleFactory
 from apm.core.handlers.bk_data.helper import FlowHelper
 from apm.core.handlers.discover_handler import DiscoverHandler
 from apm.core.handlers.query.base import FilterOperator
-from apm.core.handlers.query.define import QueryMode, QueryStatisticsMode
+from apm.core.handlers.query.define import QueryMode
 from apm.core.handlers.query.ebpf_query import DeepFlowQuery
 from apm.core.handlers.query.proxy import QueryProxy
 from apm.models import (
@@ -128,6 +130,12 @@ class CreateApplicationResource(Resource):
         enabled_trace = serializers.BooleanField(label="是否开启 Trace 功能", required=True)
         enabled_metric = serializers.BooleanField(label="是否开启 Metric 功能", required=True)
         enabled_log = serializers.BooleanField(label="是否开启 Log 功能", required=True)
+        # 共享数据源类型
+        shared_datasource_types = serializers.ListField(
+            label="共享数据源类型列表",
+            child=serializers.ChoiceField(choices=TelemetryDataType.choices()),
+            required=False,
+        )
 
     def perform_request(self, validated_data):
         datasource_options = validated_data.get("es_storage_config")
@@ -139,6 +147,14 @@ class CreateApplicationResource(Resource):
         bk_tenant_id = validated_data.get("bk_tenant_id")
         if not bk_tenant_id:
             bk_tenant_id = get_request_tenant_id()
+
+        # 共享数据源类型：若请求未显式指定，则按 settings.APM_SHARED_DATASOURCE_RULES 配置的规则工厂进行匹配
+        shared_datasource_types = validated_data.get(
+            "shared_datasource_types",
+            SharedDatasourceRuleFactory.list_shared_datasource_types(
+                validated_data["bk_biz_id"], validated_data["app_name"]
+            ),
+        )
 
         return ApmApplication.create_application(
             bk_tenant_id=bk_tenant_id,
@@ -152,6 +168,7 @@ class CreateApplicationResource(Resource):
                 "is_enabled_trace": validated_data.get("enabled_trace", False),
                 "is_enabled_metric": validated_data.get("enabled_metric", False),
                 "is_enabled_log": validated_data.get("enabled_log", False),
+                "shared_datasource_types": shared_datasource_types,
             },
         )
 
@@ -163,6 +180,12 @@ class ApplyDatasourceResource(Resource):
         application_id = serializers.IntegerField(label="应用id")
         trace_datasource_option = DatasourceConfigRequestSerializer(required=False, label="trace 存储配置")
         log_datasource_option = DatasourceConfigRequestSerializer(required=False, label="log 存储配置")
+        # 共享数据源类型（不传则表示保持当前数据源现有模式）
+        shared_datasource_types = serializers.ListField(
+            label="共享数据源类型列表",
+            child=serializers.ChoiceField(choices=TelemetryDataType.choices()),
+            required=False,
+        )
 
     def perform_request(self, validated_request_data):
         try:
@@ -170,9 +193,22 @@ class ApplyDatasourceResource(Resource):
         except ApmApplication.DoesNotExist:
             raise ValueError(_("应用不存在"))
 
+        # 显式传入 shared_datasource_types 参数（含空列表）：以列表值作为本次 apply 的目标状态
+        if validated_request_data.get("shared_datasource_types") is not None:
+            shared_datasource_types = validated_request_data["shared_datasource_types"]
+        # 未传入：查询各数据源的共享配置后构造共享列表，以保持现状不触发迁移
+        else:
+            shared_datasource_types = []
+            trace_ds = TraceDataSource.objects.filter(
+                bk_biz_id=application.bk_biz_id, app_name=application.app_name
+            ).first()
+            if trace_ds and trace_ds.is_shared:
+                shared_datasource_types.append(ApmDataSourceConfigBase.TRACE_DATASOURCE)
+
         return application.apply_datasource(
             trace_storage_config=validated_request_data.get("trace_datasource_option"),
             log_storage_config=validated_request_data.get("log_datasource_option"),
+            options={"shared_datasource_types": shared_datasource_types},
         )
 
 
@@ -412,7 +448,7 @@ class ReleaseAppConfigResource(Resource):
         db_slow_command_config = DbSlowCommandConfigSerializer(label="慢命令配置", default={})
 
         code_relabel_config = serializers.ListField(
-            label="返回码重定义配置", child=serializers.DictField(), required=False, default=list
+            label="返回码重定义配置", child=serializers.DictField(), required=False, allow_null=True
         )
 
         qps = serializers.IntegerField(label="qps", min_value=1, required=False)
@@ -445,7 +481,7 @@ class ReleaseAppConfigResource(Resource):
             app_name,
             app_name,
             ApdexConfig.APP_LEVEL,
-            validated_request_data.get("code_relabel_config", []),
+            validated_request_data.get("code_relabel_config"),
         )
 
         for service_config in service_configs:
@@ -556,8 +592,25 @@ class ReleaseAppConfigResource(Resource):
         )
 
     def set_code_relabel_config(self, bk_biz_id, app_name, config_key, config_level, code_relabel_list):
-        if not code_relabel_list:
+        if code_relabel_list is None:
+            # None：表示本次更新不涉及 code_relabel，直接跳过。
             return
+
+        if not code_relabel_list:
+            # []：表示规则清空，需要删除相应的配置项。
+            NormalTypeValueConfig.delete_config(
+                bk_biz_id,
+                app_name,
+                [
+                    {
+                        "config_level": config_level,
+                        "config_key": config_key,
+                        "type": ConfigTypes.CODE_RELABEL_CONFIG,
+                    }
+                ],
+            )
+            return
+
         type_value_config = {"type": ConfigTypes.CODE_RELABEL_CONFIG, "value": json.dumps(code_relabel_list)}
         NormalTypeValueConfig.refresh_config(
             bk_biz_id, app_name, config_level, config_key, [type_value_config], need_delete_config=False
@@ -734,7 +787,9 @@ class QueryTopoNodeResource(Resource):
             return data
 
     def perform_request(self, data):
-        filter_params = DiscoverHandler.get_retention_filter_params(data["bk_biz_id"], data["app_name"])
+        filter_params = DiscoverHandler.get_retention_filter_params(
+            data["bk_biz_id"], data["app_name"], TopoNode.EXPIRED_DAYS
+        )
 
         if data.get("topo_key"):
             filter_params["topo_key"] = data["topo_key"]
@@ -754,7 +809,66 @@ class QueryTopoNodeResource(Resource):
         return res
 
 
-class QueryTopoRelationResource(Resource):
+class DiscoverQueryResource(Resource):
+    many_response_data = True
+    model = None
+    cache_type = None
+    discover_class = None
+
+    @staticmethod
+    def build_filter_params(data: dict) -> dict:
+        """构建基础查询过滤条件"""
+        return {
+            "bk_biz_id": data["bk_biz_id"],
+            "app_name": data["app_name"],
+        }
+
+    def apply_additional_filters(self, queryset, data: dict):
+        """应用额外的过滤条件（子类可重写）"""
+        return queryset
+
+    def build_result_item(self, obj, updated_at) -> dict:
+        """构建返回结果的单个项（子类必须实现）"""
+        raise NotImplementedError("Subclass must implement build_result_item()")
+
+    def sort_results(self, results: list) -> list:
+        """对结果进行排序（子类可重写）"""
+        return results
+
+    def perform_request(self, data):
+        # 1. 获取过期时间分界线，确保使用UTC时区
+        retention = DiscoverHandler.get_app_retention(data["bk_biz_id"], data["app_name"])
+        retention_cutoff = datetime.datetime.now(tz=pytz.UTC) - datetime.timedelta(retention)
+
+        # 2. 构建查询并获取数据库对象
+        filter_params = self.build_filter_params(data)
+        queryset = self.model.objects.filter(**filter_params)
+        queryset = self.apply_additional_filters(queryset, data)
+        objs = list(queryset)
+
+        # 3. 获取 discover_class（支持 @property 动态导入）
+        discover_class = self.discover_class
+
+        # 4. 批量获取缓存并合并更新时间
+        id_to_updated_at = DiscoverHandler.batch_merge_cache_updated_time(
+            data["bk_biz_id"], data["app_name"], self.cache_type, objs, discover_class
+        )
+
+        # 5. 根据合并后的时间进行过期过滤并构建结果
+        result = []
+        for obj in objs:
+            updated_at = id_to_updated_at[obj.id]
+            if updated_at >= retention_cutoff:
+                result.append(self.build_result_item(obj, updated_at))
+
+        # 6. 排序结果
+        return self.sort_results(result)
+
+
+class QueryTopoRelationResource(DiscoverQueryResource):
+    model = TopoRelation
+    cache_type = ApmCacheType.RELATION
+
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField(label="业务id")
         app_name = serializers.CharField(label="应用名称", max_length=50)
@@ -762,29 +876,52 @@ class QueryTopoRelationResource(Resource):
         to_topo_key = serializers.CharField(label="被调方Topo Key", allow_null=True, required=False)
         filters = serializers.DictField(label="查询条件", allow_null=True, required=False, default={})
 
-    class ResponseSerializer(serializers.ModelSerializer):
-        class Meta:
-            model = TopoRelation
-            exclude = ["created_at", "updated_at"]
+    @property
+    def discover_class(self):
+        from apm.core.discover.relation import RelationDiscover
 
-    many_response_data = True
+        return RelationDiscover
 
-    def perform_request(self, data):
-        filter_params = DiscoverHandler.get_retention_filter_params(data["bk_biz_id"], data["app_name"])
-
+    def apply_additional_filters(self, queryset, data: dict):
+        """根据 from_topo_key 和 to_topo_key 进行额外过滤"""
         if data.get("from_topo_key"):
-            filter_params["from_topo_key"] = data["from_topo_key"]
+            queryset = queryset.filter(from_topo_key=data["from_topo_key"])
         if data.get("to_topo_key"):
-            filter_params["to_topo_key"] = data["to_topo_key"]
+            queryset = queryset.filter(to_topo_key=data["to_topo_key"])
+        if data.get("filters"):
+            queryset = queryset.filter(**data["filters"])
+        return queryset
 
-        return TopoRelation.objects.filter(**filter_params, **data["filters"])
+    def build_result_item(self, obj, updated_at) -> dict:
+        """构建返回结果的单个项"""
+        return {
+            "id": obj.id,
+            "bk_biz_id": obj.bk_biz_id,
+            "app_name": obj.app_name,
+            "from_topo_key": obj.from_topo_key,
+            "to_topo_key": obj.to_topo_key,
+            "kind": obj.kind,
+            "to_topo_key_kind": obj.to_topo_key_kind,
+            "to_topo_key_category": obj.to_topo_key_category,
+            "extra_data": obj.extra_data,
+        }
 
 
 class QueryTopoInstanceResource(PageListResource):
     UNIQUE_UPDATED_AT = "updated_at"
 
     topo_instance_all_fields = [field.column for field in TopoInstance._meta.fields]
-    merge_data_need_fields = ["updated_at", "id", "instance_id"]
+    merge_data_need_fields = [
+        "updated_at",
+        "topo_node_key",
+        "instance_id",
+        "instance_topo_kind",
+        "component_instance_category",
+        "component_instance_predicate_value",
+        "sdk_name",
+        "sdk_version",
+        "sdk_language",
+    ]
 
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField(label="业务id")
@@ -853,13 +990,15 @@ class QueryTopoInstanceResource(PageListResource):
 
     def merge_data(self, instance_list, validated_request_data):
         merge_data = []
-        name = ApmCacheHandler.get_topo_instance_cache_key(
-            validated_request_data["bk_biz_id"], validated_request_data["app_name"]
+        name = ApmCacheHandler.get_cache_key(
+            ApmCacheType.TOPO_INSTANCE, validated_request_data["bk_biz_id"], validated_request_data["app_name"]
         )
         cache_data = ApmCacheHandler().get_cache_data(name)
         # 更新 updated_at 字段
         for instance in instance_list:
-            key = str(instance["id"]) + ":" + instance["instance_id"]
+            instance_data = InstanceDiscover.build_instance_data(instance)
+            key = InstanceDiscover.to_cache_key(instance_data)
+
             if key in cache_data:
                 instance["updated_at"] = datetime.datetime.fromtimestamp(cache_data.get(key)).strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -932,22 +1071,26 @@ class QueryTopoInstanceResource(PageListResource):
         return {"total": total, "data": [obj for obj in res.values(*fields)]}
 
 
-class QueryRootEndpointResource(Resource):
+class QueryRootEndpointResource(DiscoverQueryResource):
+    model = RootEndpoint
+    cache_type = ApmCacheType.ROOT_ENDPOINT
+
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField(label="业务id")
         app_name = serializers.CharField(label="应用名称", max_length=50)
 
-    class ResponseSerializer(serializers.ModelSerializer):
-        class Meta:
-            model = RootEndpoint
-            fields = ("endpoint_name", "category_id", "service_name")
+    @property
+    def discover_class(self):
+        from apm.core.discover.root_endpoint import RootEndpointDiscover
 
-    many_response_data = True
+        return RootEndpointDiscover
 
-    def perform_request(self, data):
-        filter_params = DiscoverHandler.get_retention_filter_params(data["bk_biz_id"], data["app_name"])
-
-        return RootEndpoint.objects.filter(**filter_params)
+    def build_result_item(self, obj, updated_at) -> dict:
+        return {
+            "endpoint_name": obj.endpoint_name,
+            "category_id": obj.category_id,
+            "service_name": obj.service_name,
+        }
 
 
 class FilterSerializer(serializers.Serializer):
@@ -991,7 +1134,10 @@ class QuerySpanResource(Resource):
         return application.trace_datasource.query_span_with_group_keys(**param)
 
 
-class QueryEndpointResource(Resource):
+class QueryEndpointResource(DiscoverQueryResource):
+    model = Endpoint
+    cache_type = ApmCacheType.ENDPOINT
+
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField(label="业务id")
         app_name = serializers.CharField(label="应用名称", max_length=50)
@@ -1015,68 +1161,48 @@ class QueryEndpointResource(Resource):
                     data["category"] = [category]
             return super().to_internal_value(data)
 
-    def perform_request(self, data):
-        # 获取过期时间分界线，确保使用UTC时区
-        retention = DiscoverHandler.get_app_retention(data["bk_biz_id"], data["app_name"])
-        retention_cutoff = datetime.datetime.now(tz=pytz.UTC) - datetime.timedelta(retention)
+    @property
+    def discover_class(self):
+        from apm.core.discover.endpoint import EndpointDiscover
 
-        # 获取数据库中的端点数据，不使用updated_at__gte过滤，避免过早过滤导致数据丢失
-        filter_params = {
-            "bk_biz_id": data["bk_biz_id"],
-            "app_name": data["app_name"],
-        }
-        endpoints = Endpoint.objects.filter(**filter_params)
+        return EndpointDiscover
+
+    def apply_additional_filters(self, queryset, data: dict):
+        """应用额外的过滤条件"""
         if data["category"]:
-            endpoints = endpoints.filter(category_id__in=data["category"])
+            queryset = queryset.filter(category_id__in=data["category"])
         if data["category_kind_value"]:
-            endpoints = endpoints.filter(category_kind_value=data["category_kind_value"])
+            queryset = queryset.filter(category_kind_value=data["category_kind_value"])
         if data["service_name"]:
-            endpoints = endpoints.filter(service_name=data["service_name"])
+            queryset = queryset.filter(service_name=data["service_name"])
         if data["bk_instance_id"]:
             instance = TopoInstance.objects.filter(
                 instance_id=data["bk_instance_id"],
                 bk_biz_id=data["bk_biz_id"],
                 app_name=data["app_name"],
             ).first()
-            endpoints = endpoints.filter(service_name=instance.topo_node_key)
+            queryset = queryset.filter(service_name=instance.topo_node_key)
         if data.get("filters"):
-            endpoints = endpoints.filter(**data["filters"])
+            queryset = queryset.filter(**data["filters"])
+        return queryset
 
-        # 从Redis缓存获取端点时间信息
-        cache_name = ApmCacheHandler.get_endpoint_cache_key(data["bk_biz_id"], data["app_name"])
-        cache_data = ApmCacheHandler().get_cache_data(cache_name)
+    def build_result_item(self, obj, updated_at) -> dict:
+        return {
+            "endpoint_name": obj.endpoint_name,
+            "kind": obj.span_kind,
+            "service_name": obj.service_name,
+            "category_kind": {"key": obj.category_kind_key, "value": obj.category_kind_value},
+            "category": obj.category_id,
+            "extra_data": obj.extra_data,
+            "app_name": obj.app_name,
+            "created_at": obj.created_at,
+            "updated_at": updated_at,
+        }
 
-        # 构建端点数据并合并缓存时间信息，然后根据合并后的时间进行过期过滤
-        result = []
-        for endpoint in endpoints:
-            # 构建缓存key，格式：{id}:{service_name}:{endpoint_name}
-            cache_key = f"{endpoint.id}:{endpoint.service_name}:{endpoint.endpoint_name}"
-
-            # 获取时间戳，优先使用缓存中的时间，如果缓存中没有则使用数据库的updated_at
-            updated_at = endpoint.updated_at
-            if cache_key in cache_data:
-                updated_at = datetime.datetime.fromtimestamp(cache_data[cache_key], tz=pytz.UTC)
-
-            # 根据合并后的时间进行过期过滤
-            if updated_at >= retention_cutoff:
-                result.append(
-                    {
-                        "endpoint_name": endpoint.endpoint_name,
-                        "kind": endpoint.span_kind,
-                        "service_name": endpoint.service_name,
-                        "category_kind": {"key": endpoint.category_kind_key, "value": endpoint.category_kind_value},
-                        "category": endpoint.category_id,
-                        "extra_data": endpoint.extra_data,
-                        "app_name": endpoint.app_name,
-                        "created_at": endpoint.created_at,
-                        "updated_at": updated_at,
-                    }
-                )
-
-        # 按照更新时间倒序排序（最新的在前面）
-        result.sort(key=lambda x: x["updated_at"], reverse=True)
-
-        return result
+    def sort_results(self, results: list) -> list:
+        """按照更新时间倒序排序（最新的在前面）"""
+        results.sort(key=lambda x: x["updated_at"], reverse=True)
+        return results
 
 
 class QueryEventResource(Resource):
@@ -1108,8 +1234,8 @@ class QueryEventResource(Resource):
 class QuerySerializer(serializers.Serializer):
     bk_biz_id = serializers.IntegerField(label="业务id")
     app_name = serializers.CharField(label="应用名称", max_length=50)
-    start_time = serializers.IntegerField(required=True, label="数据开始时间")
-    end_time = serializers.IntegerField(required=True, label="数据开始时间")
+    start_time = serializers.IntegerField(required=False, allow_null=True, default=None, label="数据开始时间")
+    end_time = serializers.IntegerField(required=False, allow_null=True, default=None, label="数据开始时间")
     offset = serializers.IntegerField(required=False, label="偏移量", default=0)
     limit = serializers.IntegerField(required=False, label="每页数量", default=10)
     filters = serializers.ListSerializer(required=False, label="查询条件", child=TraceFilterSerializer())
@@ -1124,6 +1250,15 @@ class QuerySerializer(serializers.Serializer):
     sort = serializers.ListSerializer(label="排序字段", required=False, child=serializers.CharField())
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        has_start_time: bool = attrs.get("start_time") is not None
+        has_end_time: bool = attrs.get("end_time") is not None
+        if has_start_time != has_end_time:
+            raise ValidationError(_("start_time 和 end_time 必须同时提供"))
+        if not has_start_time and not QueryProxy.is_trace_or_span_id_query(
+            attrs.get("filters"), attrs.get("query_string")
+        ):
+            raise ValidationError(_("仅 TraceID / SpanID 精确查询允许省略时间范围"))
+
         processed_sort: list[str] = []
         for ordering in attrs.get("sort") or []:
             if not ordering:
@@ -1306,29 +1441,6 @@ class UpdateMetricFieldsResource(Resource):
         if not application:
             raise CustomException(_("业务下的应用: {} 不存在").format(app_name))
         return application.metric_datasource.update_fields(validated_request_data["field_list"])
-
-
-class QueryEsResource(Resource):
-    class RequestSerializer(serializers.Serializer):
-        table_id = serializers.CharField(required=True, label="结果表ID")
-        query_body = serializers.DictField(required=True, label="查询内容")
-
-    def perform_request(self, validated_request_data):
-        table_id = validated_request_data["table_id"].replace(".", "_")
-        datasource = None
-        try:
-            datasource = TraceDataSource.objects.get(result_table_id=validated_request_data["table_id"])
-        except TraceDataSource.DoesNotExist:
-            logger.info(f"trace data source not found [{validated_request_data['table_id']}]")
-        if not datasource:
-            for trace_datasource in TraceDataSource.objects.all():
-                if trace_datasource.result_table_id.replace(".", "_") == table_id:
-                    datasource = trace_datasource
-
-        if datasource:
-            return datasource.es_client.search(index=datasource.index_name, body=validated_request_data["query_body"])
-
-        raise ValueError(_("未找到对应的结果表"))
 
 
 class QueryEsMappingResource(Resource):
@@ -1549,51 +1661,64 @@ class QueryAppByTraceResource(Resource):
         return res
 
 
-class QueryHostInstanceResource(Resource):
-    many_response_data = True
+class QueryHostInstanceResource(DiscoverQueryResource):
+    model = HostInstance
+    cache_type = ApmCacheType.HOST
 
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField()
         app_name = serializers.CharField()
         service_name = serializers.CharField(required=False)
 
-    class ResponseSerializer(serializers.ModelSerializer):
-        class Meta:
-            model = HostInstance
-            fields = ["bk_cloud_id", "ip", "bk_host_id"]
+    @property
+    def discover_class(self):
+        from apm.core.discover.host import HostDiscover
 
-    def perform_request(self, data):
-        filter_params = DiscoverHandler.get_retention_filter_params(data["bk_biz_id"], data["app_name"])
+        return HostDiscover
 
-        q = Q()
+    def apply_additional_filters(self, queryset, data: dict):
+        """根据 service_name 进行额外过滤"""
         if data.get("service_name"):
-            q &= Q(topo_node_key=data["service_name"])
+            queryset = queryset.filter(topo_node_key=data["service_name"])
+        return queryset
 
-        return HostInstance.objects.filter(**filter_params).filter(q)
+    def build_result_item(self, obj, updated_at) -> dict:
+        return {
+            "bk_cloud_id": obj.bk_cloud_id,
+            "ip": obj.ip,
+            "bk_host_id": obj.bk_host_id,
+        }
 
 
-class QueryRemoteServiceRelationResource(Resource):
+class QueryRemoteServiceRelationResource(DiscoverQueryResource):
+    model = RemoteServiceRelation
+    cache_type = ApmCacheType.REMOTE_SERVICE_RELATION
+
     class RequestSerializer(serializers.Serializer):
         bk_biz_id = serializers.IntegerField()
         app_name = serializers.CharField()
         topo_node_key = serializers.CharField()
         category = serializers.CharField(allow_null=True, required=False)
 
-    many_response_data = True
+    @property
+    def discover_class(self):
+        from apm.core.discover.remote_service_relation import RemoteServiceRelationDiscover
 
-    class ResponseSerializer(serializers.ModelSerializer):
-        class Meta:
-            model = RemoteServiceRelation
-            fields = ["topo_node_key", "from_endpoint_name", "category"]
+        return RemoteServiceRelationDiscover
 
-    def perform_request(self, data):
-        filter_params = DiscoverHandler.get_retention_filter_params(data["bk_biz_id"], data["app_name"])
-
-        q = Q(topo_node_key=data["topo_node_key"])
+    def apply_additional_filters(self, queryset, data: dict):
+        """根据 topo_node_key 和 category 进行额外过滤"""
+        queryset = queryset.filter(topo_node_key=data["topo_node_key"])
         if data.get("category"):
-            q &= Q(category=data["category"])
+            queryset = queryset.filter(category=data["category"])
+        return queryset
 
-        return RemoteServiceRelation.objects.filter(**filter_params).filter(q)
+    def build_result_item(self, obj, updated_at) -> dict:
+        return {
+            "topo_node_key": obj.topo_node_key,
+            "from_endpoint_name": obj.from_endpoint_name,
+            "category": obj.category,
+        }
 
 
 class QueryLogRelationByIndexSetIdResource(Resource):
@@ -1760,38 +1885,6 @@ class DeleteApplicationResource(Resource):
         delete_application_async.delay(app.bk_biz_id, app.app_name, get_request_username())
 
 
-class QuerySpanStatisticsListResource(Resource):
-    RequestSerializer = QuerySerializer
-
-    def perform_request(self, validated_data):
-        return QueryProxy(validated_data["bk_biz_id"], validated_data["app_name"]).query_statistics(
-            QueryStatisticsMode.SPAN_NAME,
-            validated_data["start_time"],
-            validated_data["end_time"],
-            validated_data["limit"],
-            validated_data["offset"],
-            validated_data.get("filters"),
-            validated_data.get("query_string"),
-            validated_data.get("sort"),
-        )
-
-
-class QueryServiceStatisticsListResource(Resource):
-    RequestSerializer = QuerySerializer
-
-    def perform_request(self, validated_data):
-        return QueryProxy(validated_data["bk_biz_id"], validated_data["app_name"]).query_statistics(
-            QueryStatisticsMode.SERVICE,
-            validated_data["start_time"],
-            validated_data["end_time"],
-            validated_data["limit"],
-            validated_data["offset"],
-            validated_data.get("filters"),
-            validated_data.get("query_string"),
-            validated_data.get("sort"),
-        )
-
-
 class QueryBuiltinProfileDatasourceResource(Resource):
     """Query builtin profile datasource"""
 
@@ -1901,9 +1994,15 @@ class OperateApmDataIdResource(Resource):
 
     def perform_request(self, validated_data):
         if validated_data["datasource_type"] == DataSamplingLogTypeChoices.TRACE:
-            data_id = TraceDataSource.objects.get(
+            datasource = TraceDataSource.objects.get(
                 bk_biz_id=validated_data["bk_biz_id"], app_name=validated_data["app_name"]
-            ).bk_data_id
+            )
+            # 共享数据源的多个应用复用同一 bk_data_id，单个应用暂停或恢复会影响共享池内所有应用的上报，因此需拒绝该操作
+            if datasource.is_shared:
+                raise ValueError(
+                    f"应用 {validated_data['app_name']} 的 Trace 上报共享数据源，不支持单应用去暂停/恢复数据链路操作"
+                )
+            data_id = datasource.bk_data_id
         else:
             data_id = MetricDataSource.objects.get(
                 bk_biz_id=validated_data["bk_biz_id"], app_name=validated_data["app_name"]

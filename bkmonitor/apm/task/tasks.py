@@ -158,7 +158,7 @@ def refresh_apm_config():
         bk_biz_id, app_name = application
         if index % interval == slug:
             logger.info(f"[refresh_apm_config]: publish application [{bk_biz_id}]({app_name})")
-            refresh_apm_application_config.delay(bk_biz_id, app_name)
+            refresh_apm_application_config.delay(bk_biz_id, app_name, skip_k8s=True)
 
 
 def refresh_apm_config_to_k8s():
@@ -171,7 +171,7 @@ def refresh_apm_config_to_k8s():
         return
 
     try:
-        ApplicationConfig.refresh_k8s(applications)
+        ApplicationConfig.refresh_k8s(applications, need_config_cache=True)
         logger.info(f"[refresh_apm_config_to_k8s]: batch publish k8s config for {len(applications)} applications")
     except Exception as e:  # pylint: disable=broad-except
         logger.exception(f"[RefreshApmApplicationK8sConfigFailed] Err => {str(e)}; Applications => {applications}")
@@ -190,8 +190,12 @@ def refresh_apm_platform_config():
 
 
 @app.task(ignore_result=True, queue="celery_cron")
-def refresh_apm_application_config(bk_biz_id, app_name):
+def refresh_apm_application_config(bk_biz_id: int, app_name: str, skip_k8s: bool = False):
     _app = ApmApplication.objects.get(bk_biz_id=bk_biz_id, app_name=app_name)
+    # 刷新k8s配置
+    if not skip_k8s:
+        ApplicationConfig.refresh_k8s([_app])
+    # 刷新节点管理配置
     ApplicationConfig(_app).refresh()
 
 
@@ -294,7 +298,11 @@ def create_application_async(application_id, storage_config, options, cur_retry_
     try:
         application = ApmApplication.objects.get(id=application_id)
         application.apply_datasource(storage_config, storage_config, options)
-        EventReportHelper.report(f"[异步创建任务] 业务：{application.bk_biz_id}，应用{application.app_name}，创建成功")
+        EventReportHelper.report(
+            f"[异步创建任务] 业务：{application.bk_biz_id}，"
+            f"应用：{application.app_name}，"
+            f"创建人：{application.create_user}，创建成功"
+        )
     except Exception as e:  # pylint: disable=broad-except
         logger.error(f"[create_application_async] occur exception of app_id:{application_id} error: {e}")
         EventReportHelper.report(
@@ -306,6 +314,12 @@ def create_application_async(application_id, storage_config, options, cur_retry_
                 args=(application_id, storage_config, options, next_retry_times),
                 countdown=next_retry_times * 60,
             )
+        return
+
+    # 创建成功后立即下发一次配置
+    application = ApmApplication.objects.get(id=application_id)  # 这里从 DB 重新获取一次
+    # ApplicationConfig(application).refresh()   # 走节点管理的方式，这里太慢。暂时不下发，走周期的方式
+    ApplicationConfig.refresh_k8s([application])
 
     # 异步分派预计算任务
     bmw_task_cron.apply_async(countdown=60)

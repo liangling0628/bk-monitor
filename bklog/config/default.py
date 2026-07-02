@@ -19,6 +19,8 @@ We undertake not to change the open source license (MIT license) applicable to t
 the project delivered to anyone in the future.
 """
 
+# ruff: noqa: F405
+
 import os
 import sys
 
@@ -32,6 +34,13 @@ from config.log import get_logging_config_dict
 
 # 使用k8s部署模式
 IS_K8S_DEPLOY_MODE = os.getenv("DEPLOY_MODE") == "kubernetes"
+
+# 交互式 shell 不需要在启动期同步 pipeline 组件模型；该同步会直接 print 到屏幕，影响维护命令操作。
+IS_DJANGO_SHELL = len(sys.argv) > 1 and sys.argv[1] in {"shell", "shell_plus"}
+SILENCE_DJANGO_SHELL_LOG = os.getenv("BKAPP_SILENCE_DJANGO_SHELL_LOG", "on") == "on"
+SILENCE_DJANGO_SHELL_OUTPUT = IS_K8S_DEPLOY_MODE and IS_DJANGO_SHELL and SILENCE_DJANGO_SHELL_LOG
+if SILENCE_DJANGO_SHELL_OUTPUT:
+    AUTO_UPDATE_COMPONENT_MODELS = False
 
 # 这里是默认的 INSTALLED_APPS，大部分情况下，不需要改动
 # 如果你已经了解每个默认 APP 的作用，确实需要去掉某些 APP，请去掉下面的注释，然后修改
@@ -213,6 +222,8 @@ CELERY_ACCEPT_CONTENT = ["pickle"]
 CELERY_IMPORTS = (
     "apps.log_search.tasks.bkdata",
     "apps.log_search.tasks.async_export",
+    "apps.log_search.tasks.scene_async_export",
+    "apps.log_search.tasks.unify_query_async_export",
     "apps.log_search.tasks.project",
     "apps.log_search.tasks.space",
     "apps.log_search.tasks.cmdb",
@@ -360,6 +371,15 @@ if IS_K8S_DEPLOY_MODE:
         }
         for v in LOGGING["loggers"].values():
             v["handlers"].append("otlp")
+
+    if SILENCE_DJANGO_SHELL_OUTPUT:
+        # 仅静默当前 shell 进程，web/celery/gunicorn 仍保持 stdout 日志采集。
+        LOGGING["handlers"]["shell_null"] = {"class": "logging.NullHandler"}
+        LOGGING["root"] = {"handlers": ["shell_null"], "level": "CRITICAL"}
+        for logger_config in LOGGING["loggers"].values():
+            logger_config["handlers"] = ["shell_null"]
+            logger_config["level"] = "CRITICAL"
+            logger_config["propagate"] = False
 
 OTLP_TRACE = os.getenv("BKAPP_OTLP_TRACE", "off") == "on"
 OTLP_GRPC_HOST = os.getenv("BKAPP_OTLP_GRPC_HOST", "http://localhost:4317")
@@ -605,8 +625,12 @@ FEATURE_TOGGLE = {
     "trace": os.environ.get("BKAPP_FEATURE_TRACE", "off"),
     # 日志脱敏
     "log_desensitize": os.environ.get("BKAPP_FEATURE_DESENSITIZE", "on"),
+    # 新版采集管理
+    "log_manage_v2": os.environ.get("BKAPP_FEATURE_LOG_MANAGE_V2", "on"),
     # 客户端日志
     "tgpa_task": os.environ.get("BKAPP_FEATURE_TGPA_TASK", "off"),
+    # 场景化检索
+    "scene_search": os.environ.get("BKAPP_FEATURE_SCENE_SEARCH", "off"),
 }
 
 SAAS_MONITOR = "bk_monitorv3"
@@ -615,6 +639,7 @@ SAAS_BKDATA = "bk_dataweb"
 # 前端菜单配置
 MENUS = [
     {"id": "retrieve", "name": _("检索"), "feature": "on", "icon": ""},
+    {"id": "client_log_search", "name": _("客户端日志"), "feature": "on", "icon": ""},
     {
         "id": "trace",
         "name": _("调用链"),
@@ -679,7 +704,7 @@ MENUS = [
                         "name": _("日志采集"),
                         "feature": "on",
                         "scenes": "scenario_log",
-                        "icon": "document",
+                        "icon": "rizhicaiji",
                     },
                     {
                         "id": "tgpa_task",
@@ -722,13 +747,19 @@ MENUS = [
                         "id": "clean_templates",
                         "name": _("清洗模板"),
                         "feature": "on",
-                        "icon": "moban",
+                        "icon": "qingximoban",
                     },
                     {
                         "id": "log_desensitize",
                         "name": _("日志脱敏"),
                         "feature": FEATURE_TOGGLE["log_desensitize"],
-                        "icon": "moban",
+                        "icon": "rizhituomin",
+                    },
+                    {
+                        "id": "grok_manage",
+                        "name": "Grok管理",
+                        "feature": "on",
+                        "icon": "grok",
                     },
                 ],
             },
@@ -749,13 +780,13 @@ MENUS = [
                         "id": "archive_list",
                         "name": _("归档列表"),
                         "feature": "on",
-                        "icon": "audit-fill",
+                        "icon": "guidangliebiao",
                     },
                     {
                         "id": "archive_restore",
                         "name": _("归档回溯"),
                         "feature": "on",
-                        "icon": "withdraw-fill",
+                        "icon": "guidanghuisu",
                     },
                 ],
             },
@@ -767,7 +798,7 @@ MENUS = [
                 "feature": os.environ.get("BKAPP_FEATURE_EXTRACT", "on"),
                 "children": [
                     {"id": "manage_log_extract", "name": _("日志提取配置"), "feature": "on", "icon": "cc-log"},
-                    {"id": "log_extract_task", "name": _("日志提取任务"), "feature": "on", "icon": "audit-fill"},
+                    {"id": "log_extract_task", "name": _("日志提取任务"), "feature": "on", "icon": "rizhitiqurenwu"},
                     {
                         "id": "extract_link_manage",
                         "name": _("提取链路管理"),
@@ -1298,7 +1329,7 @@ ALL_TENANT_SET_ID = 1
 # 已经初始化的租户列表
 INITIALIZED_TENANT_LIST = [BK_APP_TENANT_ID]
 # 兼容非多租户模式
-APIGW_ENABLED = not (ENABLE_MULTI_TENANT_MODE or 'test' in sys.argv)
+APIGW_ENABLED = not (ENABLE_MULTI_TENANT_MODE or "test" in sys.argv)
 USE_APIGW = os.getenv("BKAPP_USE_APIGW", "false").lower() == "true"
 
 # 预查询时间, 默认6h小时, 0代表禁用
@@ -1309,11 +1340,8 @@ except ValueError:
 
 # TGPA
 TGPA_TASK_APIGW_ROOT = os.getenv("BKAPP_TGPA_TASK_APIGATEWAY_ROOT", "")
-TGPA_TASK_QCLOUD_SECRET_ID = os.getenv("BKAPP_TGPA_TASK_QCLOUD_SECRET_ID", "")
-TGPA_TASK_QCLOUD_SECRET_KEY = os.getenv("BKAPP_TGPA_TASK_QCLOUD_SECRET_KEY", "")
-TGPA_TASK_QCLOUD_COS_REGION = os.getenv("BKAPP_TGPA_TASK_QCLOUD_COS_REGION", "")
-TGPA_TASK_QCLOUD_COS_BUCKET = os.getenv("BKAPP_TGPA_TASK_QCLOUD_COS_BUCKET", "")
-TGPA_TASK_QCLOUD_COS_DOMAIN = os.getenv("BKAPP_TGPA_TASK_QCLOUD_DOMAIN", "")
+TGPA_TRANSCEIVER_TOOL_URL = os.getenv("BKAPP_TGPA_TRANSCEIVER_TOOL_URL", "")
+TGPA_SDK_DOC_URL = os.getenv("BKAPP_TGPA_SDK_DOC_URL", "")
 
 """
 以下为框架代码 请勿修改

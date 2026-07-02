@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making BK-LOG 蓝鲸日志平台 available.
 Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
@@ -19,11 +18,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 We undertake not to change the open source license (MIT license) applicable to the current version of
 the project delivered to anyone in the future.
 """
+
 import json
 
 from django.utils.translation import gettext as _
 
-from apps.log_databus.constants import EtlConfig, KafkaInitialOffsetEnum, LogPluginInfo
+from apps.log_databus.constants import EtlConfig, KafkaInitialOffsetEnum, LogPluginInfo, STORAGE_CLUSTER_TYPE
 from apps.log_databus.handlers.collector_scenario.base import CollectorScenario
 from apps.log_databus.handlers.collector_scenario.utils import (
     build_es_option_type,
@@ -224,7 +224,9 @@ class KafkaScenario(CollectorScenario):
         return params
 
     @classmethod
-    def get_built_in_config(cls, es_version="5.X", etl_config=EtlConfig.BK_LOG_TEXT, **kwargs):
+    def get_built_in_config(
+        cls, es_version="5.X", etl_config=EtlConfig.BK_LOG_TEXT, storage_cluster_type=STORAGE_CLUSTER_TYPE, **kwargs
+    ):
         """
         获取采集器标准字段
         """
@@ -260,7 +262,7 @@ class KafkaScenario(CollectorScenario):
                 },
                 {
                     "field_name": "cloudId",
-                    "field_type": "float",
+                    "field_type": "float" if storage_cluster_type == STORAGE_CLUSTER_TYPE else "long",
                     "tag": "dimension",
                     "alias_name": "cloudid",
                     "description": _("云区域ID"),
@@ -280,7 +282,7 @@ class KafkaScenario(CollectorScenario):
                 },
                 {
                     "field_name": "gseIndex",
-                    "field_type": "float",
+                    "field_type": "float" if storage_cluster_type == STORAGE_CLUSTER_TYPE else "long",
                     "tag": "dimension",
                     "alias_name": "gseindex",
                     "description": _("gse索引"),
@@ -290,7 +292,7 @@ class KafkaScenario(CollectorScenario):
                 },
                 {
                     "field_name": "iterationIndex",
-                    "field_type": "float",
+                    "field_type": "float" if storage_cluster_type == STORAGE_CLUSTER_TYPE else "long",
                     "tag": "dimension",
                     "alias_name": "iterationindex",
                     "description": _("迭代ID"),
@@ -305,6 +307,7 @@ class KafkaScenario(CollectorScenario):
                     "tag": "dimension",
                     "alias_name": "kafka",
                     "description": "kafka消息属性",
+                    "flat_field": True,
                     "option": build_es_option_type("object", es_version),
                 },
             ],

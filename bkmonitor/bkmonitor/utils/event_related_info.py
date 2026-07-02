@@ -11,6 +11,7 @@ specific language governing permissions and limitations under the License.
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlencode
 
@@ -20,6 +21,13 @@ from django.conf import settings
 from bkmonitor.data_source import load_data_source, DataSource, UnifyQuery
 from bkmonitor.documents import AlertDocument
 from bkmonitor.models import Event, QueryConfigModel
+from bkmonitor.utils.alert_drilling import (
+    ClusteringType,
+    get_alert_query_config_or_none,
+    get_log_clustering_filter_dict,
+    get_log_clustering_info,
+    get_log_clustering_time_range,
+)
 from bkmonitor.utils import time_tools
 from constants.data_source import DataSourceLabel, DataTypeLabel, GrayUnifyQueryDataSources
 
@@ -77,18 +85,13 @@ def get_alert_relation_info(alert: AlertDocument, length_limit=True):
         .first()
     )
 
-    # 日志聚类告警需要提供更详细的信息
-    for label in alert.strategy.get("labels") or []:
-        # 日志聚类新类告警具有特定标签，格式 "LogClustering/NewClass/{index_set_id}"
-        # 根据前缀可识别出来
-        if label.startswith("LogClustering/NewClass/"):
-            content = get_alert_info_for_log_clustering_new_class(alert, label.split("/")[-1])
-            break
-        # 日志聚类数量告警具有特定标签，格式 "LogClustering/Count/{index_set_id}"
-        # 根据前缀可识别出来
-        elif label.startswith("LogClustering/Count/"):
-            content = get_alert_info_for_log_clustering_count(alert, label.split("/")[-1])
-            break
+    alert_info_getters: dict[str, Callable[[AlertDocument, str], str]] = {
+        ClusteringType.COUNT: get_alert_info_for_log_clustering_count,
+        ClusteringType.NEW_CLASS: get_alert_info_for_log_clustering_new_class,
+    }
+    clustering_type, clustering_index_set_id = get_log_clustering_info(alert.strategy)
+    if clustering_type and clustering_index_set_id and clustering_type in alert_info_getters:
+        content = alert_info_getters[clustering_type](alert, clustering_index_set_id)
 
     # 关联日志信息目前固定单指标
     if (
@@ -111,70 +114,74 @@ def get_alert_relation_info(alert: AlertDocument, length_limit=True):
 
 
 def get_alert_info_for_log_clustering_count(alert: AlertDocument, index_set_id: str):
-    query_config = alert.strategy["items"][0]["query_configs"][0]
-    interval = query_config.get("agg_interval", 60)
-    start_time = alert.begin_time - 60 * 60
-    end_time = max(alert.begin_time + interval, alert.latest_time) + 60 * 60
+    query_config: dict[str, Any] | None = get_alert_query_config_or_none(alert)
+    time_range: tuple[int, int] | None = get_log_clustering_time_range(alert, ClusteringType.COUNT)
+    if query_config is None or time_range is None:
+        return ""
+
+    start_time, end_time = time_range
     group_by = query_config.get("agg_dimension", [])
 
     try:
         dimensions = alert.origin_alarm["data"]["dimensions"]
-        if "__dist_05" in dimensions:
-            sensitivity = "__dist_05"
-            signatures = [dimensions["__dist_05"]]
-        else:
-            signatures = [dimensions["signature"]]
-            sensitivity = dimensions.get("sensitivity", "__dist_05")
     except Exception as e:
         logger.exception("[get_alert_info_for_log_clustering_count] get dimension error: %s", e)
         return ""
 
-    return get_clustering_log(alert, index_set_id, start_time, end_time, sensitivity, signatures, group_by, dimensions)
+    extra_filter_dict: dict[str, list[str]] = get_log_clustering_filter_dict(
+        alert, ClusteringType.COUNT, start_time, end_time
+    )
+    if not extra_filter_dict:
+        return ""
+
+    return get_clustering_log(alert, index_set_id, start_time, end_time, extra_filter_dict, group_by, dimensions)
 
 
 def get_alert_info_for_log_clustering_new_class(alert: AlertDocument, index_set_id: str):
     """
     get_alert_relation_info_for_log_clustering_new_class
     """
-    query_config = alert.strategy["items"][0]["query_configs"][0]
-    data_source_class = load_data_source(query_config["data_source_label"], query_config["data_type_label"])
-    data_source = data_source_class.init_by_query_config(query_config, bk_biz_id=alert.event.bk_biz_id)
-    interval = query_config.get("agg_interval", 60)
-    start_time = alert.begin_time
-    end_time = max(alert.begin_time + interval, alert.latest_time)
-    group_by = query_config.get("agg_dimension", [])
-    signatures = []
+    query_config: dict[str, Any] | None = get_alert_query_config_or_none(alert)
+    if not query_config:
+        return ""
 
+    time_range: tuple[int, int] | None = get_log_clustering_time_range(alert, ClusteringType.NEW_CLASS)
+    if not time_range:
+        return ""
+
+    start_time, end_time = time_range
+    group_by = query_config.get("agg_dimension", [])
     try:
         dimensions = alert.origin_alarm["data"]["dimensions"]
-        if dimensions.get("signature"):
-            signatures = [dimensions["signature"]]
-        # 新类敏感度默认取最低档，即最少告警
-        sensitivity = dimensions.get("sensitivity", "__dist_09")
-        if not sensitivity.startswith("__"):
-            # 补充双下划线前缀
-            sensitivity = "__" + sensitivity
     except Exception as e:
         logger.exception("[get_alert_info_for_log_clustering_new_class] get dimension error: %s", e)
-        sensitivity = "__dist_09"
         dimensions = {}
 
-    if not signatures:
-        signatures = data_source.query_dimensions(
-            dimension_field="signature", start_time=start_time * 1000, end_time=end_time * 1000
-        )
-    return get_clustering_log(alert, index_set_id, start_time, end_time, sensitivity, signatures, group_by, dimensions)
+    extra_filter_dict: dict[str, list[str]] = get_log_clustering_filter_dict(
+        alert, ClusteringType.NEW_CLASS, start_time, end_time
+    )
+    if not extra_filter_dict:
+        return ""
+
+    return get_clustering_log(alert, index_set_id, start_time, end_time, extra_filter_dict, group_by, dimensions)
 
 
 def get_clustering_log(
-    alert: AlertDocument, index_set_id: str, start_time, end_time, sensitivity, signatures, group_by, dimensions
+    alert: AlertDocument,
+    index_set_id: str,
+    start_time: int,
+    end_time: int,
+    extra_filter_dict: dict[str, list[str]],
+    group_by: list[str],
+    dimensions: dict[str, Any],
 ):
     start_time_str = time_tools.utc2biz_str(start_time)
     end_time_str = time_tools.utc2biz_str(end_time)
 
+    sensitivity, signatures = next(iter(extra_filter_dict.items()))
     builtin_dimension_fields = ["sensitivity", "signature", "__dist_05"]
 
-    addition = [{"field": sensitivity, "operator": "=", "value": ",".join(signatures)}]
+    addition = [{"field": sensitivity, "operator": "=", "value": ",".join(str(signature) for signature in signatures)}]
     addition.extend(
         [
             {"field": dimension_field, "operator": "=", "value": dimension_value}
@@ -196,8 +203,7 @@ def get_clustering_log(
     record = {}
     log_signature = None
     try:
-        log_data_source_class = load_data_source(DataSourceLabel.BK_LOG_SEARCH, DataTypeLabel.LOG)
-        log_data_source = log_data_source_class.init_by_query_config(
+        log_data_source = load_data_source(DataSourceLabel.BK_LOG_SEARCH, DataTypeLabel.LOG).init_by_query_config(
             {
                 "index_set_id": index_set_id,
                 "result_table_id": "",
@@ -210,7 +216,10 @@ def get_clustering_log(
             },
             bk_biz_id=alert.event.bk_biz_id,
         )
-        logs, log_total = log_data_source.query_log(start_time=start_time * 1000, end_time=end_time * 1000, limit=1)
+        log_data_source.order_by = [f"{log_data_source.time_field} desc"]
+        uq: UnifyQuery = UnifyQuery(bk_biz_id=alert.event.bk_biz_id, data_sources=[log_data_source], expression="")
+        # 显式指定降序，确保 limit=1 取到最接近告警时间的最新日志
+        logs, __ = uq.query_log(start_time * 1000, end_time * 1000, limit=1)
         if logs:
             record = logs[0]
             for key in record.copy():
@@ -247,7 +256,7 @@ def get_clustering_log(
                 "show_new_pattern": False,
             }
             # 增加聚类分组参数
-            group_by = [group for group in group_by if group not in ["sensitivity", "signature"]]
+            group_by = [group for group in group_by if group not in builtin_dimension_fields]
             if group_by:
                 pattern_params["group_by"] = group_by
                 record["group_by"] = group_by
@@ -303,7 +312,11 @@ def get_data_source_log(
     data_source_key: tuple[str, str] = (query_config["data_source_label"], query_config["data_type_label"])
     data_source: DataSource = load_data_source(*data_source_key).init_by_query_config(query_config, bk_biz_id=bk_biz_id)
     data_source.filter_dict.update(
-        {key: value for key, value in dimensions.items() if key in query_config.get("agg_dimension", [])}
+        {
+            key: value
+            for key, value in dimensions.items()
+            if key in query_config.get("agg_dimension", []) and value not in ("", None)
+        }
     )
 
     # 查询时间为事件开始到5个周期后
@@ -328,7 +341,7 @@ def get_data_source_log(
         addition = [
             {"field": dimension_field, "operator": "=", "value": dimension_value}
             for dimension_field, dimension_value in dimensions.items()
-            if dimension_field in query_config.get("agg_dimension", [])
+            if dimension_field in query_config.get("agg_dimension", []) and dimension_value not in ("", None)
         ]
         params = {
             "bizId": bk_biz_id,

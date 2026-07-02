@@ -184,6 +184,26 @@ class GetResultTableResource(BkDataAPIGWResource):
         return super().get_request_url(validated_request_data).format(**validated_request_data)
 
 
+class GetDataLinkMetadataResource(BkDataAPIGWResource):
+    """
+    查询数据链路元数据
+    """
+
+    action = "/v4/meta/datalink/metadata/"
+    method = "GET"
+
+    class RequestSerializer(serializers.Serializer):
+        bk_data_id = serializers.IntegerField(required=False, label="计算平台数据ID")
+        vm_result_table_id = serializers.CharField(required=False, label="VM结果表ID")
+
+        def validate(self, attrs):
+            if not (bool(attrs.get("bk_data_id")) ^ bool(attrs.get("vm_result_table_id"))):
+                raise serializers.ValidationError(
+                    "bk_data_id and vm_result_table_id are mutually exclusive, one must be specified"
+                )
+            return attrs
+
+
 class QueryDataResource(UseSaaSAuthInfoMixin, BkDataQueryAPIGWResource):
     """
     查询数据
@@ -1310,6 +1330,7 @@ class QueryMetricAndDimension(BkDataAPIGWResource):
         storage = serializers.CharField(required=True, label="存储类型")
         result_table_id = serializers.CharField(required=True, label="结果表ID")
         values = serializers.ListField(required=True, label="维度列表")
+        version = serializers.CharField(required=False, label="数据格式版本")
 
 
 ####################################
@@ -1461,6 +1482,39 @@ class GetRawDataStoragesInfo(DataAccessAPIResource):
         validated_request_data = super().full_request_data(validated_request_data)
         validated_request_data["bk_username"] = settings.COMMON_USERNAME
         self.bk_username = settings.COMMON_USERNAME
+        return validated_request_data
+
+
+class GetV4DataStorageInfo(DataAccessAPIResource):
+    """
+    获取V4链路存储信息
+    """
+
+    action = "/v4/databus/data_storage/{namespace}/task/{databus_name}/"
+    method = "GET"
+
+    class RequestSerializer(serializers.Serializer):
+        namespace = serializers.CharField(required=True, label="命名空间")
+        databus_name = serializers.CharField(required=True, label="Databus资源名称")
+
+
+class GetV4MetricsMsgsStat(DataAccessAPIResource):
+    """
+    获取V4链路DataId消息统计
+    """
+
+    action = "/v4/metrics/stats/msgs_stat/"
+    method = "GET"
+
+    class RequestSerializer(serializers.Serializer):
+        resource = serializers.DictField(required=True, label="资源信息")
+        start = serializers.IntegerField(required=False, label="开始时间")
+        end = serializers.IntegerField(required=False, label="结束时间")
+        step = serializers.CharField(required=False, label="时间粒度")
+
+    def full_request_data(self, validated_request_data):
+        validated_request_data = super().full_request_data(validated_request_data)
+        validated_request_data["resource"] = json.dumps(validated_request_data["resource"])
         return validated_request_data
 
 

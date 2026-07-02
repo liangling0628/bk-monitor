@@ -239,6 +239,7 @@ export default {
   暂无搜索: 'No search result',
   无需认证: 'No authentication',
   暂无应用: 'No applications',
+  暂无选中项: 'No selected items',
   未配置策略: 'No rules',
   搜索无数据: 'No data',
   无Agent: 'No Agent',
@@ -293,6 +294,14 @@ export default {
   当前空间下暂无故障: 'There is no fault in the current space',
   '{count} 空间未开启故障分析功能，请联系 {link}':
     '{count} space does not have fault analysis function enabled, please contact {link}',
+  '以下是所选 {count} 个空间的接入情况': 'This is the access situation of the selected {count} spaces',
+  空间未开启故障分析功能: 'Fault analysis function is not enabled in this space',
+  '当前所选 {count} 个空间未开启故障分析功能':
+    'The fault analysis function is not enabled in the selected {count} spaces',
+  一键开启: 'One-click enable',
+  接入指引: 'Access Guide',
+  '请参考下表接入数据，如有疑问请联系 {link}':
+    'Please refer to the following table to access data, if you have any questions, please contact {link}',
   '你当前有 {0} 个空间权限，暂无您负责的故障':
     'You currently have {0} space permissions, and there are no faults that you are responsible for.',
   '你当前有 {count} 个空间权限，暂未开启灰度, 请联系 {link}':
@@ -357,6 +366,10 @@ export default {
   当前日历没有相关日程: 'There are no relevant schedules in the current calendar',
   系统异常: 'System exception',
   执行超时: 'Execution timeout',
+  '当前检索范围，暂无告警': 'No alarms in the current search scope',
+  '当前检索范围，暂无故障': 'No failures in the current search scope',
+  '当前检索范围，暂无处理记录': 'No processing records in the current search scope',
+  '暂无历史 Issue': 'No history issue',
 
   /*
  #### 提示反馈类
@@ -541,4 +554,8 @@ export default {
   克隆模板成功: 'Cloned template successfully',
   解除关联成功: 'Unassociation successful',
   解除关联失败: 'Unassociation failed',
+  评论发送失败: 'Comment sending failed',
+
+  '已拆分为独立 Issue': 'Split into independent Issue',
+  issue合并成功: 'Issue merged successfully',
 };

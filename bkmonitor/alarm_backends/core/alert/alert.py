@@ -13,6 +13,7 @@ import json
 import logging
 import time
 
+from bk_monitor_base.strategy import AlertExpressionValue
 from django.conf import settings
 from django.utils.translation import gettext as _
 from redis.exceptions import RedisError
@@ -27,9 +28,9 @@ from alarm_backends.core.cache.key import (
     COMPOSITE_QOS_COUNTER,
 )
 from alarm_backends.core.cluster import get_cluster
+from alarm_backends.core.storage.redis_cluster import PipelineResultMismatch
 from bkmonitor.documents import ActionInstanceDocument, AlertDocument, AlertLog
 from bkmonitor.models import ActionInstance
-from bkmonitor.strategy.expression import AlertExpressionValue
 from bkmonitor.utils import extended_json
 from bkmonitor.utils.common_utils import count_md5
 from constants.action import ActionSignal, AssignMode
@@ -897,6 +898,12 @@ class Alert:
         for alert_key in alert_keys:
             pipeline.get(alert_key.get_snapshot_key())
         alerts_snapshot = pipeline.execute()
+        if len(alerts_snapshot) != len(alert_keys):
+            # 防御：pipeline 结果数与请求键数不一致（连接异常/代理脏状态），
+            # 避免后续按下标 alert_keys[index] 取值越界；按本轮失败处理，由周期任务下轮重试
+            raise PipelineResultMismatch(
+                f"snapshot pipeline result count({len(alerts_snapshot)}) != alert_keys({len(alert_keys)})"
+            )
 
         results = []
 

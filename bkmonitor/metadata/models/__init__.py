@@ -25,9 +25,11 @@ from .custom_report import (
     LogSubscriptionConfig,
     TimeSeriesGroup,
     TimeSeriesMetric,
+    TimeSeriesScope,
     TimeSeriesTag,
 )
 from .data_link import (  # noqa
+    BasereportSinkConfig,
     ConditionalSinkConfig,
     DataBusConfig,
     DataIdConfig,
@@ -35,8 +37,12 @@ from .data_link import (  # noqa
     ESStorageBindingConfig,
     LogDataBusConfig,
     LogResultTableConfig,
+    GraphDataBusConfig,
+    GraphRelationBindingConfig,
     ResultTableConfig,
+    SurrealDBBindingConfig,
     VMStorageBindingConfig,
+    DorisStorageBindingConfig,
 )
 from .data_source import DataSource, DataSourceOption, DataSourceResultTable
 from .es_snapshot import (
@@ -52,10 +58,12 @@ from .influxdb_cluster import (
     InfluxDBTagInfo,
 )
 from .ping_server import PingServerSubscriptionConfig
-from .record_rule import RecordRule, ResultTableFlow
+from .record_rule import RecordRule, RecordRuleV4, ResultTableFlow
 from .entity_relation import (
     CustomRelationStatus,
     EntityMeta,
+    RelationDefinition,
+    ResourceDefinition,
 )
 from .result_table import (
     CMDBLevelRecord,
@@ -87,8 +95,9 @@ from .storage import (
     SpaceRelatedStorageInfo,
     StorageClusterRecord,
     StorageResultTable,
+    SurrealDBStorage,
 )
-from .vm import AccessVMRecord, SpaceVMInfo
+from .vm import AccessVMRecord, SpaceVMInfo, VMShortLinkRecord
 
 __all__ = [
     # datasource
@@ -117,6 +126,7 @@ __all__ = [
     "StorageResultTable",
     "ESStorage",
     "DorisStorage",
+    "SurrealDBStorage",
     "BkDataStorage",
     "ArgusStorage",
     "StorageClusterRecord",
@@ -126,6 +136,7 @@ __all__ = [
     "LogGroup",
     "TimeSeriesGroup",
     "TimeSeriesMetric",
+    "TimeSeriesScope",
     "TimeSeriesTag",
     "CustomReportSubscription",
     "LogSubscriptionConfig",
@@ -153,12 +164,19 @@ __all__ = [
     "BkAppSpaceRecord",
     "AccessVMRecord",
     "SpaceVMInfo",
+    "VMShortLinkRecord",
     "SpaceRelatedStorageInfo",
     # record rule
     "RecordRule",
+    "RecordRuleV4",
     "ResultTableFlow",
     "BkBaseResultTable",
+    "GraphDataBusConfig",
+    "GraphRelationBindingConfig",
+    "SurrealDBBindingConfig",
     # resource relation
     "EntityMeta",
     "CustomRelationStatus",
+    "ResourceDefinition",
+    "RelationDefinition",
 ]

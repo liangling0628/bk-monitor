@@ -16,11 +16,10 @@ import logging
 import operator
 from collections import defaultdict
 from collections.abc import Callable
-from enum import Enum
 from json import JSONDecodeError
 from typing import Any
 
-from django.conf import settings
+
 from django.core.cache import cache
 from django.db.models import Q
 from django.utils.translation import gettext as _
@@ -52,14 +51,10 @@ from apm_web.handlers.component_handler import ComponentHandler
 from apm_web.handlers.host_handler import HostHandler
 from apm_web.handlers.metric_group import PreCalculateHelper
 from apm_web.handlers.service_handler import ServiceHandler
+from apm_web.handlers.span_handler import SpanHandler
 from apm_web.icon import get_icon
-from apm_web.metric.constants import (
-    ErrorMetricCategory,
-    SeriesAliasType,
-    StatisticsMetric,
-)
-from apm_web.metric.handler.statistics import ServiceMetricStatistics
-from apm_web.metric.handler.top_n import get_top_n_query_type, load_top_n_handler
+from apm_web.metric.constants import ErrorMetricCategory, StatisticsMetric, ProcessorHookType
+from apm_web.metric.handler import call_analysis, statistics, top_n
 from apm_web.metric_handler import (
     ApdexInstance,
     ApdexRange,
@@ -70,11 +65,8 @@ from apm_web.metric_handler import (
 )
 from apm_web.metrics import ENDPOINT_DETAIL_LIST, ENDPOINT_LIST, INSTANCE_LIST
 from apm_web.models import ApmMetaConfig, Application
-from apm_web.resources import (
-    AsyncColumnsListResource,
-    ServiceAndComponentCompatibleResource,
-)
-from apm_web.serializers import AsyncSerializer, ComponentInstanceIdDynamicField
+from apm_web.resources import AsyncColumnsListResource, ServiceAndComponentCompatibleResource
+from apm_web.serializers import AsyncSerializer
 from apm_web.topo.handle.relation.relation_metric import RelationMetricHandler
 from apm_web.utils import (
     Calculator,
@@ -83,47 +75,26 @@ from apm_web.utils import (
     get_bar_interval_number,
     handle_filter_fields,
 )
-from bkmonitor.data_source import conditions_to_q, filter_dict_to_conditions, q_to_dict
+from bkmonitor.data_source import q_to_dict
 from bkmonitor.share.api_auth_resource import ApiAuthResource
 from bkmonitor.utils import group_by
 from bkmonitor.utils.common_utils import format_percent
-from bkmonitor.utils.request import get_request
 from bkmonitor.utils.thread_backend import InheritParentThread, ThreadPool, run_threads
-from bkmonitor.utils.time_tools import (
-    get_datetime_range,
-    parse_time_compare_abbreviation,
-)
+from bkmonitor.utils.time_tools import get_datetime_range, parse_time_compare_abbreviation
 from constants.apm import (
     TraceMetric,
-    MetricTemporality,
     OtlpKey,
     SpanKindCachedEnum,
     TelemetryDataType,
+    CallSide,
 )
 from core.drf_resource import Resource, api, resource
 from core.unit import load_unit
 from monitor_web.collecting.constant import CollectStatus
 from monitor_web.scene_view.resources import GetHostOrTopoNodeDetailResource
 from monitor_web.scene_view.resources.base import PageListResource
-from monitor_web.scene_view.table_format import (
-    CollectTableFormat,
-    CustomProgressTableFormat,
-    DataPointsTableFormat,
-    DataStatusTableFormat,
-    LinkListTableFormat,
-    LinkTableFormat,
-    NumberTableFormat,
-    OverviewDataTableFormat,
-    ProgressTableFormat,
-    ServiceComponentAdaptLinkFormat,
-    StackLinkOverviewDataTableFormat,
-    StackLinkTableFormat,
-    StatusTableFormat,
-    StringLabelTableFormat,
-    StringTableFormat,
-    SyncTimeLinkTableFormat,
-    TimeTableFormat,
-)
+from monitor_web.scene_view import table_format
+from apm_web.metric import serializers as metric_serializers
 
 logger = logging.getLogger(__name__)
 
@@ -154,37 +125,7 @@ class UnifyQueryResource(Resource):
         return resource.grafana.graph_unify_query(validated_request_data["unify_query_param"])
 
 
-class ProcessorHookType(Enum):
-    """处理器钩子类型"""
-
-    BEFORE_REQUEST = "before_request"
-    AFTER_RESPONSE = "after_response"
-
-    @classmethod
-    def choices(cls):
-        return [
-            (cls.BEFORE_REQUEST.value, cls.BEFORE_REQUEST.value),
-            (cls.AFTER_RESPONSE.value, cls.AFTER_RESPONSE.value),
-        ]
-
-
-class PreCalculateHelperMixin:
-    DEFAULT_APP_CONFIG_KEY: str = "APM_CUSTOM_METRIC_SDK_MAPPING_CONFIG"
-
-    @classmethod
-    def get_helper_or_none(
-        cls, bk_biz_id: str, app_name: str, app_config_key: str | None = None
-    ) -> PreCalculateHelper | None:
-        try:
-            app_config: dict[str, Any] = getattr(settings, app_config_key or cls.DEFAULT_APP_CONFIG_KEY)
-            pre_calculate_config: dict[str, Any] = app_config[f"{bk_biz_id}-{app_name}"]["pre_calculate"]
-        except (KeyError, AttributeError):
-            return None
-
-        return PreCalculateHelper(pre_calculate_config)
-
-
-class DynamicUnifyQueryResource(Resource, PreCalculateHelperMixin):
+class DynamicUnifyQueryResource(Resource, call_analysis.PreCalculateHelperMixin):
     """
     组件指标值查询
     不同分类的组件 查询unify-query参数会有所变化
@@ -199,80 +140,7 @@ class DynamicUnifyQueryResource(Resource, PreCalculateHelperMixin):
                        例如在接口页面，接口区分了类型(如 celery等)但是此时 node 并没有这个信息所有需要别的地方传进来。
     """
 
-    class RequestSerializer(serializers.Serializer):
-        class GroupByLimitSerializer(serializers.Serializer):
-            class OptionsSerializer(serializers.Serializer):
-                class TrpcSerializer(serializers.Serializer):
-                    kind = serializers.ChoiceField(
-                        label="调用类型", choices=SeriesAliasType.get_choices(), required=True
-                    )
-                    temporality = serializers.ChoiceField(
-                        label="时间性", required=True, choices=MetricTemporality.choices()
-                    )
-
-                trpc = TrpcSerializer(label="tRPC 配置", required=False)
-
-            limit = serializers.IntegerField(label="查询数量", default=10, required=False)
-            filter_dict = serializers.DictField(label="过滤条件", required=False, default={})
-            where = serializers.ListField(label="过滤条件", required=False, default=[], child=serializers.DictField())
-            method = serializers.ChoiceField(
-                label="计算类型",
-                required=False,
-                default=metric_group.CalculationType.TOP_N,
-                choices=[metric_group.CalculationType.TOP_N, metric_group.CalculationType.BOTTOM_N],
-            )
-            metric_group_name = serializers.ChoiceField(
-                label="指标组", required=True, choices=metric_group.GroupEnum.choices()
-            )
-            metric_cal_type = serializers.ChoiceField(
-                label="指标计算类型", required=True, choices=metric_group.CalculationType.choices()
-            )
-            options = OptionsSerializer(label="配置", required=False, default={})
-            enabled = serializers.BooleanField(label="是否可用", required=False, default=True)
-
-            def validate(self, attrs):
-                # 合并查询条件
-                attrs["filter_dict"] = q_to_dict(
-                    conditions_to_q(filter_dict_to_conditions(attrs.get("filter_dict") or {}, attrs.get("where") or []))
-                )
-                return attrs
-
-        class ProcessorSerializer(serializers.Serializer):
-            hook = serializers.ChoiceField(label="处理器钩子", required=True, choices=ProcessorHookType.choices())
-            name = serializers.CharField(label="处理器名称", required=True)
-            options = serializers.DictField(label="处理器参数", required=False, default={})
-
-        app_name = serializers.CharField(label="应用名称")
-        service_name = serializers.CharField(label="服务名称", default=False)
-        unify_query_param = serializers.DictField(label="unify-query参数")
-        bk_biz_id = serializers.IntegerField(label="业务ID")
-        start_time = serializers.IntegerField(label="开始时间")
-        end_time = serializers.IntegerField(label="结束时间")
-        component_instance_id = ComponentInstanceIdDynamicField(required=False, label="组件实例id(组件页面下有效)")
-        unit = serializers.CharField(label="图表单位(多指标计算时手动返回)", default=False)
-        fill_bar = serializers.BooleanField(
-            label="是否需要补充柱子(用于特殊配置的场景 仅影响 interval)", required=False
-        )
-        processors = serializers.ListField(label="处理器列表", child=ProcessorSerializer(), required=False, default=[])
-        alias_prefix = serializers.ChoiceField(
-            label="动态主被调当前值",
-            choices=SeriesAliasType.get_choices(),
-            required=False,
-        )
-        alias_suffix = serializers.CharField(label="动态 alias 后缀", required=False)
-        extra_filter_dict = serializers.DictField(label="额外查询条件", required=False, default={})
-        group_by_limit = GroupByLimitSerializer(label="聚合排序", required=False)
-
-        # 预处理参数
-        hook_processors = serializers.DictField(label="每个 hook 对应的处理器列表", required=False, default={})
-
-        def validate(self, attrs):
-            hook_processors: dict[str, Any] = {}
-            for processor in attrs.get("processors") or []:
-                hook_processors.setdefault(processor["hook"], []).append(processor)
-
-            attrs["hook_processors"] = hook_processors
-            return attrs
+    RequestSerializer = metric_serializers.DynamicUnifyQueryRequestSerializer
 
     def perform_request(self, validate_data):
         unify_query_params = {
@@ -607,10 +475,10 @@ class DynamicUnifyQueryResource(Resource, PreCalculateHelperMixin):
             suffix = validate_data.get("alias_suffix", "")
 
             if ComponentHandler.is_component_by_node(node) or ServiceHandler.is_remote_service_by_node(node):
-                prefix = SeriesAliasType.get_choice_label(SeriesAliasType.get_opposite(prefix).value)
                 # 如果是组件类服务或者自定义服务 将图表的主调改为被调
+                prefix = {CallSide.CALLEE.value: CallSide.CALLER, CallSide.CALLER.value: CallSide.CALLEE}[prefix].label
             else:
-                prefix = SeriesAliasType.get_choice_label(prefix)
+                prefix = CallSide.from_value(prefix).label
             for i in response.get("series", []):
                 i["target"] = prefix + _(f"{suffix}")
 
@@ -648,7 +516,7 @@ class ServiceListResource(PageListResource):
 
     def get_columns(self, column_type=None):
         return [
-            CollectTableFormat(
+            table_format.CollectTableFormat(
                 id="collect",
                 name="",
                 checked=True,
@@ -661,7 +529,7 @@ class ServiceListResource(PageListResource):
                 filterable=False,
                 disabled=True,
             ),
-            SyncTimeLinkTableFormat(
+            table_format.SyncTimeLinkTableFormat(
                 id="service_name",
                 min_width=200,
                 name=_lazy("服务名称"),
@@ -671,28 +539,28 @@ class ServiceListResource(PageListResource):
                 sortable=True,
                 disabled=True,
             ),
-            StringTableFormat(
+            table_format.StringTableFormat(
                 id="type",
                 name=_lazy("类型"),
                 checked=False,
                 filterable=True,
                 display_handler=lambda d: d.get("view_mode") == self.RequestSerializer.VIEW_MODE_SERVICES,
             ),
-            StringTableFormat(
+            table_format.StringTableFormat(
                 id="language",
                 name=_lazy("语言"),
                 checked=False,
                 filterable=True,
                 display_handler=lambda d: d.get("view_mode") == self.RequestSerializer.VIEW_MODE_SERVICES,
             ),
-            DataPointsTableFormat(
+            table_format.DataPointsTableFormat(
                 id="request_count",
                 name=_lazy("调用次数"),
                 checked=True,
                 asyncable=True,
                 min_width=160,
             ),
-            DataPointsTableFormat(
+            table_format.DataPointsTableFormat(
                 id="error_rate",
                 name=_lazy("错误率"),
                 checked=True,
@@ -700,7 +568,7 @@ class ServiceListResource(PageListResource):
                 unit="percentunit",
                 min_width=160,
             ),
-            DataPointsTableFormat(
+            table_format.DataPointsTableFormat(
                 id="avg_duration",
                 name=_lazy("平均响应耗时"),
                 checked=True,
@@ -728,7 +596,7 @@ class ServiceListResource(PageListResource):
             #     width=80,
             # ),
             # 四个数据状态 ↓
-            DataStatusTableFormat(
+            table_format.DataStatusTableFormat(
                 id="metric_data_status",
                 name=_lazy("指标"),
                 width=55,
@@ -739,7 +607,7 @@ class ServiceListResource(PageListResource):
                 },
                 asyncable=True,
             ),
-            DataStatusTableFormat(
+            table_format.DataStatusTableFormat(
                 id="log_data_status",
                 name=_lazy("日志"),
                 width=55,
@@ -750,7 +618,7 @@ class ServiceListResource(PageListResource):
                 },
                 asyncable=True,
             ),
-            DataStatusTableFormat(
+            table_format.DataStatusTableFormat(
                 id="trace_data_status",
                 name=_lazy("调用链"),
                 width=70,
@@ -761,7 +629,7 @@ class ServiceListResource(PageListResource):
                 },
                 asyncable=True,
             ),
-            DataStatusTableFormat(
+            table_format.DataStatusTableFormat(
                 id="profiling_data_status",
                 name=_lazy("性能分析"),
                 width=80,
@@ -772,7 +640,7 @@ class ServiceListResource(PageListResource):
                 },
                 asyncable=True,
             ),
-            NumberTableFormat(
+            table_format.NumberTableFormat(
                 id="strategy_count",
                 name=_lazy("策略数"),
                 checked=True,
@@ -780,7 +648,7 @@ class ServiceListResource(PageListResource):
                 asyncable=True,
                 display_handler=lambda d: d.get("view_mode") == self.RequestSerializer.VIEW_MODE_SERVICES,
             ),
-            StatusTableFormat(
+            table_format.StatusTableFormat(
                 id="alert_status",
                 name=_lazy("告警状态"),
                 checked=True,
@@ -788,12 +656,12 @@ class ServiceListResource(PageListResource):
                 asyncable=True,
                 display_handler=lambda d: d.get("view_mode") == self.RequestSerializer.VIEW_MODE_SERVICES,
             ),
-            LinkListTableFormat(
+            table_format.LinkListTableFormat(
                 id="operation",
                 name=_lazy("操作"),
                 checked=True,
                 links=[
-                    LinkTableFormat(
+                    table_format.LinkTableFormat(
                         id="config",
                         name=_lazy("配置"),
                         url_format="/service-config?app_name={app_name}&service_name={service_name}",
@@ -819,25 +687,23 @@ class ServiceListResource(PageListResource):
             key = serializers.CharField()
             value = serializers.ListField(child=serializers.CharField(), min_length=1)
 
-        bk_biz_id = serializers.IntegerField(label="业务id")
-        app_name = serializers.CharField(label="应用名称")
-        keyword = serializers.CharField(required=False, label="查询关键词", allow_blank=True)
-        start_time = serializers.IntegerField(required=True, label="数据开始时间")
-        end_time = serializers.IntegerField(required=True, label="数据结束时间")
-        page = serializers.IntegerField(required=False, label="页码")
-        page_size = serializers.IntegerField(required=False, label="每页条数")
-        sort = serializers.CharField(required=False, label="排序方式", allow_blank=True)
-        filter = serializers.CharField(required=False, label="分类过滤条件", default="all", allow_blank=True)
-        filter_dict = serializers.DictField(required=False, label="筛选条件", default={})
-        field_conditions = serializers.ListField(
-            required=False, default=[], label="or 条件列表", child=FieldConditionSerializer()
-        )
+        bk_biz_id = serializers.IntegerField(label=_("业务id"))
+        app_name = serializers.CharField(label=_("应用名称"))
+        keyword = serializers.CharField(required=False, label=_("查询关键词"), allow_blank=True)
+        start_time = serializers.IntegerField(label=_("数据开始时间"))
+        end_time = serializers.IntegerField(label=_("数据结束时间"))
+        page = serializers.IntegerField(required=False, label=_("页码"))
+        page_size = serializers.IntegerField(required=False, label=_("每页条数"))
+        sort = serializers.CharField(required=False, label=_("排序方式"), allow_blank=True)
+        filter = serializers.CharField(label=_("分类过滤条件"), default="all", allow_blank=True)
+        filter_dict = serializers.DictField(label=_("筛选条件"), default={})
+        field_conditions = serializers.ListField(default=[], label=_("or 条件列表"), child=FieldConditionSerializer())
         view_mode = serializers.ChoiceField(
-            required=False,
-            label="展示模式",
+            label=_("展示模式"),
             choices=VIEW_MODE_CHOICES,
             default=VIEW_MODE_SERVICES,
         )
+        include_data_status = serializers.BooleanField(label=_("是否包含数据状态"), default=False)
 
         def validate(self, attrs):
             res = super().validate(attrs)
@@ -1097,7 +963,7 @@ class ServiceListResource(PageListResource):
         data_status_mapping = {}
         # 如果存在数据状态相关的filter筛选, 加载data_status数据
         field_condition_keys = {condition.get("key") for condition in validate_data["field_conditions"]}
-        if not field_condition_keys.isdisjoint({"apply_module", "have_data"}):
+        if validate_data["include_data_status"] or not field_condition_keys.isdisjoint({"apply_module", "have_data"}):
             data_status_list = (
                 ServiceListAsyncResource()
                 .perform_request(
@@ -1567,7 +1433,6 @@ class InstanceListResource(Resource):
 
 class ErrorListResource(ServiceAndComponentCompatibleResource):
     app_name = ""
-    UNKNOWN_EXCEPTION_TYPE = "unknown"
 
     need_dynamic_sort_column = True
     need_overview = True
@@ -1586,7 +1451,7 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
         return [{"id": "has_stack", "name": _lazy("有堆栈")}]
 
     def get_columns(self, column_type=None):
-        service_format = LinkTableFormat(
+        service_format = table_format.LinkTableFormat(
             id="service",
             name=_lazy("服务"),
             checked=True,
@@ -1597,7 +1462,7 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
             min_width=120,
         )
         if column_type:
-            service_format = ServiceComponentAdaptLinkFormat(
+            service_format = table_format.ServiceComponentAdaptLinkFormat(
                 id="service",
                 name=_lazy("服务"),
                 checked=True,
@@ -1610,7 +1475,7 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
             )
 
         return [
-            StackLinkOverviewDataTableFormat(
+            table_format.StackLinkOverviewDataTableFormat(
                 id="message",
                 title=_lazy("错误概览"),
                 name=_lazy("错误"),
@@ -1620,13 +1485,13 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
                 min_width=120,
                 max_width=400,
             ),
-            StringTableFormat(
+            table_format.StringTableFormat(
                 id="endpoint",
                 name="Span Name",
                 checked=True,
                 min_width=120,
             ),
-            StringLabelTableFormat(
+            table_format.StringLabelTableFormat(
                 id="category",
                 name=_lazy("分类"),
                 checked=True,
@@ -1636,9 +1501,9 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
                 min_width=120,
             ),
             service_format,
-            TimeTableFormat(id="first_time", name=_lazy("首次出现时间"), checked=True),
-            TimeTableFormat(id="last_time", name=_lazy("最新出现时间"), checked=True),
-            CustomProgressTableFormat(
+            table_format.TimeTableFormat(id="first_time", name=_lazy("首次出现时间"), checked=True),
+            table_format.TimeTableFormat(id="last_time", name=_lazy("最新出现时间"), checked=True),
+            table_format.CustomProgressTableFormat(
                 id="error_count",
                 name=_lazy("错误次数"),
                 checked=True,
@@ -1648,11 +1513,11 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
                 min_width=120,
                 clear_if_not_sorted=True,
             ),
-            LinkListTableFormat(
+            table_format.LinkListTableFormat(
                 id="operations",
                 name=_lazy("操作"),
                 links=[
-                    LinkTableFormat(
+                    table_format.LinkTableFormat(
                         id="operate",
                         name=_lazy("调用链"),
                         url_format="/?bizId={bk_biz_id}/#/trace/home/?app_name={app_name}"
@@ -1688,24 +1553,17 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
                 return ""
             return value
 
-    def list_error_event_spans(self, data):
-        bk_biz_id = data["bk_biz_id"]
-        app_name = data["app_name"]
+    def list_error_event_spans(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        bk_biz_id: int = data["bk_biz_id"]
+        app_name: str = data["app_name"]
 
-        query_params = {
+        query_params: dict[str, Any] = {
             "bk_biz_id": data["bk_biz_id"],
             "app_name": data["app_name"],
             "filter_params": [{"key": "status.code", "op": "=", "value": ["2"]}],
             "start_time": data["start_time"],
             "end_time": data["end_time"],
-            "fields": [
-                "resource.service.name",
-                "span_name",
-                "trace_id",
-                "events.attributes.exception.type",
-                "events.name",
-                "time",
-            ],
+            "fields": SpanHandler.ERROR_SPAN_FIELDS,
         }
 
         # 分类可以通过两种方式进行查询
@@ -1745,28 +1603,25 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
     def format_time(self, time_int):
         return datetime.datetime.fromtimestamp(int(time_int) // 1000).strftime("%Y-%m-%d %H:%M:%S")
 
-    def compare_time(self, times: list):
+    def compare_time(self, times: list[int]) -> tuple[int, int]:
         times.sort()
-        # 将毫秒时间戳转换为秒级时间戳
-        return int(times[0]) // 1000, int(times[-1]) // 1000
+        # 将微秒时间戳转换为秒级时间戳
+        return int(times[0]) // 1000000, int(times[-1]) // 1000000
 
-    def has_events(self, events):
-        for event in events:
-            if event["name"] == "exception":
-                return True
-        return False
-
-    def combine_errors(self, bk_biz_id, service_mappings, trace_ids, service, endpoint, errors, exception_type):
-        times = set()
-
-        has_exception = False
-        for error in errors:
-            times.add(error["time"])
-            if not has_exception:
-                has_exception = self.has_events(error.get("events", []))
+    def combine_errors(
+        self,
+        bk_biz_id: int,
+        service_mappings: dict[str, dict[str, Any]],
+        service: str,
+        endpoint: str,
+        exception_type: str,
+        exception_alias: str,
+        exception_refer: str,
+        errors: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        errors = sorted(errors, key=lambda error: (error["has_stack"], error["timestamp"]), reverse=True)
+        times: set[int] = {error["timestamp"] for error in errors}
         first_time, last_time = self.compare_time(list(times))
-
-        trace_id = trace_ids[-1]
 
         return {
             "bk_biz_id": bk_biz_id,
@@ -1774,64 +1629,72 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
             "last_time": last_time,
             "endpoint": endpoint,
             "message": {
-                "title": f"{endpoint}: {exception_type}",
-                "subtitle": "",  # 保持原框架 subtitle值为空
-                "is_stack": _lazy("有Stack") if has_exception else _lazy("没有Stack"),
+                "title": f"{endpoint}: {exception_alias}",
+                "subtitle": "",
+                "is_stack": _lazy("有Stack") if errors[0]["has_stack"] else _lazy("没有Stack"),
             },
             "category": service_mappings.get(service, {}).get("extra_data", {}).get("category"),
             "error_count": len(errors),
             "service": service,
-            "trace_id": trace_id,
+            "trace_id": errors[0]["trace_id"],
             "app_name": self.app_name,
             "operations": {"operate": _lazy("调用链")},
             "exception_type": exception_type,
+            "exception_alias": exception_alias,
+            "exception_refer": exception_refer,
         }
 
-    def handle_error_map(self, error_map, key, service, endpoint, span, exception_type):
-        if key in error_map:
-            error_map[key]["trace_ids"].append(span["trace_id"])
-            error_map[key]["errors"].append(span)
-        else:
-            error_map[key] = {
+    def update_error_map(
+        self,
+        error_map: dict[tuple[str, str, str, str], dict[str, Any]],
+        key: tuple[str, str, str, str],
+        service: str,
+        endpoint: str,
+        trace_id: str,
+        exception_event: dict[str, Any],
+    ) -> None:
+        error: dict[str, Any] = {**exception_event, "trace_id": trace_id}
+        error_map.setdefault(
+            key,
+            {
                 "service": service,
                 "endpoint": endpoint,
-                "exception_type": exception_type,
-                "errors": [span],
-                "trace_ids": [span["trace_id"]],
-            }
+                "exception_type": exception_event["exception_type"],
+                "exception_alias": exception_event["exception_alias"],
+                "exception_refer": exception_event["exception_refer"],
+                "errors": [],
+            },
+        )["errors"].append(error)
 
-    def parse_errors(self, bk_biz_id, error_spans):
+    def parse_errors(self, bk_biz_id: int, error_spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # 获取service
-        service_mappings = {i["topo_key"]: i for i in ServiceHandler.list_nodes(bk_biz_id, self.app_name)}
+        service_mappings: dict[str, dict[str, Any]] = {
+            item["topo_key"]: item for item in ServiceHandler.list_nodes(bk_biz_id, self.app_name)
+        }
 
-        error_map = {}
+        error_map: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
         for span in error_spans:
-            service = span[OtlpKey.RESOURCE].get(ResourceAttributes.SERVICE_NAME)
+            service: str | None = span[OtlpKey.RESOURCE].get(ResourceAttributes.SERVICE_NAME)
             if not service:
                 continue
 
-            endpoint = span[OtlpKey.SPAN_NAME]
-
-            if span.get("events"):
-                for event in span["events"]:
-                    exception_type = event.get(OtlpKey.ATTRIBUTES, {}).get(
-                        SpanAttributes.EXCEPTION_TYPE, self.UNKNOWN_EXCEPTION_TYPE
-                    )
-                    key = (service, endpoint, exception_type)
-
-                    self.handle_error_map(error_map, key, service, endpoint, span, exception_type)
-            else:
-                exception_type = self.UNKNOWN_EXCEPTION_TYPE
-                key = (service, endpoint, exception_type)
-                self.handle_error_map(error_map, key, service, endpoint, span, exception_type)
+            endpoint: str = span[OtlpKey.SPAN_NAME]
+            for exception_event in SpanHandler.get_matched_exception_events(span, include_unknown=True):
+                key: tuple[str, str, str, str] = (
+                    service,
+                    endpoint,
+                    exception_event["exception_type"],
+                    exception_event["exception_refer"],
+                )
+                self.update_error_map(error_map, key, service, endpoint, span["trace_id"], exception_event)
 
         return [
             self.combine_errors(bk_biz_id, service_mappings, **service_error_map)
             for service_error_map in error_map.values()
         ]
 
-    def has_stack_filter(self, data, validated_data):
+    def has_stack_filter(self, data: list[dict[str, Any]], validated_data: dict[str, Any]) -> list[dict[str, Any]]:
         """
         过滤是否有堆栈
         同时兼容两种的过滤方式:
@@ -1842,12 +1705,7 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
         filter_from_status = validated_data.get("status") == "has_stack"
 
         if filter_from_filter_dict or filter_from_status:
-            res = []
-            for item in data:
-                if True if item["message"]["is_stack"] == _lazy("有Stack") else False:
-                    res.append(item)
-
-            return res
+            return [item for item in data if item["message"]["is_stack"] == _lazy("有Stack")]
 
         return data
 
@@ -1875,28 +1733,29 @@ class ErrorListResource(ServiceAndComponentCompatibleResource):
         paginated_data["filter"] = self.get_status_filter()
         return paginated_data
 
-    def get_pagination_data(self, origin_data, params, column_type=None):
-        items = super().get_pagination_data(origin_data, params, column_type)
+    def get_pagination_data(
+        self, origin_data: list[dict[str, Any]], params: dict[str, Any], column_type: str | None = None
+    ) -> dict[str, Any]:
+        items: dict[str, Any] = super().get_pagination_data(origin_data, params, column_type)
         # url 拼接
         for item in items["data"]:
             filters: list[dict[str, Any]] = [
                 {
                     "key": OtlpKey.get_resource_key(ResourceAttributes.SERVICE_NAME),
                     "operator": "equal",
-                    "value": [item.get("service_name")],
+                    "value": [item["service_name"]],
                 },
-                {"key": OtlpKey.SPAN_NAME, "operator": "equal", "value": [item.get("endpoint")]},
+                {"key": OtlpKey.SPAN_NAME, "operator": "equal", "value": [item["endpoint"]]},
                 {"key": OtlpKey.STATUS_CODE, "operator": "equal", "value": [2]},
             ]
 
-            if item.get("exception_type") != self.UNKNOWN_EXCEPTION_TYPE:
-                filters.append(
-                    {
-                        "key": f"events.{OtlpKey.get_attributes_key(SpanAttributes.EXCEPTION_TYPE)}",
-                        "operator": "equal",
-                        "value": [item.get("exception_type")],
-                    }
+            filters.extend(
+                SpanHandler.build_exception_params(
+                    item["exception_type"],
+                    item["exception_refer"],
+                    operator_key="operator",
                 )
+            )
 
             for i in item["operations"]:
                 i["url"] = i["url"] + "&where=" + json.dumps(filters)
@@ -1911,7 +1770,7 @@ class TopNQueryResource(ApiAuthResource):
         start_time = serializers.IntegerField(label="开始时间")
         end_time = serializers.IntegerField(label="结束时间")
         size = serializers.IntegerField(label="查询数量", default=5)
-        query_type = serializers.ChoiceField(label="查询类型", choices=get_top_n_query_type())
+        query_type = serializers.ChoiceField(label="查询类型", choices=top_n.get_top_n_query_type())
         filter_dict = serializers.DictField(label="过滤条件", required=False)
 
     def perform_request(self, validated_request_data):
@@ -1923,7 +1782,7 @@ class TopNQueryResource(ApiAuthResource):
             )
         except Application.DoesNotExist:
             raise ValueError("Application does not exist")
-        result = load_top_n_handler(validated_request_data["query_type"])(
+        result = top_n.load_top_n_handler(validated_request_data["query_type"])(
             application,
             start_time,
             end_time,
@@ -2232,7 +2091,7 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
         return round((error_count / request_count_sum) * 100, 2) if request_count_sum else None
 
     def get_columns(self, column_type=None):
-        service_format = LinkTableFormat(
+        service_format = table_format.LinkTableFormat(
             id="service",
             name=_lazy("服务名称"),
             min_width=120,
@@ -2243,7 +2102,7 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
             url_format="/?bizId={bk_biz_id}/#/apm/service/?filter-service_name={service}&filter-app_name={app_name}",
         )
         if column_type:
-            service_format = ServiceComponentAdaptLinkFormat(
+            service_format = table_format.ServiceComponentAdaptLinkFormat(
                 id="service",
                 name=_lazy("服务名称"),
                 min_width=120,
@@ -2254,9 +2113,26 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
                 url_format="/service/?filter-service_name={service}&filter-app_name={app_name}&"
                 "dashboardId=service-default-overview&sceneId=apm_service&sceneType=overview",
             )
-        # columns 默认顺序: 接口、调用类型、调用次数、错误次数、错误率、平均响应时间、状态、类型、分类、服务、操作
+
+        # 定义调用链链接格式，用于 endpoint_name 列
+        trace_link = table_format.LinkTableFormat(
+            id="trace",
+            name=_lazy("调用链"),
+            url_format="/?bizId={bk_biz_id}/#/trace/home/?app_name={app_name}"
+            + "&search_type=scope"
+            + "&start_time={start_time}&end_time={end_time}"
+            + "&sceneMode=span&filterMode=ui"
+            + "&where=["
+            '{{"key": "resource.service.name","operator": "equal","value": ["{service_name}"]}},'
+            '{{"key": "span_name","operator": "equal","value": ["{endpoint_name}"]}}'
+            "]",
+            target="blank",
+            event_key=SceneEventKey.SWITCH_SCENES_TYPE,
+        )
+
+        # columns 默认顺序: 接口、调用类型、调用次数、错误次数、错误率、平均响应时间、状态、类型、分类、服务
         columns = [
-            OverviewDataTableFormat(
+            table_format.EndpointListTableFormat(
                 id="endpoint_name",
                 title=_lazy("接口概览"),
                 name=_lazy("接口"),
@@ -2264,16 +2140,17 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
                 disabled=True,
                 width=248,
                 min_width=120,
-                max_width=300,
+                max_width=370,
+                links=[trace_link],
             ),
-            StringTableFormat(
+            table_format.StringTableFormat(
                 id="kind",
                 name=_lazy("调用类型"),
                 checked=True,
                 filterable=True,
                 min_width=120,
             ),
-            CustomProgressTableFormat(
+            table_format.CustomProgressTableFormat(
                 id="request_count",
                 name=_lazy("调用次数"),
                 overview_calculator=Calculator.sum(),
@@ -2282,7 +2159,7 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
                 min_width=120,
                 clear_if_not_sorted=True,
             ),
-            CustomProgressTableFormat(
+            table_format.CustomProgressTableFormat(
                 id="error_count",
                 name=_lazy("错误次数"),
                 overview_calculator=Calculator.sum(),
@@ -2291,14 +2168,14 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
                 min_width=120,
                 clear_if_not_sorted=True,
             ),
-            ProgressTableFormat(
+            table_format.ProgressTableFormat(
                 id="error_rate",
                 name=_lazy("错误率"),
                 overview_calculate_handler=EndpointListResource.overview_error_rate,
                 color_getter=lambda _: "FAILED",
                 min_width=120,
             ),
-            NumberTableFormat(
+            table_format.NumberTableFormat(
                 id="avg_duration",
                 name=_lazy("平均响应时间"),
                 checked=True,
@@ -2307,7 +2184,7 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
                 unit="ns",
                 decimal=2,
             ),
-            StatusTableFormat(
+            table_format.StatusTableFormat(
                 id="apdex",
                 name=_lazy("Apdex"),
                 checked=True,
@@ -2315,14 +2192,14 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
                 filterable=True,
                 min_width=120,
             ),
-            StringTableFormat(
+            table_format.StringTableFormat(
                 id="category_kind",
                 name=_lazy("类型"),
                 checked=True,
                 filterable=True,
                 min_width=120,
             ),
-            StringLabelTableFormat(
+            table_format.StringLabelTableFormat(
                 id="category",
                 name=_lazy("分类"),
                 checked=True,
@@ -2332,35 +2209,7 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
                 min_width=120,
             ),
             service_format,
-            LinkListTableFormat(
-                id="operation",
-                name=_lazy("操作"),
-                checked=True,
-                disabled=True,
-                links=[
-                    LinkTableFormat(
-                        id="trace",
-                        name=_lazy("调用链"),
-                        url_format="/?bizId={bk_biz_id}/#/trace/home/?app_name={app_name}"
-                        + "&search_type=scope"
-                        + "&start_time={start_time}&end_time={end_time}"
-                        + "&sceneMode=span&filterMode=ui"
-                        + "&where=["
-                        '{{"key": "resource.service.name","operator": "equal","value": ["{service_name}"]}},'
-                        '{{"key": "span_name","operator": "equal","value": ["{endpoint_name}"]}}'
-                        "]",
-                        target="blank",
-                        event_key=SceneEventKey.SWITCH_SCENES_TYPE,
-                    )
-                ],
-                min_width=120,
-            ),
         ]
-
-        # 临时分享处理返回链接数据
-        request = get_request(peaceful=True)
-        if request and getattr(request, "token", None):
-            columns = [column for column in columns if column.id != "operation"]
 
         return columns
 
@@ -2600,7 +2449,6 @@ class EndpointListResource(ServiceAndComponentCompatibleResource):
             endpoint["origin_kind"] = endpoint["kind"]
             endpoint["kind"] = SpanKindCachedEnum.from_value(endpoint["kind"]).label
             endpoint["app_name"] = application.app_name
-            endpoint["operation"] = {"trace": _lazy("调用链")}
             endpoint["origin_category_kind"] = endpoint["category_kind"]
             endpoint["category_kind"] = endpoint["category_kind"]["value"] or "--"
             endpoint["bk_biz_id"] = data["bk_biz_id"]
@@ -2790,7 +2638,7 @@ class ServiceInstancesResource(ServiceAndComponentCompatibleResource):
 
     def get_columns(self, column_type=None):
         return [
-            OverviewDataTableFormat(
+            table_format.OverviewDataTableFormat(
                 id="bk_instance_id",
                 title=_lazy("实例概览"),
                 name=_lazy("实例"),
@@ -2800,7 +2648,7 @@ class ServiceInstancesResource(ServiceAndComponentCompatibleResource):
                 min_width=120,
                 max_width=300,
             ),
-            StatusTableFormat(
+            table_format.StatusTableFormat(
                 id="apdex",
                 name=_lazy("状态"),
                 checked=True,
@@ -2808,14 +2656,14 @@ class ServiceInstancesResource(ServiceAndComponentCompatibleResource):
                 filterable=True,
                 min_width=120,
             ),
-            NumberTableFormat(
+            table_format.NumberTableFormat(
                 id="request_count",
                 name=_lazy("调用次数"),
                 checked=True,
                 overview_calculator=Calculator.sum(),
                 min_width=120,
             ),
-            NumberTableFormat(
+            table_format.NumberTableFormat(
                 id="error_rate",
                 name=_lazy("错误率"),
                 checked=True,
@@ -2824,7 +2672,7 @@ class ServiceInstancesResource(ServiceAndComponentCompatibleResource):
                 overview_calculator=Calculator.avg(),
                 min_width=120,
             ),
-            NumberTableFormat(
+            table_format.NumberTableFormat(
                 id="avg_duration",
                 name=_lazy("平均响应时间"),
                 checked=True,
@@ -2919,9 +2767,9 @@ class ServiceQueryExceptionResource(PageListResource):
 
     def get_columns(self, column_type=None):
         return [
-            StringTableFormat(id="span_name", name="Span Name", checked=True),
-            NumberTableFormat(id="count", name=_lazy("出现次数"), checked=True, sortable=True),
-            LinkTableFormat(
+            table_format.StringTableFormat(id="span_name", name="Span Name", checked=True),
+            table_format.NumberTableFormat(id="count", name=_lazy("出现次数"), checked=True, sortable=True),
+            table_format.LinkTableFormat(
                 id="operate",
                 name=_lazy("调用链"),
                 url_format="/?bizId={bk_biz_id}/#/trace/home/?app_name={app_name}"
@@ -3143,7 +2991,7 @@ class ExceptionDetailListResource(Resource):
 
 class ErrorListByTraceIdsResource(PageListResource):
     def get_columns(self, column_type=None):
-        endpoint_format = LinkTableFormat(
+        endpoint_format = table_format.LinkTableFormat(
             id="endpoint",
             name=_lazy("接口"),
             checked=True,
@@ -3153,7 +3001,7 @@ class ErrorListByTraceIdsResource(PageListResource):
             target="event",
             event_key=SceneEventKey.SWITCH_SCENES_TYPE,
         )
-        error_format = StackLinkTableFormat(
+        error_format = table_format.StackLinkTableFormat(
             id="message",
             name=_lazy("错误"),
             checked=True,
@@ -3166,21 +3014,21 @@ class ErrorListByTraceIdsResource(PageListResource):
         return [
             error_format,
             endpoint_format,
-            LinkTableFormat(
+            table_format.LinkTableFormat(
                 id="service_name",
                 name=_lazy("服务"),
                 checked=True,
                 url_format="/service/?filter-service_name={service_name}&filter-app_name={app_name}",
                 sortable=True,
             ),
-            TimeTableFormat(id="first_time", name=_lazy("首次出现时间"), checked=True, sortable=True),
-            TimeTableFormat(id="last_time", name=_lazy("最新出现时间"), checked=True, sortable=True),
-            NumberTableFormat(id="error_count", name=_lazy("错误次数"), checked=True, sortable=True),
-            LinkListTableFormat(
+            table_format.TimeTableFormat(id="first_time", name=_lazy("首次出现时间"), checked=True, sortable=True),
+            table_format.TimeTableFormat(id="last_time", name=_lazy("最新出现时间"), checked=True, sortable=True),
+            table_format.NumberTableFormat(id="error_count", name=_lazy("错误次数"), checked=True, sortable=True),
+            table_format.LinkListTableFormat(
                 id="operations",
                 name=_lazy("操作"),
                 links=[
-                    LinkTableFormat(
+                    table_format.LinkTableFormat(
                         id="operate",
                         name=_lazy("调用链"),
                         url_format="/?bizId={bk_biz_id}/#/trace/home/?app_name={app_name}"
@@ -3362,35 +3210,19 @@ class MetricDetailStatisticsResource(Resource):
         )
 
     def perform_request(self, validated_data):
-        template = ServiceMetricStatistics.get_template(
+        template = statistics.ServiceMetricStatistics.get_template(
             validated_data["data_type"],
             validated_data.get("option_kind"),
             validated_data.pop("dimension"),
             validated_data.get("service_name"),
             validated_data.get("dimension_category"),
         )
-        s = ServiceMetricStatistics(**validated_data)
+        s = statistics.ServiceMetricStatistics(**validated_data)
         return s.list(template)
 
 
 class GetFieldOptionValuesResource(Resource):
-    class RequestSerializer(serializers.Serializer):
-        bk_biz_id = serializers.IntegerField(label="业务ID")
-        app_name = serializers.CharField(label="应用名称")
-        start_time = serializers.IntegerField(label="开始时间", required=False)
-        end_time = serializers.IntegerField(label="结束时间", required=False)
-        limit = serializers.IntegerField(label="查询数量", default=10000, required=False)
-        field = serializers.CharField(label="字段")
-        metric_field = serializers.CharField(label="指标")
-        filter_dict = serializers.DictField(label="过滤条件", required=False, default={})
-        where = serializers.ListField(label="过滤条件", required=False, default=[], child=serializers.DictField())
-
-        def validate(self, attrs):
-            # 合并查询条件
-            attrs["filter_dict"] = q_to_dict(
-                conditions_to_q(filter_dict_to_conditions(attrs.get("filter_dict") or {}, attrs.get("where") or []))
-            )
-            return attrs
+    RequestSerializer = metric_serializers.GetFieldOptionValuesRequestSerializer
 
     def perform_request(self, validated_request_data):
         metric_helper: metric_group.MetricHelper = metric_group.MetricHelper(
@@ -3407,90 +3239,8 @@ class GetFieldOptionValuesResource(Resource):
         return [{"value": value, "text": value} for value in sorted(option_values)]
 
 
-class RecordHelperMixin:
-    @classmethod
-    def _process_sorted(cls, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not records:
-            return []
-        if "time" in records[0].get("dimensions") or {}:
-            return sorted(records, key=lambda _d: -_d.get("dimensions", {}).get("time", 0))
-        return records
-
-    @classmethod
-    def format_value(cls, metric_cal_type: str, value: Any) -> float:
-        try:
-            value = float(value)
-        except Exception:  # pylint: disable=broad-except
-            value = 0
-
-        if metric_cal_type == metric_group.CalculationType.REQUEST_TOTAL:
-            # 请求量必须是整型
-            value = int(value)
-        elif metric_cal_type in [
-            metric_group.CalculationType.TIMEOUT_RATE,
-            metric_group.CalculationType.SUCCESS_RATE,
-            metric_group.CalculationType.EXCEPTION_RATE,
-        ]:
-            value = format_percent(value, precision=3, sig_fig_cnt=2)
-        else:
-            value = round(value, 2)
-
-        return value
-
-
-class CalculateByRangeResource(Resource, RecordHelperMixin, PreCalculateHelperMixin):
-    class RequestSerializer(serializers.Serializer):
-        ZERO_TIME_SHIFT: str = "0s"
-
-        class OptionsSerializer(serializers.Serializer):
-            class TrpcSerializer(serializers.Serializer):
-                kind = serializers.ChoiceField(
-                    label="调用类型",
-                    choices=SeriesAliasType.get_choices(),
-                    required=True,
-                )
-                temporality = serializers.ChoiceField(
-                    label="时间性", required=True, choices=MetricTemporality.choices()
-                )
-
-            trpc = TrpcSerializer(label="tRPC 配置", required=False)
-
-        bk_biz_id = serializers.IntegerField(label="业务ID")
-        app_name = serializers.CharField(label="应用名称")
-        metric_group_name = serializers.ChoiceField(
-            label="指标组", required=True, choices=metric_group.GroupEnum.choices()
-        )
-        metric_cal_type = serializers.ChoiceField(
-            label="指标计算类型", required=True, choices=metric_group.CalculationType.choices()
-        )
-
-        baseline = serializers.CharField(label="对比基准", required=False, default=ZERO_TIME_SHIFT)
-        time_shifts = serializers.ListSerializer(
-            label="时间偏移", required=False, default=[], child=serializers.CharField()
-        )
-        filter_dict = serializers.DictField(label="过滤条件", required=False, default={})
-        where = serializers.ListField(label="过滤条件", required=False, default=[], child=serializers.DictField())
-        group_by = serializers.ListSerializer(
-            label="聚合字段", required=False, default=[], child=serializers.CharField()
-        )
-        options = OptionsSerializer(label="配置", required=False, default={})
-        start_time = serializers.IntegerField(label="开始时间", required=False)
-        end_time = serializers.IntegerField(label="结束时间", required=False)
-
-        def validate(self, attrs):
-            attrs["time_shifts"] = list(set(attrs["time_shifts"]))
-            if self.ZERO_TIME_SHIFT not in attrs["time_shifts"]:
-                attrs["time_shifts"].append(self.ZERO_TIME_SHIFT)
-
-            # 当前时间不计入对比次数
-            if len(attrs["time_shifts"]) > 3:
-                raise ValueError(_("最多支持两次时间对比"))
-
-            # 合并查询条件
-            attrs["filter_dict"] = q_to_dict(
-                conditions_to_q(filter_dict_to_conditions(attrs.get("filter_dict") or {}, attrs.get("where") or []))
-            )
-            return attrs
+class CalculateByRangeResource(Resource, call_analysis.RecordHelperMixin, call_analysis.PreCalculateHelperMixin):
+    RequestSerializer = metric_serializers.CalculateByRangeRequestSerializer
 
     @classmethod
     def _merge(
@@ -3611,63 +3361,15 @@ class CalculateByRangeResource(Resource, RecordHelperMixin, PreCalculateHelperMi
         aliases: list[str] = list(alias_aggregated_records_map.keys())
         # 计算增长率
         self._process_growth_rates(baseline, aliases, merged_records)
-        if validated_request_data["metric_cal_type"] == metric_group.CalculationType.REQUEST_TOTAL:
+        if validated_request_data["metric_cal_type"] == metric_group.CalculationType.REQUEST_TOTAL.value:
             # 计算占比
             self._process_proportions(aliases, merged_records)
 
         return {"total": len(merged_records), "data": self._process_sorted(merged_records)}
 
 
-class QueryDimensionsByLimitResource(Resource, RecordHelperMixin, PreCalculateHelperMixin):
-    ZERO_TIME_SHIFT: str = "0s"
-    CALCULATION_TYPE: str = metric_group.CalculationType.TOP_N
-
-    class RequestSerializer(serializers.Serializer):
-        class OptionsSerializer(serializers.Serializer):
-            class TrpcSerializer(serializers.Serializer):
-                kind = serializers.ChoiceField(
-                    label="调用类型",
-                    choices=SeriesAliasType.get_choices(),
-                    required=True,
-                )
-                temporality = serializers.ChoiceField(
-                    label="时间性", required=True, choices=MetricTemporality.choices()
-                )
-
-            trpc = TrpcSerializer(label="tRPC 配置", required=False)
-
-        bk_biz_id = serializers.IntegerField(label="业务ID")
-        app_name = serializers.CharField(label="应用名称")
-        limit = serializers.IntegerField(label="查询数量", default=10, required=False)
-        filter_dict = serializers.DictField(label="过滤条件", required=False, default={})
-        where = serializers.ListField(label="过滤条件", required=False, default=[], child=serializers.DictField())
-        group_by = serializers.ListSerializer(
-            label="聚合字段", required=False, default=[], child=serializers.CharField()
-        )
-        method = serializers.ChoiceField(
-            label="计算类型",
-            required=False,
-            default=metric_group.CalculationType.TOP_N,
-            choices=[metric_group.CalculationType.TOP_N, metric_group.CalculationType.BOTTOM_N],
-        )
-        metric_group_name = serializers.ChoiceField(
-            label="指标组", required=True, choices=metric_group.GroupEnum.choices()
-        )
-        metric_cal_type = serializers.ChoiceField(
-            label="指标计算类型", required=True, choices=metric_group.CalculationType.choices()
-        )
-        time_shift = serializers.CharField(label="时间偏移", required=False)
-        start_time = serializers.IntegerField(label="开始时间", required=False)
-        end_time = serializers.IntegerField(label="结束时间", required=False)
-        options = OptionsSerializer(label="配置", required=False, default={})
-        with_filter_dict = serializers.BooleanField(label="是否提供过滤条件", required=False, default=False)
-
-        def validate(self, attrs):
-            # 合并查询条件
-            attrs["filter_dict"] = q_to_dict(
-                conditions_to_q(filter_dict_to_conditions(attrs.get("filter_dict") or {}, attrs.get("where") or []))
-            )
-            return attrs
+class QueryDimensionsByLimitResource(Resource, call_analysis.RecordHelperMixin, call_analysis.PreCalculateHelperMixin):
+    RequestSerializer = metric_serializers.QueryDimensionsByLimitRequestSerializer
 
     @classmethod
     def _format(cls, time_shift: str, group_fields: list[str], records: list[dict[str, Any]]):

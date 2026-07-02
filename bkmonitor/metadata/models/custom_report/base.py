@@ -9,6 +9,8 @@ specific language governing permissions and limitations under the License.
 """
 
 import logging
+import uuid
+
 from typing import Any, ClassVar, Self
 
 from django.conf import settings
@@ -56,6 +58,7 @@ class CustomGroupBase(models.Model):
     max_future_time_offset = models.IntegerField(verbose_name="上报最大时间偏移", default=-1)
     # 事件标签，默认是其他类型
     label = models.CharField(verbose_name="事件标签", max_length=128, default=Label.RESULT_TABLE_LABEL_OTHER)
+    token = models.CharField(verbose_name="自定义上报 Token", max_length=256, default="")
     is_enable = models.BooleanField(verbose_name="是否启用", default=True)
     is_delete = models.BooleanField(verbose_name="是否删除", default=False)
     creator = models.CharField(verbose_name="创建者", max_length=255)
@@ -64,6 +67,8 @@ class CustomGroupBase(models.Model):
     last_modify_time = models.DateTimeField("最后更新时间", auto_now=True)
     # 是否需要每个指标组单个结果表处理
     is_split_measurement = models.BooleanField("是否需要单个指标单表存储", default=False)
+    # 是否需要下发 collector 配置
+    is_need_deploy_collector_config = models.BooleanField("是否需要下发 collector 配置", default=True)
 
     DEFAULT_DATASOURCE_OPTIONS = [{"name": "flat_batch_key", "value": "data"}]
 
@@ -149,6 +154,7 @@ class CustomGroupBase(models.Model):
         operator: str,
         is_split_measurement: bool,
         bk_tenant_id: str,
+        is_need_deploy_collector_config: bool = True,
         max_rate: int = -1,
         **filter_kwargs,
     ) -> tuple[str, Self]:
@@ -164,6 +170,7 @@ class CustomGroupBase(models.Model):
             bk_data_id=bk_data_id,
             bk_biz_id=bk_biz_id,
             label=label,
+            token=uuid.uuid4().hex,
             creator=operator,
             last_modify_user=operator,
             is_delete=False,
@@ -171,6 +178,7 @@ class CustomGroupBase(models.Model):
             table_id=table_id,
             bk_tenant_id=bk_tenant_id,
             is_split_measurement=is_split_measurement,
+            is_need_deploy_collector_config=is_need_deploy_collector_config,
             max_rate=max_rate,
             **filter_kwargs,
         )
@@ -179,6 +187,10 @@ class CustomGroupBase(models.Model):
         )
 
         return table_id, custom_group
+
+    @classmethod
+    def _post_process_create(cls, custom_group, kwargs):
+        pass
 
     @classmethod
     def create_custom_group(
@@ -193,10 +205,12 @@ class CustomGroupBase(models.Model):
         table_id: str | None = None,
         is_builtin=False,
         is_split_measurement=False,
+        is_need_deploy_collector_config: bool = True,
         default_storage_config=None,
         additional_options: dict | None = None,
         data_label: str | None = None,
         bk_biz_id_alias: str | None = None,
+        **kwargs,
     ):
         """
         创建一个新的自定义分组记录
@@ -209,6 +223,7 @@ class CustomGroupBase(models.Model):
         :param table_id: 需要制定的table_id，否则通过默认规则创建得到
         :param is_builtin: 是否为内置指标
         :param is_split_measurement: 是否需要单指标单表存储，主要针对容器大量指标的情况适配
+        :param is_need_deploy_collector_config: 是否需要下发 collector 配置
         :param default_storage_config: 默认存储的配置
         :param additional_options: 附带创建的 ResultTableOption
         :param data_label: 数据标签
@@ -248,9 +263,11 @@ class CustomGroupBase(models.Model):
             label=label,
             operator=operator,
             is_split_measurement=is_split_measurement,
+            is_need_deploy_collector_config=is_need_deploy_collector_config,
             bk_tenant_id=bk_tenant_id,
             **filter_kwargs,
         )
+        cls._post_process_create(custom_group, kwargs)
 
         # 3. 遍历创建metric_info_list
         # 如果未有提供metric_info_list，则需要替换为空列表，方便后续的逻辑使用
@@ -329,6 +346,7 @@ class CustomGroupBase(models.Model):
         max_rate=None,
         enable_field_black_list: bool | None = None,
         data_label: str | None = None,
+        options: dict[str, Any] | None = None,
     ):
         """
         修改一个事件组
@@ -341,6 +359,8 @@ class CustomGroupBase(models.Model):
         :param max_rate: 上报最大速率
         :param enable_field_black_list: 是否开启黑名单
         :param data_label: 数据标签
+        :param options: 结果表选项内容，会与 enable_field_black_list 产生的选项合并，
+            若存在同名键则 enable_field_black_list 的值优先
         :return: True or raise
         """
         # 不可修改已删除的事件组
@@ -397,7 +417,6 @@ class CustomGroupBase(models.Model):
             logger.info(f"{self.__class__.__name__}->[{self.custom_group_id}] is updated by->[{operator}]")
 
         # 判断黑白名单是否发生变化
-        options: dict[str, Any] | None = None
         if enable_field_black_list is not None:
             current_enable_field_black_list_option = ResultTableOption.objects.filter(
                 table_id=self.table_id,
@@ -408,22 +427,30 @@ class CustomGroupBase(models.Model):
                 current_enable_field_black_list_option.get_value() if current_enable_field_black_list_option else None
             )
             if current_enable_field_black_list_option_value != enable_field_black_list:
-                # 获取当前结果表的option配置，options的更新必须提供所有option的配置
-                options = {
-                    option_obj.name: option_obj.get_value()
-                    for option_obj in ResultTableOption.objects.filter(
-                        table_id=self.table_id,
-                        bk_tenant_id=self.bk_tenant_id,
-                    )
-                }
+                if options is None:
+                    options = {}
                 options[ResultTableOption.OPTION_ENABLE_FIELD_BLACK_LIST] = enable_field_black_list
                 logger.info(
                     f"{self.__class__.__name__}->[{self.custom_group_id}] has change enable_field_black_list->[{enable_field_black_list}]"
                 )
 
+        # 合并结果表选项内容
+        rt_options: dict[str, Any] | None = None
+        if options is not None:
+            # 获取当前结果表的option配置
+            rt_options = {
+                option_obj.name: option_obj.get_value()
+                for option_obj in ResultTableOption.objects.filter(
+                    table_id=self.table_id,
+                    bk_tenant_id=self.bk_tenant_id,
+                )
+            }
+            # 合并结果表选项内容
+            rt_options.update(options)
+
         # 这里之前在split的情况下是不做field_list的更新的 之前的背景是会动态更新指标 而不应该用户去设置指标
         # 但是如果用户需要修改元信息的时候 会出现该接口无法更新的情况 所以这里先去掉这个限制
-        if field_list is not None or data_label is not None or options is not None:
+        if field_list is not None or data_label is not None or rt_options is not None:
             try:
                 rt = ResultTable.objects.get(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id)
             except ResultTable.DoesNotExist:
@@ -434,8 +461,8 @@ class CustomGroupBase(models.Model):
                 modify_params.update({"field_list": field_list, "is_time_field_only": True, "is_reserved_check": False})
             if data_label is not None:
                 modify_params["data_label"] = data_label
-            if options is not None:
-                modify_params["option"] = options
+            if rt_options is not None:
+                modify_params["option"] = rt_options
 
             if modify_params:
                 rt.modify(operator=operator, **modify_params)

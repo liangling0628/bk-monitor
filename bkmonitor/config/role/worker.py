@@ -20,9 +20,9 @@ from config.tools.redis import get_cache_redis_settings, get_redis_settings
 
 from ..tools.environment import (
     DJANGO_CONF_MODULE,
+    ENVIRONMENT,
     IS_CONTAINER_MODE,
     NEW_ENV,
-    ENVIRONMENT,
 )
 
 # 按照环境变量中的配置，加载对应的配置文件
@@ -44,7 +44,7 @@ SUPERVISOR_SERVER = "unix:///var/run/bkmonitorv3/monitor-supervisor.sock"
 SUPERVISOR_USERNAME = ""
 SUPERVISOR_PASSWORD = ""
 
-INSTALLED_APPS += (  # noqa: F405
+INSTALLED_APPS += (  # noqa: F405,F821
     "django_celery_beat",
     "django_celery_results",
     "django_elasticsearch_dsl",
@@ -139,6 +139,7 @@ DEFAULT_CRONTAB = [
     ("alarm_backends.core.cache.action_config.refresh_total", "*/60 * * * *", "global"),
     ("alarm_backends.core.cache.action_config.refresh_latest_5_minutes", "* * * * *", "global"),
     ("alarm_backends.core.cache.assign", "* * * * *", "global"),
+    # alarm_backends.core.cache.issue (StrategyIssueConfigCache) 已废弃，issue_config 合并进策略缓存
     ("alarm_backends.core.cache.calendar", "* * * * *", "global"),
     ("alarm_backends.core.cache.subscribe", "* * * * *", "global"),
     # api cache
@@ -150,6 +151,8 @@ DEFAULT_CRONTAB = [
     # clean detect result cache
     ("alarm_backends.core.detect_result.tasks.clean_expired_detect_result", "0 */2 * * *", "global"),
     ("alarm_backends.core.detect_result.tasks.clean_md5_to_dimension_cache", "0 23 * * *", "global"),
+    # clean new series(新维度值检测) seen cache: 按 max_series 收口
+    ("alarm_backends.core.detect_result.tasks.clean_new_series_seen_cache", "0 */2 * * *", "global"),
     # 定期清理超时未执行任务
     ("alarm_backends.service.fta_action.tasks.check_timeout_actions", "* * * * *", "global"),
     # 定期清理mysql内半个月前的数据
@@ -181,9 +184,11 @@ DEFAULT_CRONTAB = [
     ("apm.task.tasks.bmw_task_cron", "*/15 * * * *", "global"),
     # metadata 更新 bkcc 空间名称任务，因为不要求实时性，每6分钟执行一次
     ("metadata.task.sync_space.refresh_bkcc_space_name", "*/6 * * * *", "global"),
+    # metadata 全量刷新 ResourceDefinition/RelationDefinition 到 Redis 兜底任务，每10分钟一次
+    ("metadata.task.entity_relation.refresh_entity_definition_to_redis", "*/10 * * * *", "global"),
 ]
 
-if BCS_API_GATEWAY_HOST:
+if BCS_API_GATEWAY_HOST:  # noqa: F821
     DEFAULT_CRONTAB += [
         # bcs资源同步
         ("api.bcs.tasks.sync_bcs_cluster_to_db", "*/15 * * * *", "global"),
@@ -224,6 +229,10 @@ ACTION_TASK_CRONTAB = [
     ("alarm_backends.service.fta_action.tasks.dispatch_demo_action_tasks", "* * * * *", "global"),
     # 定期进行告警索引轮转 隔天创建，时间稍微拉长一点，避免短时间任务堵塞的时候容易过期，导致创建不成功
     ("bkmonitor.documents.tasks.rollover_indices", "*/24 * * * *", "global"),
+    # 定期同步活跃 Issue 的告警统计（含漏关联补偿和 orphan issue 检测）
+    ("alarm_backends.service.fta_action.tasks.sync_issue_alert_stats", "*/5 * * * *", "cluster"),
+    # 定期预计算 Issue LLM 标题 few-shot 示例缓存（用户改名采样）
+    ("alarm_backends.service.fta_action.tasks.refresh_issue_llm_title_examples", "0 * * * *", "cluster"),
     # 定期清理停用的ai 策略对应的flow任务(每天2点半)
     ("bkmonitor.management.commands.clean_aiflow.run_clean", "30 2 * * *", "global"),
     # aiops sdk策略历史依赖管理
@@ -306,11 +315,16 @@ LONG_TASK_CRONTAB = [
     ("metadata.task.bkbase.sync_bkbase_metadata_all", "0 */2 * * *", "global"),
     # BkBase RT 路由同步任务，6h一次
     ("metadata.task.bkbase.sync_bkbase_rt_meta_info_all", "0 */6 * * *", "global"),
+    # BkBase V4 链路组件与关系同步任务，30min
+    # ("metadata.task.bkbase.sync_bkbase_v4_datalink_components", "*/30 * * * *", "global"),
     # 禁用采集项索引清理任务，30min
     ("metadata.task.config_refresh.manage_disable_es_storage", "*/30 * * * *", "global"),
     # 新版链路状态自动兜底刷新,15min 一次
-    ("metadata.task.refresh_data_link.refresh_data_link_status", "*/15 * * * *", "global"),
+    ("metadata.task.refresh_data_link.refresh_data_link_status", "0 */4 * * *", "global"),
 ]
+
+# 排除特定的定时任务
+EXCLUDE_WORKER_TASKS = []
 
 AES_X_KEY_FIELD = "SAAS_SECRET_KEY"
 
@@ -376,7 +390,7 @@ LOGGING = {
     "disable_existing_loggers": False,
     "loggers": {
         "": {"level": LOGGER_LEVEL, "handlers": LOGGER_HANDLERS},
-        **{k: {"level": v, "handlers": LOGGER_HANDLERS} for k, v in LOG_LEVEL_MAP.items()},
+        **{k: {"level": v, "handlers": LOGGER_HANDLERS} for k, v in LOG_LEVEL_MAP.items()},  # noqa: F821
     },
     "handlers": {
         "console": {"class": "logging.StreamHandler", "level": LOGGER_LEVEL, "formatter": "standard"},
@@ -384,7 +398,7 @@ LOGGING = {
             "class": "logging.handlers.WatchedFileHandler",
             "level": LOGGER_LEVEL,
             "formatter": "standard",
-            "filename": os.path.join(LOG_PATH, f"{LOG_FILE_PREFIX}kernel.log"),
+            "filename": os.path.join(LOG_PATH, f"{LOG_FILE_PREFIX}kernel.log"),  # noqa: F821
             "encoding": "utf-8",
         },
     },
@@ -456,7 +470,8 @@ LICENSE_PORT = os.environ.get("BK_LICENSE_PORT", "8443")
 LICENSE_REQ_INTERVAL = [20, 60, 120]  # 连续请求n次，每次请求间隔(单位：秒)
 
 RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_VHOST, RABBITMQ_USER, RABBITMQ_PASS, _ = get_rabbitmq_settings(
-    app_code=APP_CODE, backend=True
+    app_code=APP_CODE,  # noqa: F821
+    backend=True,
 )
 
 # esb组件地址
@@ -529,6 +544,22 @@ QOS_DROP_ACTION_WINDOW = 60
 QOS_ALERT_THRESHOLD = 200
 # 处理动作流控窗口大小
 QOS_ALERT_WINDOW = 60
+
+# Issue 单策略活跃数观测阈值（warn-only，**不阻塞新建**）
+# 0 = 关闭观测；>0 = 单策略活跃 Issue 达此值后仅 metric + warning（继续创建新 Issue），
+# 避免触发后所有缺失 fingerprint 的告警永久失联。
+# 运维通过 `bkmonitor_issue_fingerprint_blocked{reason=high_cardinality}` 速率告警发现高基数策略
+# （metric 由 ISSUE_ACTIVE_COUNT_KEY 5min Redis cache 驱动，存在 ≤5min 滞后）。
+ISSUE_MAX_ACTIVE_PER_STRATEGY = 500
+
+# Issue LLM 标题生成动态配置的静态占位（值与 bkmonitor/define/global_config.py 的 serializer default 对齐）。
+# 必须保留：DynamicSettings.__getattr__ 读 DB 前先 getattr 静态 settings（dynamic_settings.py L74），
+# 缺占位会抛 AttributeError 短路掉 DB 查询，导致 GlobalConfig 页面改的值被静默忽略、功能无法开启。
+ISSUE_LLM_TITLE_BIZ_WHITE_LIST = []
+ISSUE_LLM_TITLE_BIZ_TEMPLATES = {}
+ISSUE_LLM_TITLE_SHADOW = False
+ISSUE_LLM_TITLE_MODEL = "hy3-preview"
+ISSUE_LLM_TITLE_RATE_LIMIT_PER_MINUTE = 100
 
 # 第三方事件接入白名单
 BIZ_WHITE_LIST_FOR_3RD_EVENT = []

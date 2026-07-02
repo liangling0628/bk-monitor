@@ -1,0 +1,61 @@
+.k8s-target-selector {
+  background: #fff;
+  border: 1px solid #c4c6cc;
+  border-radius: 2px;
+
+  .bk-select {
+    height: 32px;
+
+    &.popover-show {
+      .bk-select-trigger {
+        .trigger-suffix {
+          transform: rotate(180deg);
+        }
+      }
+    }
+
+    .bk-select-trigger {
+      height: 100%;
+      cursor: pointer;
+
+      .k8s-target-selector-trigger-container {
+        display: flex;
+        align-items: center;
+        height: 100%;
+        padding-right: 4px;
+        padding-left: 8px;
+        line-height: 20px;
+
+        .trigger-suffix {
+          flex-shrink: 0;
+          width: 20px;
+          height: 20px;
+          transition: 0.3s ease-in-out;
+
+          .icon-monitor {
+            font-size: 22px;
+            color: #979ba5;
+          }
+        }
+
+        .trigger-main {
+          flex: 1;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          color: #4d4f56;
+          white-space: nowrap;
+        }
+      }
+    }
+  }
+}
+
+.k8s-target-selector-popover {
+  .k8s-target-selector-item {
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

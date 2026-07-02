@@ -1,0 +1,184 @@
+.alarm-center-detail-alarm-alert {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  padding: 8px 16px 8px 12px;
+  margin-bottom: 16px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px 0 #0000000a;
+
+  .status-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+
+    .icon-monitor {
+      font-size: 20px;
+      vertical-align: middle;
+    }
+  }
+
+  .alert-content-wrap {
+    flex: 1;
+    margin-left: 8px;
+    overflow: hidden;
+
+    .alert-status-text {
+      display: flex;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 20px;
+
+      .separator {
+        width: 1px;
+        height: 12px;
+        margin: 0 8px;
+        background-color: #c1cde6;
+      }
+
+      .alarm-tips {
+        display: flex;
+        align-items: center;
+        font-weight: 400;
+        font-size: 11px;
+        min-width: fit-content;
+        color: #4e5e7a;
+
+        .icon-mc-time {
+          font-size: 10.5px;
+          margin-right: 4.5px;
+          vertical-align: middle;
+          color: #8f9fbd;
+        }
+
+        .shielded-duration {
+          font-weight: 600;
+          color: #f59500;
+        }
+
+        .duration-value {
+          font-weight: 600;
+        }
+      }
+    }
+
+    .alarm-content {
+      line-height: 20px;
+      font-size: 12px;
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #111214;
+    }
+  }
+
+  .tools {
+    display: flex;
+    align-items: center;
+    color: #3a84ff;
+
+    .bk-button {
+      margin-left: 16px;
+    }
+
+    .icon-mc-notice-shield {
+      font-size: 13px;
+    }
+
+    .icon-fenxiang {
+      font-size: 10px;
+    }
+
+    .btn-text {
+      margin-left: 5px;
+    }
+
+    .shield-btn {
+      .bk-button-text {
+        display: block;
+      }
+    }
+
+    .confirm-btn {
+      font-size: 12px;
+      height: 28px;
+      border-radius: 4px;
+    }
+  }
+
+  // 未恢复
+  &.ABNORMAL {
+    border-color: #ffd6d6;
+    background: #fff5f5;
+
+    .alert-status-title {
+      color: #c70003;
+    }
+
+    .status-icon {
+      color: #ea3636;
+      background-color: #ffdddd;
+      box-shadow: 0 2px 4px 0 #ea36360f;
+    }
+  }
+
+  // 未恢复（已屏蔽）
+  &.SHIELDED_ABNORMAL {
+    border-color: #f9d090;
+    background: #fdf4e8;
+
+    .alert-status-title {
+      color: #d68301;
+    }
+
+    .status-icon {
+      color: #d68301;
+      background-color: #fce5c0;
+      box-shadow: 0 2px 4px 0 #f595000f;
+    }
+  }
+
+  // 已恢复
+  &.RECOVERED {
+    border-color: #a1e3ba;
+    background: #ebfaf0;
+
+    .alert-status-title {
+      color: #299e56;
+    }
+
+    .status-icon {
+      color: #2caf5e;
+      background-color: #cbf0da;
+      box-shadow: 0 2px 4px 0 #2caf5e0f;
+    }
+  }
+
+  // 已失效
+  &.CLOSED {
+    border-color: #c9d6f0;
+    background: #f7f9fc;
+
+    .alert-status-title {
+      color: #4e5e7a;
+    }
+
+    .status-icon {
+      color: #8f9fbd;
+      background-color: #e4e9f2;
+      box-shadow: 0 2px 4px 0 #2caf5e0f;
+    }
+  }
+}
+
+.bk-popover.bk-pop2-content.alarm-alert-monitor-data-popover {
+  padding: 0;
+  overflow: hidden;
+  box-shadow: 0 2px 12px 0 #0003;
+}

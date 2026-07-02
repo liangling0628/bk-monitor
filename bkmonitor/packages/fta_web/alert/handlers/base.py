@@ -8,10 +8,13 @@ an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express o
 specific language governing permissions and limitations under the License.
 """
 
+import operator
 import time
 from abc import ABC
 from collections.abc import Callable, Iterable
+from functools import reduce
 
+from django.utils import translation as dj_translation
 from django.utils.translation import gettext as _
 from elasticsearch_dsl import AttrDict, Q, Search
 from elasticsearch_dsl.aggs import Bucket
@@ -29,6 +32,20 @@ from constants.alert import EventTargetType
 from core.drf_resource import resource
 from core.errors.alert import QueryStringParseError
 from fta_web.alert.handlers.translator import AbstractTranslator
+
+# 模块级字段映射缓存，key 为 Transformer 类对象，保证每个子类独立缓存。
+# 构建时覆盖所有支持语言的 display name，使字段解析与当前线程语言无关。
+_FIELD_MAP_CACHE: dict[type, dict[str, "QueryField"]] = {}
+ES_TERMS_QUERY_MAX_SIZE = 65536
+
+
+def build_es_terms_query(field: str, values: list, chunk_size: int = ES_TERMS_QUERY_MAX_SIZE):
+    values = list(values or [])
+    if not values:
+        return None
+
+    queries = [Q("terms", **{field: values[index : index + chunk_size]}) for index in range(0, len(values), chunk_size)]
+    return reduce(operator.or_, queries)
 
 
 class QueryField:
@@ -161,11 +178,50 @@ class BaseQueryTransformer(BaseTreeTransformer):
         return str(query_tree)
 
     @classmethod
-    def get_field_info(cls, field: str) -> QueryField | None:
-        """查询 QueryField"""
+    def _build_field_map(cls) -> dict[str, "QueryField"]:
+        """
+        构建字段名 → QueryField 的全语言映射表，首次使用时构建一次。
+
+        对每个 QueryField 写入三类 key（首次匹配优先，与原始循环语义一致）：
+          1. field_info.field        —— ES 底层字段名（英文），始终有效
+          2. override(None)          —— NullTranslations 返回原始 msgid
+          3. override(lang_code)     —— 枚举 settings.LANGUAGES 中所有语言的翻译
+
+        这样无论 ApiLanguageMiddleware 将线程语言切换到何种语言，
+        前端传入的字段名（中文/英文/ES字段名）均能正确命中对应 QueryField。
+        """
+        from django.conf import settings
+
+        field_map: dict[str, QueryField] = {}
         for field_info in cls.query_fields:
-            if field_info.searchable and field in [field_info.field, str(field_info.display), _(field_info.display)]:
-                return field_info
+            if not field_info.searchable:
+                continue
+
+            # 1. ES 底层字段名
+            if field_info.field not in field_map:
+                field_map[field_info.field] = field_info
+
+            # 2. 原始 msgid（NullTranslations 不做任何翻译，直接返回 msgid）
+            with dj_translation.override(None):
+                name = str(field_info.display)
+                if name not in field_map:
+                    field_map[name] = field_info
+
+            # 3. 各支持语言的翻译版本（含 zh-hans 中文、en 英文等）
+            for lang_code, _lang_name in settings.LANGUAGES:
+                with dj_translation.override(lang_code):
+                    name = str(field_info.display)
+                    if name not in field_map:
+                        field_map[name] = field_info
+
+        return field_map
+
+    @classmethod
+    def get_field_info(cls, field: str) -> QueryField | None:
+        """查询 QueryField（与当前线程语言无关）"""
+        if cls not in _FIELD_MAP_CACHE:
+            _FIELD_MAP_CACHE[cls] = cls._build_field_map()
+        return _FIELD_MAP_CACHE[cls].get(field)
 
     @classmethod
     def transform_field_to_es_field(cls, field: str, for_agg=False):
@@ -658,6 +714,8 @@ class BaseQueryHandler:
 
 
 class BaseBizQueryHandler(BaseQueryHandler, ABC):
+    ES_TERMS_QUERY_MAX_SIZE = ES_TERMS_QUERY_MAX_SIZE
+
     def __init__(
         self,
         bk_biz_ids: list[int] = None,
@@ -665,7 +723,13 @@ class BaseBizQueryHandler(BaseQueryHandler, ABC):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # bk_biz_ids：原始请求入参，可能含 -1（"全部授权业务"哨兵）。
+        # 禁止直接用于 ES/DB 按业务过滤（terms / __in）——不存在 bk_biz_id=-1 的数据会查空。
+        #    简单过滤取值用 get_biz_filter_ids()（已解析 -1）；告警可见性用 add_biz_condition。
+        #    仅可用于"是否带业务范围"的意图判断（if self.bk_biz_ids / if not self.bk_biz_ids）。
         self.bk_biz_ids = bk_biz_ids
+        # authorized_bizs：解析后、按权限收敛的具体业务集（-1 已展开）。
+        # unauthorized_bizs：请求了但当前用户无权限的业务（配合负责人条件做有限可见）。
         self.authorized_bizs = self.bk_biz_ids
         self.unauthorized_bizs = []
         self.username = username
@@ -676,8 +740,8 @@ class BaseBizQueryHandler(BaseQueryHandler, ABC):
     @classmethod
     def parse_biz_item(self, bk_biz_ids, **kwargs):
         if "authorized_bizs" in kwargs:
-            authorized_bizs = kwargs["authorized_bizs"] or bk_biz_ids
-            unauthorized_bizs = kwargs["unauthorized_bizs"] or []
+            authorized_bizs = kwargs["authorized_bizs"] if kwargs["authorized_bizs"] is not None else bk_biz_ids
+            unauthorized_bizs = kwargs["unauthorized_bizs"] if kwargs["unauthorized_bizs"] is not None else []
         else:
             try:
                 req = get_request()
@@ -688,6 +752,33 @@ class BaseBizQueryHandler(BaseQueryHandler, ABC):
                 authorized_bizs = list(set(bk_biz_ids) & set(authorized_bizs))
             unauthorized_bizs = list(set(bk_biz_ids or []) - set(authorized_bizs))
         return authorized_bizs, unauthorized_bizs
+
+    def build_es_terms_query(self, field: str, values: list):
+        return build_es_terms_query(field, values, chunk_size=self.ES_TERMS_QUERY_MAX_SIZE)
+
+    def get_biz_filter_ids(self) -> list[int] | None:
+        """返回用于「按业务过滤」的已解析业务 ID 列表（-1 哨兵已展开为实际授权业务集）。
+
+        用途：临时的简单按业务过滤（ES ``terms`` / ORM ``__in``）取值，替代直接使用
+        ``self.bk_biz_ids``——后者可能含 -1（"全部授权业务"哨兵），ES/DB 中不存在
+        bk_biz_id=-1 的数据，直接过滤会查空（历史上 #10206、合并告警聚合等多次踩坑）。
+
+        语义（与现网既有惯用法一致，迁移零行为变更）：
+        - 请求未带业务范围（bk_biz_ids 为空）→ 返回 None，调用方据此走兜底分支
+          （等价 ``if not self.bk_biz_ids``）。
+        - 含 -1 → 用 authorized_bizs（已解析的实际授权业务集）。
+        - 不含 -1 → 用请求业务集（权限交由上游 / 各自 add_biz_condition 把关）。
+        - 末尾剔除残留 -1（无 request 上下文时 parse_biz_item 可能原样返回带 -1 的入参）。
+
+        注意：不替代 ``add_biz_condition``：告警/Issue 的完整可见性是三路模型
+        （authorized ∪ unauthorized+负责人 ∪ 无业务→我的），ES 可见性过滤仍走它。
+        注意：大集合 + ES ``terms``：authorized_bizs 在 admin 下可能超过上限(65536)，
+        ES 侧请用 ``build_es_terms_query`` 分块，勿直接塞进 ``.filter("terms", ...)``。
+        """
+        if not self.bk_biz_ids:
+            return None
+        biz_ids = self.authorized_bizs if -1 in self.bk_biz_ids else self.bk_biz_ids
+        return [b for b in (biz_ids or []) if b != -1]
 
 
 class QueryBuilder(ElasticsearchQueryBuilder):

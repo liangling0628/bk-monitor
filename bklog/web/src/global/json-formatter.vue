@@ -36,7 +36,7 @@
         >
       </span>
     </template>
-    <template v-if="showMoreTextAction && hasScrollY">
+    <template v-if="showMoreAction">
       <span
         class="btn-more-action"
         @mouseup="handleMouseUp"
@@ -52,16 +52,16 @@
 
   // @ts-ignore
   import { getRowFieldValue } from '@/common/util';
-import useFieldNameHook from '@/hooks/use-field-name';
+  import useFieldNameHook from '@/hooks/use-field-name';
 
   import useLocale from '@/hooks/use-locale';
-import useRetrieveEvent from '@/hooks/use-retrieve-event';
-import JSONBig from 'json-bigint';
-import { debounce, isEmpty } from 'lodash-es';
-import useJsonRoot from '../hooks/use-json-root';
-import useStore from '../hooks/use-store';
-import { BK_LOG_STORAGE } from '../store/store.type';
-import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
+  import useRetrieveEvent from '@/hooks/use-retrieve-event';
+  import JSONBig from 'json-bigint';
+  import { debounce, isEmpty } from 'lodash-es';
+  import useJsonRoot from '../hooks/use-json-root';
+  import useStore from '../hooks/use-store';
+  import { BK_LOG_STORAGE } from '../store/store.type';
+  import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
 
   const emit = defineEmits(['menu-click']);
   const store = useStore();
@@ -95,6 +95,14 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
   const isWrap = computed(() => store.state.storage[BK_LOG_STORAGE.TABLE_LINE_IS_WRAP]);
   const isLimitExpandText = computed(() => store.state.storage[BK_LOG_STORAGE.IS_LIMIT_EXPAND_VIEW]);
   const formatJson = computed(() => store.state.storage[BK_LOG_STORAGE.TABLE_JSON_FORMAT]);
+  const limitRowNumber = computed(() => {
+    if (props.limitRow === null || props.limitRow === undefined || props.limitRow === '') {
+      return null;
+    }
+
+    const limitRow = Number(props.limitRow);
+    return Number.isFinite(limitRow) && limitRow > 0 ? limitRow : null;
+  });
 
   const isCurrentCellExpandText = computed(() => {
     if (isLimitExpandText.value) {
@@ -105,21 +113,15 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
   });
 
   const rootElementStyle = computed(() => {
-    if (formatJson.value) {
-      return {
-        maxHeight: undefined,
-      };
-    }
-
     if (isCurrentCellExpandText.value) {
       return {
         maxHeight: '50vh',
       };
     }
 
-    if (typeof props.limitRow === 'number') {
+    if (limitRowNumber.value !== null) {
       return {
-        maxHeight: `${20 * props.limitRow}px`,
+        maxHeight: `${20 * limitRowNumber.value}px`,
       };
     }
 
@@ -137,12 +139,14 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
   });
 
   const showMoreTextAction = computed(() => {
-    if (typeof props.limitRow === 'number' && !formatJson.value && !isLimitExpandText.value) {
+    if (limitRowNumber.value !== null && !isLimitExpandText.value) {
       return true;
     }
 
     return false;
   });
+
+  const showMoreAction = computed(() => showMoreTextAction.value && (hasScrollY.value || showAllText.value));
 
   const showAllWords = computed(() => {
     return !showMoreTextAction.value || showAllText.value;
@@ -167,6 +171,7 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
     e.stopImmediatePropagation();
     if (mousedownItem === e.target) {
       showAllText.value = !showAllText.value;
+      scheduleSetIsOverflowY();
     }
 
     mousedownItem = null;
@@ -175,9 +180,17 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
   const onSegmentClick = args => {
     emit('menu-click', args);
   };
+  const scheduleSetIsOverflowY = () => {
+    nextTick(() => {
+      requestAnimationFrame(() => {
+        setIsOverflowY();
+      });
+    });
+  };
   const { updateRootFieldOperator, setExpand, setEditor, destroy } = useJsonRoot({
     fields: fieldList.value,
     onSegmentClick,
+    onSegmentRenderUpdate: scheduleSetIsOverflowY,
   });
 
   const convertToObject = val => {
@@ -200,8 +213,14 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
   };
 
   const getDateFieldValue = (field, content, formatDate) => {
-    if (formatDate) {
-      return RetrieveHelper.formatDateValue(content, field.field_type);
+    if (content === null || content === undefined || content === '' || content === '--') {
+      return '--';
+    }
+
+    if (formatDate && ['date_nanos', 'date'].includes(field.field_type)) {
+      const timezone = store.state.indexItem.timezone;
+      const formatValue = RetrieveHelper.formatTimeZoneValue(content, field.field_type, timezone);
+      return formatValue === 'Invalid Date' ? content : formatValue;
     }
 
     return content;
@@ -299,12 +318,14 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
     hasScrollY.value = false;
   };
 
-  watch(() => [props.limitRow], () => {
-    showAllText.value = false;
-    nextTick(() => {
-      setIsOverflowY();
-    });
-  });
+  watch(
+    () => [props.limitRow, props.jsonValue, props.fields, isLimitExpandText.value, isFormatDateField.value],
+    () => {
+      showAllText.value = false;
+      hasScrollY.value = false;
+      scheduleSetIsOverflowY();
+    },
+  );
 
   watch(
     () => [isRowIntersecting.value],
@@ -352,7 +373,7 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
     position: relative;
     width: 100%;
     overflow: hidden;
-    font-family: var(--table-fount-family);
+    font-family: var(--bklog-v3-row-ctx-font);
     font-size: var(--table-fount-size);
     line-height: 20px;
     color: var(--table-fount-color);
@@ -375,7 +396,8 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
     }
 
     mark {
-      border-radius: 2px;
+      border-radius: 4px;
+      padding: 1px 2px;
     }
 
     .btn-more-action {
@@ -388,9 +410,9 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
     }
 
     .bklog-root-field {
+      display: inline-block; // 修复内联元素基线对齐导致的 1px 差异
       margin-right: 4px;
       line-height: 20px;
-      display: inline-block; // 修复内联元素基线对齐导致的 1px 差异
       vertical-align: top; // 确保顶部对齐，避免基线对齐问题
 
       .bklog-json-view-row {
@@ -404,21 +426,21 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
         white-space: pre-wrap;
       }
 
-      &:not(:first-child) {
-        margin-top: 1px;
-      }
+      // &:not(:first-child) {
+      //   margin-top: 1px;
+      // }
 
       .field-name {
         min-width: max-content;
 
         .black-mark {
           width: max-content;
-          padding: 2px 2px;
+          padding: 1px 2px;
           font-family: var(--bklog-v3-row-tag-font);
           font-weight: 500;
           color: #16171a;
           background-color: #ebeef5;
-          border-radius: 2px;
+          border-radius: 4px;
         }
 
         &::after {
@@ -516,8 +538,8 @@ import RetrieveHelper, { RetrieveEvent } from '../views/retrieve-helper';
     &.is-inline {
       .bklog-root-field {
         display: inline-flex;
-        vertical-align: top; // 确保顶部对齐，避免基线对齐问题
         word-break: break-all;
+        vertical-align: top; // 确保顶部对齐，避免基线对齐问题
 
         .segment-content {
           word-break: break-all;

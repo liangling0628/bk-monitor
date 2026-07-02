@@ -26,7 +26,6 @@ from alarm_backends.service.access.data.records import DataRecord
 from alarm_backends.service.detect import AnomalyDataPoint, DataPoint
 from alarm_backends.templatetags.unit import unit_auto_convert, unit_convert_min
 from constants.aiops import SDKDetectStatus
-from constants.strategy import OS_RESTART_METRIC_ID
 from core.errors.alarm_backends.detect import (
     HistoryDataNotExists,
     InvalidAlgorithmsConfig,
@@ -123,7 +122,8 @@ class Algorithms:
         if not self.desc_tpl:
             return ""
         context = Context(self.get_context(data_point))
-        return Template(self.desc_tpl).render(context)
+        # 这里的模板固定可控，但是安全扫描提示风险，因此添加忽略
+        return Template(self.desc_tpl).render(context)  # nosec
 
     def detect_records(self, data_points, level):
         """
@@ -300,9 +300,6 @@ class HistoryPointFetcher:
 
     def query_history_points(self, data_points):
         item = data_points[0].item
-        # os_restart 策略优化
-        if item.query_configs[0]["metric_id"] == OS_RESTART_METRIC_ID:
-            item.query.expression = "a"
         # 按时间从小到大排序
         sorted_data_points = sorted(data_points, key=lambda x: x.timestamp)
         offsets = self.get_history_offsets(item)
@@ -334,6 +331,22 @@ class HistoryPointFetcher:
                 continue
 
             item_records = item.query_record(from_timestamp, until_timestamp)
+            if item.query.is_partial:
+                # 历史数据查询结果不完整（VM vmstorage 节点临时不可用），跳过本次缓存写入，等待下个周期重新触发。
+                # is_partial=True 由 unify-query 透传自 VictoriaMetrics：vmselect 在查询时发现有 vmstorage 节点
+                # 不可达，无法获取完整数据，故将结果标记为 partial。节点恢复后下个周期可正常查询。
+                # 影响：本批次依赖该 offset 历史数据的环比/同比检测失效（漏报 1 个 agg_interval），
+                #       下个周期 cache miss 后重新查询，存储恢复后自动恢复正常。
+                #       静态阈值（Threshold）等不依赖历史数据的算法不受影响。
+                logger.warning(
+                    "strategy(%s) item(%s) history query is partial, skip cache writing, time_range(%s, %s)",
+                    item.strategy.id,
+                    item.id,
+                    from_timestamp,
+                    until_timestamp,
+                )
+                continue
+
             for record in item_records:
                 point = DataRecord(item, record)
                 if point.value:
@@ -497,6 +510,7 @@ class SDKPreDetectMixin:
         predict_result = self.PREDICT_FUNC(
             data=[{"value": data_point.value, "timestamp": data_point.timestamp * 1000}],
             dimensions=self.generate_dimensions(data_point),
+            bk_tenant_id=data_point.item.bk_tenant_id,
             **self.generate_sdk_predict_params(),
         )
         dimension_fields = getattr(data_point, "dimension_fields", None) or list(data_point.dimensions.keys())
@@ -597,6 +611,7 @@ class SDKPreDetectMixin:
                         self.PREDICT_FUNC,
                         **predict_input,
                         interval=int(data_points[0].item.query_configs[0]["agg_interval"]),
+                        bk_tenant_id=item.bk_tenant_id,
                         **self.generate_sdk_predict_params(),
                     )
                 )

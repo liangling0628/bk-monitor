@@ -40,11 +40,14 @@ declare global {
     __POWERED_BY_BK_WEWEB__?: boolean;
     AJAX_URL_PREFIX: string;
     apm_ebpf_enabled: boolean;
+    // APM 监控相关
+    APM_QUERY_STRING?: string;
     bk_biz_id: number | string;
     bk_biz_list: IBizItem[];
     BK_DOC_URL?: string;
     bk_doc_version: string;
     bk_docs_site_url: string;
+    bk_incident_saas_host: string;
     bk_log_search_url: string;
     bk_url: string;
     bkchat_manage_url: string;
@@ -61,6 +64,7 @@ declare global {
     i18n: typeof i18n.global;
     // 以下为日志全局变量配置
     mainComponent: any;
+
     rawWindow?: Window;
     site_url: string;
     source_app: string;

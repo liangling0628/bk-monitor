@@ -396,10 +396,48 @@ CHECK_RESULT_CACHE_KEY = register_key_with_config(
         "(score: 数据时间戳(int), name：正常->'timestamp|value' 异常: 'timestamp|{ANOMALY_LABEL}')",
         "key_type": "sorted_set",
         # 这里的key_tpl修改后，需要同步修改LAST_CHECKPOINTS_CACHE_KEY的field_tpl
-        "key_tpl": "{prefix}.detect.result.{{strategy_id}}.{{item_id}}.{{dimensions_md5}}.{{level}}".format(
-            prefix=KEY_PREFIX
-        ),
+        "key_tpl": f"{KEY_PREFIX}.detect.result.{{strategy_id}}.{{item_id}}.{{dimensions_md5}}.{{level}}",
         "ttl": int(settings.CHECK_RESULT_TTL_HOURS) * CONST_ONE_HOUR,
+        "backend": "service",
+    }
+)
+
+# 新维度值检测(NewSeries)：记录某策略某 item 在某维度集合签名下，每个维度组合(指纹=record_id 前段)最近一次出现的时间戳。
+# member=维度指纹, score=该维度最近出现的数据时间戳。判定"新维度": now - score > detect_range 或 member 不存在。
+# key 含 dimension_signature(agg_dimension 列表的稳定 md5)：维度集合变更即落新 key，旧 key 不被读、不占新容量，随软 TTL 回收。
+# 注意：真实 TTL 在写入时由 detector 用 client.expire(key, detect_range*2) 续期(必须 >= detect_range)，
+# 此处注册的 ttl 仅作占位(KEY.expire() 会用注册 ttl，故 detector 不调它)。
+NEW_SERIES_SEEN_KEY = register_key_with_config(
+    {
+        "label": "[detect]新维度值检测-已见维度集合(type:SortedSet)"
+        "(score: 维度最近出现时间戳(int), member: 维度指纹(record_id 前段))",
+        "key_type": "sorted_set",
+        "key_tpl": f"{KEY_PREFIX}.detect.new_series.seen.{{strategy_id}}.{{item_id}}.{{dimension_signature}}",
+        "ttl": TTL_NOT_SET,
+        "backend": "service",
+    }
+)
+
+# 新维度值检测-学习起点：历史兼容 key。旧版本用它记录 wall-clock 学习起点；新版本只用它判断旧策略已完成基线。
+# 与 seen key 同维度签名、同写入续期、一起过期。
+NEW_SERIES_LEARN_START_KEY = register_key_with_config(
+    {
+        "label": "[detect]新维度值检测-学习起点时间戳(type:String)(value: 冷启动学习起点 wall-clock 秒)",
+        "key_type": "string",
+        "key_tpl": f"{KEY_PREFIX}.detect.new_series.learn_start.{{strategy_id}}.{{item_id}}.{{dimension_signature}}",
+        "ttl": TTL_NOT_SET,
+        "backend": "service",
+    }
+)
+
+# 新维度值检测-基线完成标记：首次拉取成功写入此 key 后完成基线。空批次也写此 key；非空批次 seen 写成功后再写。
+# 旧 NEW_SERIES_LEARN_START_KEY 存在时也视为已完成基线，用于兼容存量策略。
+NEW_SERIES_BASELINE_DONE_KEY = register_key_with_config(
+    {
+        "label": "[detect]新维度值检测-基线完成标记(type:String)(value: 1)",
+        "key_type": "string",
+        "key_tpl": f"{KEY_PREFIX}.detect.new_series.baseline_done.{{strategy_id}}.{{item_id}}.{{dimension_signature}}",
+        "ttl": TTL_NOT_SET,
         "backend": "service",
     }
 )
@@ -449,7 +487,7 @@ SERVICE_LOCK_NODATA = register_key_with_config(
         "label": "nodata.lock.strategy_{strategy_id}",
         "key_type": "string",
         "key_tpl": "detect.lock.{strategy_id}",
-        "ttl": CONST_MINUTES,
+        "ttl": 3 * CONST_MINUTES,  # 从1分钟改为3分钟,防御大策略处理超时
         "backend": "service",
     }
 )
@@ -500,6 +538,16 @@ SERVICE_LOCK_PREPARATION = register_key_with_config(
         "key_type": "string",
         "key_tpl": "preparation.lock.{strategy_id}",
         "ttl": CONST_ONE_HOUR * 12,
+        "backend": "service",
+    }
+)
+
+SERVICE_LOCK_METADATA_MANAGE_ES_STORAGE = register_key_with_config(
+    {
+        "label": "[metadata]ES索引轮转集群锁",
+        "key_type": "string",
+        "key_tpl": "metadata.manage_es_storage.lock.{cluster_id}",
+        "ttl": CONST_ONE_HOUR,
         "backend": "service",
     }
 )
@@ -997,6 +1045,111 @@ ACCESS_BATCH_DATA_RESULT_KEY = register_key_with_config(
         "key_type": "list",
         "key_tpl": "access.batch.result.{strategy_group_key}.{timestamp}",
         "ttl": 300,
+        "backend": "service",
+    }
+)
+
+ISSUE_ACTIVE_CONTENT_KEY = register_key_with_config(
+    {
+        "label": "[issue]活跃Issue热缓存",
+        "key_type": "string",
+        # 路由参数从 strategy_id 升级为 fingerprint：
+        # 一个策略下按 issue 配置的 aggregate_dimensions 取值组合切分多个活跃 Issue。
+        # aggregate_dimensions=[] 时 fingerprint 退化为 "strategy:{strategy_id}"，行为与旧版本兼容。
+        "key_tpl": "issue.active.content.{fingerprint}",
+        "ttl": 30 * CONST_MINUTES,
+        "backend": "service",
+    }
+)
+
+TRIGGER_EVENT_RATE_LIMIT_KEY = register_key_with_config(
+    {
+        "label": "[trigger]策略+item+数据时间戳 event 限流计数器",
+        "key_type": "string",
+        "key_tpl": "trigger.event.rate_limit.{strategy_id}.{item_id}.{source_time}",
+        "ttl": 10 * CONST_MINUTES,
+        "backend": "service",
+    }
+)
+
+ISSUE_STRATEGY_LOCK = register_key_with_config(
+    {
+        # DEPRECATED：fingerprint 改造后 Issue 创建锁按 fingerprint 路由，
+        # 此 key 不再被代码引用，保留注册仅为兼容回滚场景；后续清理。
+        "label": "[issue][DEPRECATED]Issue策略级分布式锁",
+        "key_type": "string",
+        "key_tpl": "issue.strategy.lock.{strategy_id}",
+        "ttl": 60,
+        "backend": "service",
+    }
+)
+
+ISSUE_FINGERPRINT_LOCK = register_key_with_config(
+    {
+        "label": "[issue]Issue指纹级分布式锁",
+        "key_type": "string",
+        # 创建 Issue 时按 fingerprint 抢锁：不同 fingerprint 互不阻塞，
+        # 同 fingerprint 的并发告警保证只有一个进程进入新建路径。
+        "key_tpl": "issue.fingerprint.lock.{fingerprint}",
+        "ttl": 60,
+        "backend": "service",
+    }
+)
+
+ISSUE_ACTIVE_COUNT_KEY = register_key_with_config(
+    {
+        "label": "[issue]单策略活跃 Issue 数缓存（high_cardinality 熔断观测用）",
+        "key_type": "string",
+        # 5min cache，避免 _check_active_issue_count 每条新告警都打 ES count 成为热点
+        "key_tpl": "issue.active_count.{strategy_id}",
+        "ttl": 5 * CONST_MINUTES,
+        "backend": "service",
+    }
+)
+
+ISSUE_LEGACY_MIGRATION_DONE_KEY = register_key_with_config(
+    {
+        "label": "[issue]legacy 迁移完成全局哨兵（processor 跳过 legacy fallback ES 查询）",
+        "key_type": "string",
+        # 全局单 key（无路由参数）；migrate_legacy_active_issues 完成时 set，
+        # processor 看到该哨兵 → 跳过 _find_active_issue 的 Step 2 legacy fallback，
+        # 避免迁移完成后每个新 fingerprint 仍打 2 次 fingerprint=null 全索引查询。
+        # 长 TTL 跨多次重启不失效；migrate 重跑会刷新 TTL；Redis 故障 fail-open 走 fallback。
+        "key_tpl": "issue.legacy_migration.done",
+        "ttl": 30 * CONST_ONE_DAY,
+        "backend": "service",
+    }
+)
+
+ISSUE_LLM_EXAMPLES_STRATEGY_KEY = register_key_with_config(
+    {
+        "label": "[issue]LLM 标题 few-shot 示例缓存（strategy 级）",
+        "key_type": "string",
+        # 周期任务 refresh_issue_llm_title_examples 预计算写入（用户改名采样），
+        # 标题生成读路径纯 GET、miss 不回查 ES。
+        # TTL 取刷新周期（1h）的 24 倍：周期任务挂掉缓存自然过期，读路径自动退静态示例。
+        "key_tpl": "issue.llm_title.examples.strategy.{strategy_id}",
+        "ttl": CONST_ONE_DAY,
+        "backend": "service",
+    }
+)
+
+ISSUE_LLM_EXAMPLES_BIZ_KEY = register_key_with_config(
+    {
+        "label": "[issue]LLM 标题 few-shot 示例缓存（biz 级）",
+        "key_type": "string",
+        "key_tpl": "issue.llm_title.examples.biz.{bk_biz_id}",
+        "ttl": CONST_ONE_DAY,
+        "backend": "service",
+    }
+)
+
+ISSUE_LLM_TITLE_RATE_LIMIT_KEY = register_key_with_config(
+    {
+        "label": "[issue]LLM 标题生成业务级固定窗口限流计数器",
+        "key_type": "string",
+        "key_tpl": "issue.llm_title.ratelimit.{bk_biz_id}.{minute}",
+        "ttl": 2 * CONST_MINUTES,
         "backend": "service",
     }
 )

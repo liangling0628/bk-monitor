@@ -1,0 +1,25 @@
+.alarm-center-detail-panel-convergent-alarm {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid #e4e9f2;
+  background: #fff;
+  box-shadow: 0 1px 2px 0 #1919290a;
+
+  .search-input {
+    margin-bottom: 16px;
+  }
+
+  .bk-pagination {
+    padding: 0 16px;
+    margin-top: 10px;
+
+    .bk-pagination-total {
+      align-items: center;
+    }
+
+    .bk-pagination-list {
+      margin-left: auto;
+    }
+  }
+}

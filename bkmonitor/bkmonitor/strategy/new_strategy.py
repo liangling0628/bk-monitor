@@ -14,6 +14,7 @@ import json
 import logging
 import traceback
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from functools import partial, reduce
 from itertools import chain, permutations
@@ -62,6 +63,7 @@ from bkmonitor.strategy.serializers import (
     AbnormalClusterSerializer,
     AdvancedRingRatioSerializer,
     AdvancedYearRoundSerializer,
+    AIServiceControlMixin,
     BkApmTimeSeriesSerializer,
     BkApmTraceSerializer,
     BkDataTimeSeriesSerializer,
@@ -1015,6 +1017,95 @@ class Algorithm(AbstractConfig):
         )
         self.id = algorithm.id
 
+    @staticmethod
+    def _get_serializer_field_default(serializer_class, field_name: str):
+        """
+        获取算法配置 serializer 字段默认值。
+        """
+        if not serializer_class:
+            return serializers.empty
+
+        serializer = serializer_class()
+        if not hasattr(serializer, "fields"):
+            return serializers.empty
+
+        field = serializer.fields.get(field_name)
+        if not field or field.default is serializers.empty:
+            return serializers.empty
+
+        if callable(field.default):
+            return field.default()
+        return copy.deepcopy(field.default)
+
+    @staticmethod
+    def _get_ai_service_control_field_names(serializer_class) -> set:
+        """
+        获取当前算法 serializer 中由 AIServiceControlMixin 提供的控制字段。
+        """
+        if not serializer_class:
+            return set()
+
+        if isinstance(serializer_class, partial):
+            serializer_class = serializer_class.func
+
+        if not isinstance(serializer_class, type) or not issubclass(serializer_class, AIServiceControlMixin):
+            return set()
+
+        return set(AIServiceControlMixin().fields.keys())
+
+    @classmethod
+    def _merge_config_dict(cls, base_config: Mapping, request_config: Mapping, serializer_class=None) -> dict:
+        """
+        以数据库配置为基准合并请求配置，避免页面默认值覆盖后台调优参数。
+        """
+        merged_config = copy.deepcopy(base_config)
+
+        for key, value in request_config.items():
+            field_default = cls._get_serializer_field_default(serializer_class, key)
+            if key in merged_config and field_default is not serializers.empty and value == field_default:
+                continue
+
+            if isinstance(merged_config.get(key), Mapping) and isinstance(value, Mapping):
+                merged_config[key] = cls._merge_config_dict(merged_config[key], value)
+            else:
+                merged_config[key] = copy.deepcopy(value)
+
+        return merged_config
+
+    def _merge_with_db_config(self, algorithm: AlgorithmModel):
+        """
+        基于已有算法配置合并本次保存的配置。
+        """
+        if (
+            algorithm.type != self.type
+            or not isinstance(algorithm.config, Mapping)
+            or not isinstance(self.config, Mapping)
+        ):
+            return self.config
+
+        serializer_class = self.Serializer.AlgorithmSerializers.get(self.type)
+        merged_config = copy.deepcopy(self.config)
+
+        if isinstance(algorithm.config.get("args"), Mapping) and isinstance(self.config.get("args"), Mapping):
+            merged_config["args"] = {**copy.deepcopy(algorithm.config["args"]), **copy.deepcopy(self.config["args"])}
+
+        ai_service_control_field_names = self._get_ai_service_control_field_names(serializer_class)
+        if not ai_service_control_field_names:
+            return merged_config
+
+        base_ai_service_control_config = {
+            key: value for key, value in algorithm.config.items() if key in ai_service_control_field_names
+        }
+        request_ai_service_control_config = {
+            key: value for key, value in self.config.items() if key in ai_service_control_field_names
+        }
+        merged_ai_service_control_config = self._merge_config_dict(
+            base_ai_service_control_config, request_ai_service_control_config, AIServiceControlMixin
+        )
+
+        merged_config.update(merged_ai_service_control_config)
+        return merged_config
+
     def save(self):
         try:
             if self.id > 0:
@@ -1027,8 +1118,9 @@ class Algorithm(AbstractConfig):
         except AlgorithmModel.DoesNotExist:
             self._create()
         else:
+            merged_config = self._merge_with_db_config(algorithm)
             algorithm.type = self.type
-            algorithm.config = self.config
+            algorithm.config = merged_config
             algorithm.unit_prefix = self.unit_prefix
             algorithm.level = self.level
             algorithm.save()
@@ -1658,6 +1750,140 @@ class Item(AbstractConfig):
         return records
 
 
+class _Empty:
+    """用于区分"字段未传"与"显式传 None"的 sentinel 对象。"""
+
+
+ISSUE_CONFIG_EMPTY = _Empty()
+
+
+class IssueConfig:
+    """Issues 聚合配置，挂在 Strategy 对象上，与 ActionRelation 并列。
+
+    生命周期完全由 Strategy.save() / Strategy.delete() 驱动，
+    不应通过 StrategyIssueConfigService.save() 对外操作。
+
+    校验逻辑（跨模型约束 + 字段级合法性）内聚在 validate() 方法中，
+    由 Strategy.save_issue_config() 在保存前统一调用，
+    可平替 SaveStrategyV2Resource.validate_issue_config。
+    """
+
+    VALID_CONDITION_METHODS = {"eq", "neq", "include", "exclude", "reg", "nreg"}
+
+    class Serializer(serializers.Serializer):
+        is_enabled = serializers.BooleanField(default=True)
+        aggregate_dimensions = serializers.ListField(child=serializers.CharField(), default=list)
+        conditions = serializers.ListField(default=list)
+        alert_levels = serializers.ListField(child=serializers.IntegerField(), default=list)
+
+    def __init__(self, strategy_id: int = 0, bk_biz_id: int = 0, **kwargs):
+        self.strategy_id = strategy_id
+        self.bk_biz_id = bk_biz_id
+        self.is_enabled = kwargs.get("is_enabled", True)
+        self.aggregate_dimensions = kwargs.get("aggregate_dimensions", [])
+        self.conditions = kwargs.get("conditions", [])
+        self.alert_levels = kwargs.get("alert_levels", [])
+
+    @classmethod
+    def from_model(cls, config_model) -> "IssueConfig":
+        return cls(
+            strategy_id=config_model.strategy_id,
+            bk_biz_id=config_model.bk_biz_id,
+            is_enabled=config_model.is_enabled,
+            aggregate_dimensions=config_model.aggregate_dimensions,
+            conditions=config_model.conditions,
+            alert_levels=config_model.alert_levels,
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "is_enabled": self.is_enabled,
+            "aggregate_dimensions": self.aggregate_dimensions,
+            "conditions": self.conditions,
+            "alert_levels": self.alert_levels,
+        }
+
+    def validate(self, strategy: "Strategy") -> None:
+        """校验 issue_config 的跨模型约束 + 字段级合法性。
+
+        - alert_levels 必须为 [1,2,3] 的非空子集
+        - aggregate_dimensions 必须是策略 public_dimensions 的子集
+        - conditions.key 必须属于生效维度集合；method 必须合法；必填字段完整
+
+        直接从 strategy.public_dimensions 计算，不依赖 strategy.id 或缓存，
+        新建策略（id=0）也能正确校验。
+        """
+        if not self.alert_levels or not set(self.alert_levels).issubset({1, 2, 3}):
+            raise ValidationError(detail=_("alert_levels 必须为 [1,2,3] 的非空子集"))
+
+        public_dims = set(strategy.public_dimensions)
+
+        if self.aggregate_dimensions:
+            invalid = set(self.aggregate_dimensions) - public_dims
+            if invalid:
+                raise ValidationError(
+                    detail=_(
+                        "aggregate_dimensions 包含策略公共维度之外的字段: {invalid}，"
+                        "当前策略 public_dimensions 为: {public_dims}"
+                    ).format(invalid=invalid, public_dims=public_dims)
+                )
+
+        effective_dims = set(self.aggregate_dimensions) if self.aggregate_dimensions else public_dims
+        for cond in self.conditions:
+            self._validate_condition_item(cond, effective_dims)
+
+    @classmethod
+    def _validate_condition_item(cls, cond, effective_dimensions: set) -> None:
+        """校验单条 condition 的结构与字段合法性。"""
+        if not isinstance(cond, dict):
+            raise ValidationError(detail=f"conditions 条目必须为 dict，当前为 {type(cond)}")
+
+        required_keys = {"key", "method", "value"}
+        missing = required_keys - set(cond.keys())
+        if missing:
+            raise ValidationError(detail=f"conditions 条目缺少字段: {sorted(missing)}")
+
+        key = cond.get("key")
+        method = cond.get("method")
+        value = cond.get("value")
+
+        if not isinstance(key, str) or not key:
+            raise ValidationError(detail="conditions.key 必须为非空字符串")
+        if method not in cls.VALID_CONDITION_METHODS:
+            raise ValidationError(detail=f"不支持的 method: {method}")
+        if value is None:
+            raise ValidationError(detail="conditions.value 不能为空")
+        if key not in effective_dimensions:
+            raise ValidationError(detail=f"conditions.key={key} 不在可用维度集合中")
+
+    def save(self, strategy_id: int, bk_biz_id: int):
+        """创建或更新 StrategyIssueConfig，由 Strategy.save_issue_config() 调用。"""
+        from bkmonitor.models.issue import StrategyIssueConfig
+
+        defaults = {
+            "bk_biz_id": bk_biz_id,
+            "is_enabled": self.is_enabled,
+            "aggregate_dimensions": self.aggregate_dimensions,
+            "conditions": self.conditions,
+            "alert_levels": self.alert_levels,
+        }
+        # full_clean(validate_unique=False) 触发 StrategyIssueConfig.clean()，
+        # 兜底校验 alert_levels 等字段级约束，防 clean() 将来新增规则时再次漏掉。
+        temp = StrategyIssueConfig(strategy_id=strategy_id, **defaults)
+        temp.full_clean(validate_unique=False)
+
+        StrategyIssueConfig.objects.update_or_create(
+            strategy_id=strategy_id,
+            defaults=defaults,
+        )
+
+    @staticmethod
+    def delete(strategy_id: int):
+        from bkmonitor.models.issue import StrategyIssueConfig
+
+        StrategyIssueConfig.objects.filter(strategy_id=strategy_id).delete()
+
+
 class Strategy(AbstractConfig):
     """
     策略 数据结构
@@ -1695,6 +1921,8 @@ class Strategy(AbstractConfig):
         priority = serializers.IntegerField(min_value=0, required=False, default=None, max_value=10000, allow_null=True)
         priority_group_key = serializers.CharField(allow_blank=True, default="", max_length=60)
         metric_type = serializers.CharField(allow_blank=True, default="")
+        # required=False + 无 default：字段缺失时不写入 validated_data，与显式 null 天然区分
+        issue_config = IssueConfig.Serializer(required=False, allow_null=True)
 
         def validate_priority_group_key(self, value):
             if value.startswith(CUSTOM_PRIORITY_GROUP_PREFIX):
@@ -1706,7 +1934,77 @@ class Strategy(AbstractConfig):
             is_builtin_name = name.startswith("集成内置") or name.startswith("Datalink BuiltIn")
             if attrs.get("source") != DATALINK_SOURCE and is_builtin_name:
                 raise ValidationError(detail="Name starts with 'Datalink BuiltIn' and '集成内置' is forbidden")
+            self.validate_new_series(attrs)
             return attrs
+
+        @staticmethod
+        def validate_new_series(attrs):
+            """
+            新维度值检测(NewSeries)保存层硬校验：
+            - NewSeries 单次性算法，独占告警级别(策略维度内该 level 不能再有其它算法)；
+            - 仅支持单 query_config；数据源限定为「时序」或「日志平台-日志关键字(BK_LOG_SEARCH/LOG)」；
+            - 检测周期(detect_range)不能小于数据聚合周期(agg_interval)。
+            """
+            new_series_type = AlgorithmModel.AlgorithmChoices.NewSeries
+            items = attrs.get("items") or []
+
+            # 独占 level 必须按 strategy 维判定：触发配置(trigger_count/check_window)按 level 在全策略共享
+            # (get_trigger_configs 对含 NewSeries 的 level 强制 count=1)，跨 item 同 level 冲突会让该强制
+            # 波及其它 item 的同级算法，静默改写其触发语义。故先收集全策略 NewSeries 占用的 level。
+            ns_levels = {
+                algorithm.get("level")
+                for item in items
+                for algorithm in item.get("algorithms") or []
+                if algorithm.get("type") == new_series_type
+            }
+            if not ns_levels:
+                return
+
+            # 策略内任何 item 的非 NewSeries 算法都不得落在 NewSeries 占用的 level。
+            for item in items:
+                for algorithm in item.get("algorithms") or []:
+                    if algorithm.get("type") != new_series_type and algorithm.get("level") in ns_levels:
+                        raise ValidationError(detail=_("新维度值检测算法不能与其它算法配置在同一告警级别"))
+
+            # 以下为含 NewSeries 的 item 的逐项校验(单 qc / 仅时序 / 配置下界)。
+            for item in items:
+                algorithms = item.get("algorithms") or []
+                ns_algorithms = [algorithm for algorithm in algorithms if algorithm.get("type") == new_series_type]
+                if not ns_algorithms:
+                    continue
+
+                query_configs = item.get("query_configs") or []
+                if len(query_configs) != 1:
+                    raise ValidationError(detail=_("新维度值检测算法仅支持单个查询配置"))
+
+                query_config = query_configs[0]
+                # 数据源白名单：时序(任意 data_source) + 日志平台-日志关键字(BK_LOG_SEARCH/LOG)。
+                # 二者均走 access.data 链路、record_id=md5(group_by维度).time，与 detect 指纹机制同构。
+                # 显式排除事件链路(BK_MONITOR_COLLECTOR/LOG、EVENT)：其指纹维度按 record 类型写死、
+                # 不取 agg_dimension，与 NewSeries 的维度签名口径(_dimension_signature)错位。
+                ds_label = query_config.get("data_source_label")
+                dt_label = query_config.get("data_type_label")
+                is_supported = dt_label == DataTypeLabel.TIME_SERIES or (
+                    ds_label,
+                    dt_label,
+                ) == (DataSourceLabel.BK_LOG_SEARCH, DataTypeLabel.LOG)
+                if not is_supported:
+                    raise ValidationError(detail=_("新维度值检测算法仅支持时序数据与日志关键字"))
+
+                agg_interval = query_config.get("agg_interval")
+                for algorithm in ns_algorithms:
+                    config = algorithm.get("config") or {}
+                    detect_range = config.get("detect_range")
+                    # 下界硬校验：拦截 degenerate 值(否则运行期会永久漏报/冷启动失效误报风暴)
+                    if detect_range is None or int(detect_range) < 1:
+                        raise ValidationError(detail=_("新维度值检测的检测周期必须大于 0"))
+                    # detect_range >= agg_interval
+                    if agg_interval and int(detect_range) < int(agg_interval):
+                        raise ValidationError(detail=_("新维度值检测的检测周期不能小于数据聚合周期"))
+                    if int(config.get("max_series", 100000)) < 1:
+                        raise ValidationError(detail=_("新维度值检测的最大序列数必须大于 0"))
+                    if int(config.get("effective_delay", 86400)) < 1:
+                        raise ValidationError(detail=_("新维度值检测的生效延迟必须大于 0"))
 
     def __init__(
         self,
@@ -1734,6 +2032,7 @@ class Strategy(AbstractConfig):
         priority_group_key: str = None,
         metric_type: str = "",
         instance: StrategyModel = None,
+        issue_config: dict | None | _Empty = ISSUE_CONFIG_EMPTY,
         **kwargs,
     ):
         """
@@ -1765,6 +2064,11 @@ class Strategy(AbstractConfig):
         self.priority = priority
         self.priority_group_key = priority_group_key or ""
         self.instance = instance
+        # ISSUE_CONFIG_EMPTY（sentinel）= 字段未传，不操作已有配置
+        # None = 显式传 null，删除已有配置
+        # dict = 显式传值，upsert 配置
+        self._issue_config_in_request: bool = not isinstance(issue_config, _Empty)
+        self.issue_config: IssueConfig | None = IssueConfig(**issue_config) if isinstance(issue_config, dict) else None
 
         if isinstance(self.update_time, int | str):
             self.update_time = arrow.get(update_time).datetime
@@ -1843,6 +2147,7 @@ class Strategy(AbstractConfig):
         }
 
         config["metric_type"] = config["items"][0]["metric_type"] if config["items"] else ""
+        config["issue_config"] = self.issue_config.to_dict() if self.issue_config else None
 
         for item in config["items"]:
             if item["expression"]:
@@ -1980,7 +2285,7 @@ class Strategy(AbstractConfig):
 
         anomaly_template = None
         recovery_template = None
-        for template in notice.config.get("template"):
+        for template in notice.config.get("template", []):
             if template["signal"] == ActionSignal.ABNORMAL:
                 anomaly_template = template
             elif template["signal"] == ActionSignal.RECOVERED:
@@ -2321,6 +2626,18 @@ class Strategy(AbstractConfig):
             StrategyLabel(label_name=label, strategy_id=self.id, bk_biz_id=self.bk_biz_id) for label in self.labels
         )
 
+    def save_issue_config(self):
+        """持久化 issue_config。仅当 _issue_config_in_request=True 时调用。
+
+        - issue_config 非 None：validate + upsert StrategyIssueConfig
+        - issue_config 为 None（显式传 null）：删除已有 StrategyIssueConfig（关闭 Issues 功能）
+        """
+        if self.issue_config is not None:
+            self.issue_config.validate(self)
+            self.issue_config.save(self.id, self.bk_biz_id)
+        else:
+            IssueConfig.delete(self.id)
+
     @transaction.atomic
     def save_actions(self):
         """保存actions配置."""
@@ -2441,6 +2758,10 @@ class Strategy(AbstractConfig):
 
             # 保存策略标签
             self.save_labels()
+
+            # 保存 issue_config（仅当请求体中携带该字段时执行）
+            if self._issue_config_in_request:
+                self.save_issue_config()
 
             if history and history.strategy_id == 0:
                 history.strategy_id = self.id
@@ -2738,12 +3059,15 @@ class Strategy(AbstractConfig):
         AlgorithmModel.objects.filter(strategy_id=self.id).delete()
         QueryConfigModel.objects.filter(strategy_id=self.id).delete()
         StrategyLabel.objects.filter(strategy_id=self.id).delete()
+        IssueConfig.delete(self.id)
 
     @classmethod
     def delete_by_strategy_ids(cls, strategy_ids: list[int]):
         """
         批量删除策略
         """
+        from bkmonitor.models.issue import StrategyIssueConfig
+
         histories = []
         for strategy_id in strategy_ids:
             histories.append(
@@ -2762,6 +3086,7 @@ class Strategy(AbstractConfig):
         AlgorithmModel.objects.filter(strategy_id__in=strategy_ids).delete()
         QueryConfigModel.objects.filter(strategy_id__in=strategy_ids).delete()
         StrategyLabel.objects.filter(strategy_id__in=strategy_ids).delete()
+        StrategyIssueConfig.objects.filter(strategy_id__in=strategy_ids).delete()
 
     @classmethod
     def from_models(cls, strategies: list[StrategyModel] | QuerySet) -> list["Strategy"]:
@@ -2870,6 +3195,17 @@ class Strategy(AbstractConfig):
                 record.notice = NoticeRelation(strategy_id=strategy.id)
 
             records.append(record)
+
+        # 批量加载 StrategyIssueConfig（避免 N+1）
+        from bkmonitor.models.issue import StrategyIssueConfig
+
+        if len(strategy_ids) > 500:
+            issue_config_query = StrategyIssueConfig.objects.all()
+        else:
+            issue_config_query = StrategyIssueConfig.objects.filter(strategy_id__in=strategy_ids)
+        issue_configs: dict[int, IssueConfig] = {c.strategy_id: IssueConfig.from_model(c) for c in issue_config_query}
+        for record in records:
+            record.issue_config = issue_configs.get(record.id)
 
         return records
 

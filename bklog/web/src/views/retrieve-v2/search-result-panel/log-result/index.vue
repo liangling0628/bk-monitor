@@ -26,7 +26,7 @@
 
 <template>
   <div class="original-log-panel">
-    <div class="original-log-panel-tools">
+    <div :class="['original-log-panel-tools', {'trace-log-panel': isMonitorTrace}]">
       <div class="left-operate">
         <div class="bk-button-group">
           <span
@@ -59,6 +59,7 @@
               @change="handleHighlightEnter"
             />
             <MatchMode
+              v-if="!isMonitorApm && !isMonitorTrace"
               class="bklog-v3-match-mode"
               :border="true"
               :match-mode="matchMode"
@@ -91,7 +92,7 @@
               <div class="fields-setting-container">
                 <fields-setting
                   :field-alias-map="fieldAliasMap"
-                  :is-show="true"
+                  :is-show="showFieldsSetting"
                   :retrieve-params="retrieveParams"
                   config-type="list"
                   @cancel="cancelModifyFields"
@@ -119,7 +120,6 @@ import ExportLog from '../../result-comp/export-log.vue';
 // #code const ExportLog = () => null;
 // #endif
 import MatchMode from '@/global/match-mode';
-import useRetrieveEvent from '@/hooks/use-retrieve-event';
 import { BK_LOG_STORAGE } from '@/store/store.type';
 import BkLogPopover from '../../../../components/bklog-popover/index';
 import RetrieveHelper, { RetrieveEvent } from '../../../retrieve-helper';
@@ -128,8 +128,6 @@ import FieldsSetting from '../../result-comp/update/fields-setting';
 import bklogTagChoice from '../../search-bar/components/bklog-tag-choice';
 import TableLog from './log-result.vue';
 
-let logResultResizeObserver;
-let logResultResizeObserverFn;
 
 export default {
   components: {
@@ -165,6 +163,7 @@ export default {
       exportLoading: false,
       isInitActiveTab: false,
       isMonitorTrace: window.__IS_MONITOR_TRACE__,
+      isMonitorApm: window.__IS_MONITOR_APM__,
       highlightWidth: 200,
       matchMode: {
         caseSensitive: false,
@@ -175,7 +174,13 @@ export default {
         maxWidth: 1200,
         arrow: false,
         hideOnClick: false,
+        onShow: () => {
+          this.showFieldsSetting = true;
+        },
       },
+      logResultResizeObserver: null,
+      logResultResizeObserverFn: null,
+      highlightTriggerHandler: null,
     };
   },
   computed: {
@@ -240,13 +245,13 @@ export default {
     this.contentType = localStorage.getItem('SEARCH_STORAGE_ACTIVE_TAB') || 'table';
     RetrieveHelper.setMarkInstance();
 
-    const { addEvent } = useRetrieveEvent();
-    addEvent(RetrieveEvent.HILIGHT_TRIGGER, ({ event, value }) => {
+    this.highlightTriggerHandler = ({ event, value }) => {
       if (event === 'mark' && !this.highlightValue.includes(value)) {
-        this.highlightValue.push(...value.split(/\s/).filter(w => w.length > 0));
+        this.highlightValue.push(value);
         RetrieveHelper.highLightKeywords(this.highlightValue.filter(w => w.length > 0));
       }
-    });
+    };
+    RetrieveHelper.on(RetrieveEvent.HILIGHT_TRIGGER, this.highlightTriggerHandler);
 
     if (document.body.offsetHeight < 900) {
       this.$refs.refFieldsSettingPopper?.setProps({
@@ -255,15 +260,22 @@ export default {
       });
     }
 
-    logResultResizeObserverFn = debounce(this.calcHighlightWidth, 100);
-    logResultResizeObserver = new ResizeObserver(logResultResizeObserverFn);
-    logResultResizeObserver.observe(this.$el);
+    this.logResultResizeObserverFn = debounce(this.calcHighlightWidth, 100);
+    this.logResultResizeObserver = new ResizeObserver(this.logResultResizeObserverFn);
+    this.logResultResizeObserver.observe(this.$el);
   },
   unmounted() {
-    logResultResizeObserver?.unobserve(this.$el);
-    logResultResizeObserver?.disconnect();
-    logResultResizeObserver = null;
-    logResultResizeObserverFn = null;
+    if (this.highlightTriggerHandler) {
+      RetrieveHelper.off(RetrieveEvent.HILIGHT_TRIGGER, this.highlightTriggerHandler);
+      this.highlightTriggerHandler = null;
+    }
+    this.logResultResizeObserverFn?.cancel?.();
+    this.logResultResizeObserver?.unobserve(this.$el);
+    this.logResultResizeObserver?.disconnect();
+    this.logResultResizeObserver = null;
+    this.logResultResizeObserverFn = null;
+    this.$refs.refFieldsSettingPopper?.hide?.();
+    RetrieveHelper.destroyMarkInstance();
   },
   methods: {
     calcHighlightWidth() {
@@ -290,13 +302,16 @@ export default {
         return false;
       }
 
+      this.showFieldsSetting = false;
       return true;
     },
     handleTagRender(item, index) {
       const colors = RetrieveHelper.RGBA_LIST;
+      const colorPair = colors[index % colors.length];
       return {
         style: {
-          backgroundColor: colors[index % colors.length],
+          backgroundColor: colorPair[0],
+          color: colorPair[1],
         },
       };
     },
@@ -304,13 +319,14 @@ export default {
       this.highlightValue = [];
       for (let i = 0; i < valList.length; i++) {
         const val = valList[i];
-        const values = val.split(/\s+/);
-        for (let j = 0; j < values.length; j++) {
-          const value = values[j].replace(/^\s+|\s+$/g, '');
-          if (value.length > 0) {
-            this.highlightValue.push(value);
-          }
-        }
+        this.highlightValue.push(val);
+        // const values = val.split(/\s+/);
+        // for (let j = 0; j < values.length; j++) {
+        //   const value = values[j].replace(/^\s+|\s+$/g, '');
+        //   if (value.length > 0) {
+        //     this.highlightValue.push(value);
+        //   }
+        // }
       }
 
       RetrieveHelper.highLightKeywords(this.highlightValue);
@@ -320,7 +336,11 @@ export default {
       this.closeDropdown();
     },
     closeDropdown() {
+      if (!this.showFieldsSetting) {
+        return;
+      }
       this.$refs.refFieldsSettingPopper?.hide();
+      this.showFieldsSetting = false;
     },
 
     handleAddNewConfig() {
@@ -345,6 +365,10 @@ export default {
     display: flex;
     justify-content: space-between;
     padding: 0 6px 0 6px;
+
+    &.trace-log-panel {
+      padding-top: 6px;
+    }
   }
 
   .tools-more {

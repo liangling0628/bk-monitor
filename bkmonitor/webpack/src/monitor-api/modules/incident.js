@@ -25,6 +25,11 @@ export const incidentAlertView = request('POST', 'rest/v2/incident/incident_aler
 export const alertIncidentDetail = request('GET', 'rest/v2/incident/alert_incident_detail/');
 export const incidentResults = request('GET', 'rest/v2/incident/incident_results/');
 export const incidentDiagnosis = request('POST', 'rest/v2/incident/incident_diagnosis/');
+export const incidentHistogram = request('POST', 'rest/v2/incident/date_histogram/');
+export const getIncidentDocId = request('GET', 'rest/v2/incident/get_incident_doc_id/');
+export const fetchConfigList = request('POST', 'rest/v2/incident/get_config/');
+export const fetchGlobalVariables = request('GET', 'rest/v2/incident/fetch_global_variables/');
+export const createListConfig = request('POST', 'rest/v2/incident/create_list_config/');
 
 export default {
   incidentMetricsSearch,
@@ -52,4 +57,9 @@ export default {
   alertIncidentDetail,
   incidentResults,
   incidentDiagnosis,
+  incidentHistogram,
+  getIncidentDocId,
+  fetchConfigList,
+  fetchGlobalVariables,
+  createListConfig
 };

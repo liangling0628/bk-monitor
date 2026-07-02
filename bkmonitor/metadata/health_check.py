@@ -23,14 +23,16 @@ specific language governing permissions and limitations under the License.
 import enum
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import arrow
 from django.conf import settings
 from pydantic import BaseModel
 from pydantic.fields import Field
 
+from apm.models import ApmApplication, LogDataSource, MetricDataSource, ProfileDataSource, TraceDataSource
 from bkm_space.api import Space, SpaceApi
+from bkmonitor.utils.tenant import get_tenant_default_biz_id
 from core.drf_resource import api
 from core.errors.api import BKAPIError
 from metadata.models import BCSClusterInfo, DataSource, DataSourceResultTable, ResultTable
@@ -41,6 +43,7 @@ from metadata.models.data_link.constants import (
     DataLinkResourceStatus,
 )
 from metadata.models.data_link.data_link import DataLink
+from metadata.models.data_link.data_link_configs import GraphRelationBindingConfig
 from metadata.models.data_link.service import get_data_id_v2
 from metadata.models.data_link.utils import compose_bkdata_data_id_name
 from metadata.models.space.constants import (
@@ -51,8 +54,6 @@ from metadata.models.space.constants import (
     SYSTEM_BASE_DATA_ETL_CONFIGS,
 )
 from metadata.utils.redis_tools import RedisTools
-from apm.models import ApmApplication, TraceDataSource, MetricDataSource, LogDataSource, ProfileDataSource
-from monitor_web.models.custom_report import CustomEventGroup
 
 
 class DataScene(enum.Enum):
@@ -85,6 +86,34 @@ class DataIdStatus(BaseModel):
 
     finished: bool = Field(description="是否检查完成", default=False)
     message: str = Field(description="消息", default="")
+
+
+DATA_RECORD_TYPE = dict[str, Any] | list["DATA_RECORD_TYPE"]
+
+
+def get_data_record_time_value(origin_data_record: DATA_RECORD_TYPE) -> datetime | None:
+    """获取数据记录时间
+
+    Args:
+        data_record: 数据记录
+
+    Returns:
+        datetime | None: 数据记录时间
+    """
+    # 如果data_record是列表，则取列表中的第一个元素，直到取到非列表为止
+    while isinstance(origin_data_record, list) and origin_data_record:
+        origin_data_record = origin_data_record[0]
+
+    if not origin_data_record:
+        return None
+
+    data_record = cast(dict[str, Any], origin_data_record)
+
+    time_value = data_record.get("timestamp") or data_record.get("utctime")
+    if time_value:
+        return arrow.get(time_value).datetime
+
+    return get_data_record_time_value(data_record.get("data", {}))
 
 
 def get_data_id_status(bk_tenant_id: str, bk_biz_id: int, bk_data_id: int, with_detail: bool = False) -> DataIdStatus:
@@ -130,9 +159,9 @@ def get_data_id_status(bk_tenant_id: str, bk_biz_id: int, bk_data_id: int, with_
 
         try:
             data_id_config = get_data_id_v2(
+                bk_tenant_id=bk_tenant_id,
                 data_name=ds.data_name,
                 is_base=is_base,
-                bk_biz_id=bk_biz_id,
                 namespace=namespace,
                 with_detail=with_detail,
             )
@@ -154,17 +183,7 @@ def get_data_id_status(bk_tenant_id: str, bk_biz_id: int, bk_data_id: int, with_
         data_id_status.message = str(e)
         return data_id_status
     data_id_status.kafka_data_exists = bool(result)
-    if isinstance(result, list) and len(result) > 0:
-        data_record = result[0]
-
-        if isinstance(data_record, list):
-            data_record = data_record[0]
-
-        time_info = (
-            data_record.get("timestamp") or data_record.get("data", {}).get("utctime") or data_record.get("utctime")
-        )
-        if time_info:
-            data_id_status.kafka_latest_time = arrow.get(time_info).datetime
+    data_id_status.kafka_latest_time = get_data_record_time_value(result)
 
     if with_detail:
         data_id_status.kafka_latest_data = result
@@ -194,6 +213,15 @@ class BkDataStatus(BaseModel):
     finished: bool = Field(description="是否检查完成", default=False)
 
 
+def _get_graph_component_name_filters(
+    component_cls: type,
+    graph_binding: GraphRelationBindingConfig | None,
+) -> list[str]:
+    if not graph_binding:
+        return []
+    return graph_binding.get_expected_component_names(component_cls)
+
+
 def get_bkdata_status(bk_tenant_id: str, data_link_name: str, with_detail: bool = False) -> BkDataStatus:
     """获取清洗任务状态
 
@@ -217,9 +245,42 @@ def get_bkdata_status(bk_tenant_id: str, data_link_name: str, with_detail: bool 
 
     # 检查组件配置
     status_ok = True
-    for component_cls in datalink.STRATEGY_RELATED_COMPONENTS[datalink.data_link_strategy]:
+    graph_binding = None
+    if datalink.data_link_strategy == DataLink.GRAPH_RELATION_TIME_SERIES:
+        graph_binding = GraphRelationBindingConfig.objects.filter(
+            bk_tenant_id=bk_tenant_id,
+            namespace=datalink.namespace,
+            data_link_name=data_link_name,
+        ).first()
+        if not graph_binding:
+            component_status = DataLinkComponentStatus(name=data_link_name, kind=GraphRelationBindingConfig.kind)
+            datalink_status.component_statuses.append(component_status)
+            datalink_status.message += (
+                f"数据链路组件 Kind:{GraphRelationBindingConfig.kind} Name:{data_link_name}配置不存在\n"
+            )
+            status_ok = False
+
+    for component_cls in datalink.get_related_component_classes():
+        if component_cls is GraphRelationBindingConfig:
+            continue
         components = component_cls.objects.filter(data_link_name=data_link_name, bk_tenant_id=bk_tenant_id)
-        for component in components:
+        expected_component_names = _get_graph_component_name_filters(component_cls, graph_binding)
+        if expected_component_names:
+            components = components.filter(name__in=expected_component_names)
+
+        component_list = list(components)
+        existing_component_names = {component.name for component in component_list}
+        for expected_component_name in expected_component_names:
+            if expected_component_name in existing_component_names:
+                continue
+            component_status = DataLinkComponentStatus(name=expected_component_name, kind=component_cls.kind)
+            datalink_status.component_statuses.append(component_status)
+            datalink_status.message += (
+                f"数据链路组件 Kind:{component_cls.kind} Name:{expected_component_name}配置不存在\n"
+            )
+            status_ok = False
+
+        for component in component_list:
             component_status = DataLinkComponentStatus(name=component.name, kind=component.kind)
 
             # 将组件状态添加到数据链路状态列表
@@ -314,19 +375,21 @@ def get_query_router_status(
 
         # 检查结果表是否存在与data_label结果表中
         if result_table.data_label:
-            data_label_key = (
-                f"{result_table.data_label}|{bk_tenant_id}"
-                if settings.ENABLE_MULTI_TENANT_MODE
-                else result_table.data_label
-            )
-            data_label_result_table_ids = RedisTools.hget(DATA_LABEL_TO_RESULT_TABLE_KEY, data_label_key)
-            data_label_result_table_ids = json.loads(data_label_result_table_ids) if data_label_result_table_ids else []
-            if result_table.table_id in data_label_result_table_ids:
-                query_router_status.data_label_exists = True
-            else:
-                query_router_status.messages.append(
-                    f"结果表 {result_table.table_id} 在数据标签 {result_table.data_label} 中不存在"
+            data_labels = result_table.data_label.split(",")
+            data_label_exists = True
+            for data_label in data_labels:
+                data_label_key = f"{data_label}|{bk_tenant_id}" if settings.ENABLE_MULTI_TENANT_MODE else data_label
+                data_label_result_table_ids = RedisTools.hget(DATA_LABEL_TO_RESULT_TABLE_KEY, data_label_key)
+                data_label_result_table_ids = (
+                    json.loads(data_label_result_table_ids) if data_label_result_table_ids else []
                 )
+                if result_table.table_id not in data_label_result_table_ids:
+                    data_label_exists = False
+                    query_router_status.messages.append(
+                        f"结果表 {result_table.table_id} 在数据标签 {data_label} 中不存在"
+                    )
+            if data_label_exists:
+                query_router_status.data_label_exists = True
         else:
             # 如果结果表没有data_label，则默认存在
             query_router_status.data_label_exists = True
@@ -553,6 +616,10 @@ def get_datalink_status_by_scene(
     """
     result: list[DataLinkStatus] = []
 
+    host_scene_biz_id = bk_biz_id
+    if scene == DataScene.HOST and settings.SPACE_BUILTIN_DATA_LINK_MODE == "tenant":
+        host_scene_biz_id = get_tenant_default_biz_id(bk_tenant_id)
+
     # 校验场景
     if isinstance(scene, str):
         try:
@@ -578,9 +645,9 @@ def get_datalink_status_by_scene(
         )
     elif scene == DataScene.HOST:
         data_names = [
-            f"{bk_tenant_id}_{bk_biz_id}_sys_base",
-            f"base_{bk_biz_id}_system_proc_port",
-            f"base_{bk_biz_id}_system_proc_perf",
+            f"{bk_tenant_id}_{host_scene_biz_id}_sys_base",
+            f"base_{host_scene_biz_id}_system_proc_port",
+            f"base_{host_scene_biz_id}_system_proc_perf",
         ]
         result = get_datalink_status(
             bk_tenant_id=bk_tenant_id, bk_biz_id=bk_biz_id, data_names=data_names, with_detail=with_detail
@@ -639,6 +706,8 @@ def get_datalink_status_by_scene(
             with_detail=with_detail,
         )
     elif scene == DataScene.CUSTOM_EVENT:
+        from monitor_web.models.custom_report import CustomEventGroup
+
         # 自定义事件场景：按业务查询所有自定义事件组
         # 查询业务下的所有自定义事件组
         event_groups = CustomEventGroup.objects.filter(
@@ -738,7 +807,10 @@ def check_datalink_health(
     if scene == DataScene.UPTIMECHECK:
         messages.append("服务拨测监控的数据链路是按业务创建，包括 TCP、UDP、HTTP、ICMP 四种类型")
     elif scene == DataScene.HOST:
-        messages.append("主机监控的数据链路是按业务创建，包括系统基础指标、进程端口和进程性能指标")
+        if settings.SPACE_BUILTIN_DATA_LINK_MODE == "tenant":
+            messages.append("主机监控的数据链路是按租户创建，包括系统基础指标、进程端口和进程性能指标")
+        else:
+            messages.append("主机监控的数据链路是按业务创建，包括系统基础指标、进程端口和进程性能指标")
     elif scene == DataScene.K8S:
         messages.append(f"Kubernetes 监控的数据链路是按集群创建（集群ID: {bcs_cluster_id}），包括 K8s 指标和自定义指标")
     elif scene == DataScene.APM:

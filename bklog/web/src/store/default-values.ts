@@ -182,6 +182,10 @@ export const getDefaultRetrieveParams = (defaultValue?) => {
       interval: 'auto',
       timezone: 'Asia/Shanghai',
       search_mode: 'ui',
+      retrieve_type: 'normal',
+      scene_active: '',
+      scene_filter_values: {},
+      isSceneFilterChanged: false,
     },
     defaultValue,
     urlArgs,
@@ -248,6 +252,10 @@ export const IndexFieldInfo = {
   alias_mapping_field: null,
   is_virtual_alias_field: false,
   source_field_names: [],
+  // field_name → FieldInfoItem 索引，在 updateIndexFieldInfo 中同步构建
+  fieldNameIndex: {} as Record<string, any>,
+  // query_alias → FieldInfoItem 索引，在 updateIndexFieldInfo 中同步构建
+  queryAliasIndex: {} as Record<string, any>,
 };
 
 export const IndexsetItemParams = { ...DEFAULT_RETRIEVE_PARAMS };
@@ -405,6 +413,7 @@ export const getStorageOptions = (values?: any) => {
     [BK_LOG_STORAGE.COMMON_SPACE_ID_LIST]: [],
     [BK_LOG_STORAGE.TABLE_SHOW_SOURCE_FIELD]: false,
     [BK_LOG_STORAGE.RESULT_DISPLAY_LINES]: 3,
+    [BK_LOG_STORAGE.SCENE_DISPLAY_FIELDS]: {},
     ...storage,
   };
 };

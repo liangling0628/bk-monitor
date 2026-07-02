@@ -38,6 +38,13 @@ class BaseCollectorPluginException(BaseException):
     MESSAGE = _("采集插件模块异常")
 
 
+class MySqlConfigException(BaseException):
+    MODULE_CODE = "500"
+    MESSAGE = _(
+        "公共数据库配置异常, 请确认是否携带完整参数: [--mysql_host, --mysql_port, --mysql_db, --mysql_user, --mysql_password]"
+    )
+
+
 class CollectorConfigNotExistException(BaseCollectorConfigException):
     ERROR_CODE = "001"
     MESSAGE = _("采集配置不存在")
@@ -421,3 +428,33 @@ class NodeSettingException(BaseCollectorConfigException):
 class SubscriptionStatisticException(BaseException):
     ERROR_CODE = "911"
     MESSAGE = _("节点管理统计订阅任务数据异常: {reason}")
+
+
+# =================================================
+# Grok
+# =================================================
+
+
+class GrokCircularReferenceException(BaseException):
+    ERROR_CODE = "912"
+    MESSAGE = _("Grok 模式存在循环引用：{path}")
+
+
+class GrokReferencedException(BaseException):
+    ERROR_CODE = "913"
+    MESSAGE = _("该 Grok 模式已被其他模式引用：{referenced_by}")
+
+
+class GrokPatternNotFoundException(BaseException):
+    ERROR_CODE = "914"
+    MESSAGE = _("Grok 模式不存在：{pattern_name}")
+
+
+class DuplicateGrokPatternException(BaseException):
+    ERROR_CODE = "915"
+    MESSAGE = _("Grok 模式名称已存在")
+
+
+class GrokPatternCompileException(BaseException):
+    ERROR_CODE = "916"
+    MESSAGE = _("Grok 模式编译失败，正则表达式不合法：{error}")

@@ -14,7 +14,6 @@ from functools import cached_property
 from django.utils.translation import gettext_lazy as _
 
 from bkmonitor.models import NO_DATA_TAG_DIMENSION
-
 from constants.apm import CachedEnum
 
 
@@ -32,11 +31,18 @@ class K8STargetType:
     WORKLOAD = "K8S-WORKLOAD"
 
 
-K8S_RESOURCE_TYPE = {
+K8S_RESOURCE_TYPE: dict[str, str] = {
     K8STargetType.POD: "pod",
     K8STargetType.NODE: "node",
     K8STargetType.SERVICE: "service",
     K8STargetType.WORKLOAD: "workload",
+}
+
+K8S_RESOURCE_TYPE_SCENARIO_MAP: dict[str, list[str]] = {
+    K8S_RESOURCE_TYPE[K8STargetType.POD]: ["performance", "network"],
+    K8S_RESOURCE_TYPE[K8STargetType.WORKLOAD]: ["performance", "network"],
+    K8S_RESOURCE_TYPE[K8STargetType.NODE]: ["capacity"],
+    K8S_RESOURCE_TYPE[K8STargetType.SERVICE]: ["network"],
 }
 
 
@@ -165,7 +171,7 @@ DEFAULT_DEDUPE_FIELDS = ["alert_name", "strategy_id", "target_type", "target", "
 CLUSTER_PATTERN = r"{[^}]+}"
 
 
-OLD_DEFAULT_TEMPLATE: str = (
+DEFAULT_TEMPLATE: str = (
     "{{content.level}}\n"
     "{{content.begin_time}}\n"
     "{{content.time}}\n"
@@ -182,16 +188,13 @@ OLD_DEFAULT_TEMPLATE: str = (
     "{{content.related_info}}\n"
 )
 
-DEFAULT_TEMPLATE: str = OLD_DEFAULT_TEMPLATE + "{{content.recommended_metrics}}\n{{content.anomaly_dimensions}}\n"
-
 DEFAULT_TITLE_TEMPLATE: str = "{{business.bk_biz_name}} - {{alarm.name}} {{alarm.display_type}}"
 
 
-# TODO(crayon) 灰度验证无误后再进行调整
 DEFAULT_NOTICE_MESSAGE_TEMPLATE: list[dict[str, str]] = [
-    {"signal": "abnormal", "message_tmpl": OLD_DEFAULT_TEMPLATE, "title_tmpl": DEFAULT_TITLE_TEMPLATE},
-    {"signal": "recovered", "message_tmpl": OLD_DEFAULT_TEMPLATE, "title_tmpl": DEFAULT_TITLE_TEMPLATE},
-    {"signal": "closed", "message_tmpl": OLD_DEFAULT_TEMPLATE, "title_tmpl": DEFAULT_TITLE_TEMPLATE},
+    {"signal": "abnormal", "message_tmpl": DEFAULT_TEMPLATE, "title_tmpl": DEFAULT_TITLE_TEMPLATE},
+    {"signal": "recovered", "message_tmpl": DEFAULT_TEMPLATE, "title_tmpl": DEFAULT_TITLE_TEMPLATE},
+    {"signal": "closed", "message_tmpl": DEFAULT_TEMPLATE, "title_tmpl": DEFAULT_TITLE_TEMPLATE},
 ]
 
 
@@ -200,9 +203,9 @@ PUBLIC_NOTICE_CONFIG: dict[str, str | list[dict]] = {
         {
             "time_range": "00:00:00--23:59:59",
             "notify_config": [
-                {"level": 1, "type": ["weixin", "mail"]},
-                {"level": 2, "type": ["weixin", "mail"]},
-                {"level": 3, "type": ["weixin", "mail"]},
+                {"level": 1, "type": ["mail"]},
+                {"level": 2, "type": ["mail"]},
+                {"level": 3, "type": ["mail"]},
             ],
         }
     ],

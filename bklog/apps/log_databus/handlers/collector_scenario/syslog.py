@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making BK-LOG 蓝鲸日志平台 available.
 Copyright (C) 2021 THL A29 Limited, a Tencent company.  All rights reserved.
@@ -19,9 +18,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 We undertake not to change the open source license (MIT license) applicable to the current version of
 the project delivered to anyone in the future.
 """
+
 from django.utils.translation import gettext as _
 
-from apps.log_databus.constants import EtlConfig, LogPluginInfo, PluginParamLogicOpEnum
+from apps.log_databus.constants import EtlConfig, LogPluginInfo, PluginParamLogicOpEnum, STORAGE_CLUSTER_TYPE
 from apps.log_databus.handlers.collector_scenario import CollectorScenario
 from apps.log_databus.handlers.collector_scenario.utils import build_es_option_type
 
@@ -124,7 +124,9 @@ class SysLogScenario(CollectorScenario):
             return {"syslog_protocol": "", "syslog_port": 0, "syslog_conditions": []}
 
     @classmethod
-    def get_built_in_config(cls, es_version="5.X", etl_config=EtlConfig.BK_LOG_TEXT, **kwargs):
+    def get_built_in_config(
+        cls, es_version="5.X", etl_config=EtlConfig.BK_LOG_TEXT, storage_cluster_type=STORAGE_CLUSTER_TYPE, **kwargs
+    ):
         """
         获取采集器标准字段
         """
@@ -150,7 +152,7 @@ class SysLogScenario(CollectorScenario):
             "fields": [
                 {
                     "field_name": "bk_host_id",
-                    "field_type": "float",
+                    "field_type": "float" if storage_cluster_type == STORAGE_CLUSTER_TYPE else "long",
                     "tag": "dimension",
                     "alias_name": "bk_host_id",
                     "description": _("主机ID"),
@@ -170,15 +172,16 @@ class SysLogScenario(CollectorScenario):
                 },
                 {
                     "field_name": "iterationIndex",
-                    "field_type": "float",
+                    "field_type": "float" if storage_cluster_type == STORAGE_CLUSTER_TYPE else "long",
                     "tag": "dimension",
                     "alias_name": "iterationindex",
-                    "description": "迭代ID",
+                    "description": _("迭代ID"),
                     "option": build_es_option_type("integer", es_version),
+                    "flat_field": True,
                 },
                 {
                     "field_name": "cloudId",
-                    "field_type": "float",
+                    "field_type": "float" if storage_cluster_type == STORAGE_CLUSTER_TYPE else "long",
                     "tag": "dimension",
                     "alias_name": "cloudid",
                     "description": "云区域ID",
@@ -194,7 +197,7 @@ class SysLogScenario(CollectorScenario):
                 },
                 {
                     "field_name": "gseIndex",
-                    "field_type": "float",
+                    "field_type": "float" if storage_cluster_type == STORAGE_CLUSTER_TYPE else "long",
                     "tag": "dimension",
                     "alias_name": "gseindex",
                     "description": "gse索引",
@@ -232,6 +235,7 @@ class SysLogScenario(CollectorScenario):
                         "tag": "dimension",
                         "alias_name": "log",
                         "description": "客户端信息",
+                        "flat_field": True,
                         "option": build_es_option_type("object", es_version),
                     },
                     {
@@ -240,6 +244,7 @@ class SysLogScenario(CollectorScenario):
                         "tag": "dimension",
                         "alias_name": "syslog",
                         "description": "严重程度",
+                        "flat_field": True,
                         "option": build_es_option_type("object", es_version),
                     },
                     {
@@ -248,6 +253,7 @@ class SysLogScenario(CollectorScenario):
                         "tag": "dimension",
                         "alias_name": "event",
                         "description": "日志级别",
+                        "flat_field": True,
                         "option": build_es_option_type("object", es_version),
                     },
                     {
@@ -256,6 +262,7 @@ class SysLogScenario(CollectorScenario):
                         "tag": "dimension",
                         "alias_name": "process",
                         "description": "应用程序",
+                        "flat_field": True,
                         "option": build_es_option_type("object", es_version),
                     },
                 ]

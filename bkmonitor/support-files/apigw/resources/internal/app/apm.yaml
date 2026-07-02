@@ -413,24 +413,6 @@ paths:
           userVerifiedRequired: false
           resourcePermissionRequired: true
         descriptionEn: update apm metric fields
-  /app/apm/query_apm_es/:
-    post:
-      operationId: query_apm_es
-      description: 查询apm相关es数据
-      x-bk-apigateway-resource:
-        isPublic: false
-        allowApplyPermission: true
-        matchSubpath: false
-        backend:
-          name: default
-          method: post
-          path: /apm_api/v1/application/query_es/
-          matchSubpath: false
-        authConfig:
-          appVerifiedRequired: true
-          userVerifiedRequired: false
-          resourcePermissionRequired: true
-        descriptionEn: query apm es
   /app/apm/query_host_instance/:
     post:
       operationId: query_apm_host_instance
@@ -503,42 +485,6 @@ paths:
           userVerifiedRequired: false
           resourcePermissionRequired: true
         descriptionEn: query apm span list
-  /app/apm/query_apm_span_statistics/:
-    post:
-      operationId: query_apm_span_statistics
-      description: 查询接口统计列表
-      x-bk-apigateway-resource:
-        isPublic: false
-        allowApplyPermission: true
-        matchSubpath: false
-        backend:
-          name: default
-          method: post
-          path: /apm_api/v1/application/query_span_statistics/
-          matchSubpath: false
-        authConfig:
-          appVerifiedRequired: true
-          userVerifiedRequired: false
-          resourcePermissionRequired: true
-        descriptionEn: query apm span statistics
-  /app/apm/query_apm_service_statistics/:
-    post:
-      operationId: query_apm_service_statistics
-      description: 查询服务统计列表
-      x-bk-apigateway-resource:
-        isPublic: false
-        allowApplyPermission: true
-        matchSubpath: false
-        backend:
-          name: default
-          method: post
-          path: /apm_api/v1/application/query_service_statistics/
-          matchSubpath: false
-        authConfig:
-          appVerifiedRequired: true
-          userVerifiedRequired: false
-          resourcePermissionRequired: true
-        descriptionEn: query apm service statistics
   /app/apm/query_apm_trace_option_values/:
     post:
       operationId: query_apm_trace_option_values
@@ -1277,4 +1223,58 @@ paths:
           userVerifiedRequired: false
           resourcePermissionRequired: true
         descriptionEn: query bk data token by id
+  /app/apm/service_list/:
+    post:
+      operationId: service_list
+      description: 【APM】应用下服务列表
+      x-bk-apigateway-resource:
+        isPublic: false
+        allowApplyPermission: true
+        matchSubpath: false
+        backend:
+          name: default
+          method: post
+          path: /api/v4/apm_metric_web/service_list/
+          matchSubpath: false
+        authConfig:
+          appVerifiedRequired: true
+          userVerifiedRequired: false
+          resourcePermissionRequired: true
+        descriptionEn: "apm service list"
+  /app/apm/service/service_list/:
+    post:
+      operationId: apm_service_list
+      description: 【APM】查询应用下服务列表（含语言、系统、日志关联、K8s 平台信息）
+      x-bk-apigateway-resource:
+        isPublic: false
+        allowApplyPermission: true
+        matchSubpath: false
+        backend:
+          name: default
+          method: post
+          path: /api/v4/service_web/service_list/
+          matchSubpath: false
+        authConfig:
+          appVerifiedRequired: true
+          userVerifiedRequired: false
+          resourcePermissionRequired: true
+        descriptionEn: "query apm service list with language, system, log relations and k8s platform info"
+  /app/apm/profile_query_export/:
+    get:
+      operationId: profile_query_export
+      description: 导出 profile 查询结果
+      x-bk-apigateway-resource:
+        isPublic: false
+        allowApplyPermission: true
+        matchSubpath: false
+        backend:
+          name: default
+          method: get
+          path: /api/v4/apm_profile_query_web/export/
+          matchSubpath: false
+        authConfig:
+          appVerifiedRequired: true
+          userVerifiedRequired: false
+          resourcePermissionRequired: true
+        descriptionEn: "export profile query"
 

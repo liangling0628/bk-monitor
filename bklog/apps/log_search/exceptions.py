@@ -258,6 +258,26 @@ class IndexSetAliasSettingsException(BaseIndexSetException):
     MESSAGE = _("别名冲突: {conflict_info}")
 
 
+class ParentIndexSetNotExistException(BaseIndexSetException):
+    ERROR_CODE = "331"
+    MESSAGE = _("归属索引集 [ID:{parent_index_set_id}] 不存在")
+
+
+class IndexGroupNotExistException(BaseIndexSetException):
+    ERROR_CODE = "332"
+    MESSAGE = _("索引组不存在")
+
+
+class DuplicateIndexGroupException(BaseIndexSetException):
+    ERROR_CODE = "333"
+    MESSAGE = _("该业务下已存在名称为 [{index_set_name}] 的索引集")
+
+
+class ChildIndexSetNotExistException(BaseIndexSetException):
+    ERROR_CODE = "334"
+    MESSAGE = _("子索引集 [ID:{child_index_set_id}] 不存在")
+
+
 # =================================================
 # 管理-检索
 # =================================================
@@ -586,6 +606,36 @@ class DuplicateUnifyQueryExportException(BaseException):
 class PreCheckSortFieldException(BaseSearchException):
     ERROR_CODE = "507"
     MESSAGE = _("导出失败，字段({fields})不支持排序")
+
+
+class AsyncExportTaskNotFoundException(BaseException):
+    ERROR_CODE = "508"
+    MESSAGE = _("异步导出任务不存在或无权限下载")
+
+
+class AsyncExportTaskNotDownloadableException(BaseException):
+    ERROR_CODE = "509"
+    MESSAGE = _("异步导出任务暂不可下载")
+
+
+# =================================================
+# Scene Search Fields Config
+# =================================================
+
+
+class SceneFieldsConfigNotExistException(BaseException):
+    ERROR_CODE = "508"
+    MESSAGE = _("场景字段配置不存在")
+
+
+class SceneFieldsConfigAlreadyExistException(BaseException):
+    ERROR_CODE = "509"
+    MESSAGE = _("场景字段配置名称已存在")
+
+
+class SceneDefaultConfigNotAllowedDelete(BaseException):
+    ERROR_CODE = "510"
+    MESSAGE = _("默认场景字段配置不允许删除")
 
 
 # =================================================

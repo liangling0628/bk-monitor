@@ -56,7 +56,11 @@ declare module 'vue/types/vue' {
     $bkLoading?: any;
     $bkInfo?: (p: Partial<IBkInfoProps>) => { close: () => void };
     $bkMessage?: (p: Partial<object>) => void;
-    $bkPopover?: (...object) => void;
+    $bkPopover?: (...object) => {
+      destroy: () => void;
+      hide: () => void;
+      show: () => void;
+    };
     $bkToPinyin?: (str: string, lowerCase?: boolean, separator?: string) => string;
   }
 }
@@ -78,6 +82,9 @@ declare global {
     __BK_WEWEB_DATA__: Record<string, any>;
     __POWERED_BY_BK_WEWEB__?: boolean;
     agent_setup_url: string;
+    // APM 监控相关
+    APM_QUERY_STRING?: string;
+    LOCAL_OLD_TIME_RANGE?: [string, string];
     // ai小鲸鱼 api base url
     ai_xiao_jing_base_url?: string;
     AJAX_URL_PREFIX: string;

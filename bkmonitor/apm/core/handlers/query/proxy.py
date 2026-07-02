@@ -29,7 +29,6 @@ from apm.core.handlers.query.define import QueryMode, TraceInfoList
 from apm.core.handlers.query.ebpf_query import DeepFlowQuery
 from apm.core.handlers.query.origin_trace_query import OriginTraceQuery
 from apm.core.handlers.query.span_query import SpanQuery
-from apm.core.handlers.query.statistics_query import StatisticsQuery
 from apm.core.handlers.query.trace_query import TraceQuery
 from apm.models import ApmApplication, ApmDataSourceConfigBase
 from apm_ebpf.models import DeepflowWorkload
@@ -104,31 +103,30 @@ class QueryProxy:
         return trace_query
 
     @cached_property
-    def statistics_query(self):
-        return StatisticsQuery(self.trace_query, self.span_query)
-
-    @cached_property
     def is_trace_query_valid(self):
         return isinstance(self.trace_query, TraceQuery)
 
     @classmethod
     def is_trace_or_span_id_query(cls, filters: list[types.Filter], query_string: str) -> bool:
-        """判断是否是 TraceId 或 SpanId 精确查询"""
+        """判断是否是 TraceId 或 SpanId 精确查询（含 links 嵌套字段）"""
         if not filters and not query_string:
             return False
 
-        for filter_item in filters:
-            if all(
-                [
-                    filter_item["key"] in (OtlpKey.TRACE_ID, OtlpKey.SPAN_ID),
-                    filter_item.get("operator") == FilterOperator.EQUAL,
-                ]
-            ):
+        link_trace_id_key: str = f"{OtlpKey.LINKS}.{OtlpKey.TRACE_ID}"
+        link_span_id_key: str = f"{OtlpKey.LINKS}.{OtlpKey.SPAN_ID}"
+        trace_or_span_id_keys: tuple[str, str, str, str] = (
+            OtlpKey.TRACE_ID,
+            OtlpKey.SPAN_ID,
+            link_trace_id_key,
+            link_span_id_key,
+        )
+
+        for filter_item in filters or []:
+            if filter_item["key"] in trace_or_span_id_keys and filter_item.get("operator") == FilterOperator.EQUAL:
                 return True
 
-        if query_string:
-            if f'{OtlpKey.TRACE_ID}: "' in query_string or f'{OtlpKey.SPAN_ID}: "' in query_string:
-                return True
+        if query_string and any(f'{field}: "' in query_string for field in trace_or_span_id_keys):
+            return True
 
         return False
 
@@ -178,10 +176,17 @@ class QueryProxy:
                 bk_biz_id=trace_relation["bk_biz_id"], app_name=trace_relation["app_name"]
             ).first()
             if relation_app:
+                # 跨应用 Span 查询：需透传 relation_app 的真实 result_table_id，
+                # 确保共享 Trace 结果表场景下 TraceQueryGuard 能拿到与 relation_app 绑定的 table_id 和 应用上下文。
                 span_query = SpanQuery(
                     relation_app.bk_biz_id,
                     relation_app.app_name,
                     relation_app.trace_datasource.retention,
+                    overwrite_datasource_configs={
+                        ApmDataSourceConfigBase.TRACE_DATASOURCE: {
+                            "get_table_id_func": lambda *args, **kwargs: relation_app.trace_datasource.result_table_id,
+                        },
+                    },
                 )
                 relation_spans = span_query.query_by_trace_id(trace_id)
                 client = Permission()
@@ -219,13 +224,6 @@ class QueryProxy:
         """获取候选值"""
         return self.query_mode[query_mode].query_option_values(
             datasource_type, start_time, end_time, fields, limit, filters, query_string
-        )
-
-    def query_statistics(
-        self, query_mode, start_time, end_time, limit, offset, filters=None, query_string=None, sort=None
-    ):
-        return self.statistics_query.query_statistics(
-            query_mode, start_time, end_time, limit, offset, filters, query_string, sort
         )
 
     def _get_trace_relation(self, trace_id: str):

@@ -8,10 +8,12 @@ an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express o
 specific language governing permissions and limitations under the License.
 """
 
+import json
 import logging
 from typing import Any
 
 from django.apps import apps
+from django.conf import settings
 from django.db import transaction
 from django.utils.translation import gettext as _
 from rest_framework import serializers
@@ -20,8 +22,14 @@ from bkm_space.utils import bk_biz_id_to_space_uid
 from core.drf_resource import Resource
 from core.errors.metadata import EntityNotFoundError, UnsupportedKindError
 from metadata.models import EntityMeta
+from metadata.models.entity_relation import NAMESPACE_ALL
+from metadata.utils.redis_tools import RedisTools
 
 logger = logging.getLogger("metadata")
+
+ENTITY_REDIS_KEY_PREFIX = "bkmonitorv3:entity"
+ENTITY_REDIS_CHANNEL_SUFFIX = ":channel"
+REDIS_SYNC_KINDS = ("ResourceDefinition", "RelationDefinition")
 
 
 class EntityHandler:
@@ -76,6 +84,7 @@ class EntityHandler:
                 defaults=create_data,
             )
 
+            changed = created
             # 如果 spec 发生变化，更新数据以及 generation
             if not created and (cleaned_spec != entity.get_spec() or entity.labels != labels):
                 for field in cleaned_spec:
@@ -83,6 +92,11 @@ class EntityHandler:
                 entity.labels = labels
                 entity.generation += 1
                 entity.save()
+                changed = True
+
+        # 同步到 Redis（仅对特定类型）
+        self._rebuild_redis_cache(entity)
+        self._schedule_bkbase_graph_definition_sync(entity, action="apply", changed=changed)
 
         return entity.to_json()
 
@@ -145,7 +159,128 @@ class EntityHandler:
         except self.model_class.DoesNotExist:
             raise EntityNotFoundError(context={"namespace": namespace, "name": name})
 
+        # 先 DB 删除，再 Redis 删除（DB 优先策略，保证一致性）
         entity.delete()
+
+        # 从 DB 全量重建该 namespace 的 Redis 缓存
+        self._rebuild_redis_cache(entity)
+        self._schedule_bkbase_graph_definition_sync(entity, action="delete", changed=True)
+
+    def _schedule_bkbase_graph_definition_sync(self, entity: EntityMeta, action: str, changed: bool) -> None:
+        """
+        ResourceDefinition / RelationDefinition 变更后，异步触发已有 BKBase graph relation 链路重算并 apply。
+
+        BKBase apply 是外部调用，不能阻塞 metadata apply/delete 主链路；这里仅在事务提交后投递任务。
+        """
+        kind = entity.get_kind()
+        if kind not in REDIS_SYNC_KINDS or not changed:
+            return
+        if not getattr(settings, "ENABLE_SYNC_GRAPH_DEFINITION_TO_BKBASE", False):
+            return
+
+        namespace = entity.namespace or NAMESPACE_ALL
+        task_kwargs = {
+            "namespace": namespace,
+            "kind": kind,
+            "name": entity.name,
+            "generation": entity.generation,
+            "action": action,
+        }
+
+        def _send_task():
+            try:
+                from alarm_backends.service.scheduler.app import app
+
+                app.send_task(
+                    "metadata.sync_graph_definition_to_bkbase",
+                    kwargs=task_kwargs,
+                    queue="celery_metadata_task_worker",
+                )
+                logger.info(
+                    "scheduled bkbase graph definition sync: kind=%s, namespace=%s, name=%s, action=%s",
+                    kind,
+                    namespace,
+                    entity.name,
+                    action,
+                )
+            except Exception as e:  # pylint: disable=broad-except
+                logger.exception(
+                    "failed to schedule bkbase graph definition sync: kind=%s, namespace=%s, name=%s, error=%s",
+                    kind,
+                    namespace,
+                    entity.name,
+                    e,
+                )
+
+        transaction.on_commit(_send_task)
+
+    def _rebuild_redis_cache(self, entity: EntityMeta) -> None:
+        """
+        按 kind + namespace 从 DB 全量重建 Redis 缓存，供 bmw SchemaProvider 消费。
+
+        采用全量覆盖策略，避免 read-modify-write 的并发竞态问题。
+        每次 apply/delete 后，从 DB 查询该 kind + namespace 下的全部实体，直接覆盖写入 Redis。
+
+        Redis 数据契约:
+        - Key:     {ENTITY_REDIS_KEY_PREFIX}:{Kind}  (e.g. bkmonitorv3:entity:ResourceDefinition)
+        - Field:   namespace (空 namespace 映射为 NAMESPACE_ALL="__all__")
+        - Value:   JSON string of {name: redisJsonData, ...}
+        - Channel: {Key}{ENTITY_REDIS_CHANNEL_SUFFIX}  (e.g. bkmonitorv3:entity:ResourceDefinition:channel)
+        - Message: JSON string of {namespace, kind}
+
+        Args:
+            entity: 触发变更的实体对象（用于提取 kind/namespace 信息及发布通知）
+        """
+        kind = entity.get_kind()
+
+        # 只对特定类型进行 Redis 同步
+        if kind not in REDIS_SYNC_KINDS:
+            return
+
+        # 检查实体是否有 to_redis_json 方法
+        if not hasattr(entity, "to_redis_json"):
+            logger.warning("entity %s does not have to_redis_json method, skip redis sync", kind)
+            return
+
+        try:
+            redis_key = f"{ENTITY_REDIS_KEY_PREFIX}:{kind}"
+            channel = f"{redis_key}{ENTITY_REDIS_CHANNEL_SUFFIX}"
+            namespace = entity.namespace or NAMESPACE_ALL
+
+            # 从 DB 查询该 kind + namespace 下的全部实体，全量重建
+            db_entities = self.model_class.objects.filter(namespace=entity.namespace)
+            entities = {}
+            for e in db_entities:
+                entities[e.name] = e.to_redis_json()
+
+            if entities:
+                # 全量覆盖写入 Redis
+                RedisTools.hset_to_redis(redis_key, namespace, json.dumps(entities))
+            else:
+                # 该 namespace 下已无实体，删除整个字段
+                RedisTools.hdel(redis_key, [namespace])
+
+            # 发布变更通知（只需 namespace + kind，消费端按 namespace 全量 reload）
+            msg = json.dumps({"namespace": namespace, "kind": kind})
+            RedisTools.publish(channel, [msg])
+
+            logger.info(
+                "rebuild redis cache: kind=%s, namespace=%s, name=%s, entity_count=%d",
+                kind,
+                namespace,
+                entity.name,
+                len(entities),
+            )
+
+        except Exception as e:
+            # Redis 同步失败不影响主流程，只记录日志
+            logger.exception(
+                "failed to rebuild redis cache: kind=%s, namespace=%s, name=%s, error=%s",
+                kind,
+                entity.namespace,
+                entity.name,
+                e,
+            )
 
 
 class EntityHandlerFactory:
@@ -280,8 +415,9 @@ class ApplyEntityResource(Resource):
                 if not space_uid:
                     raise serializers.ValidationError(_("无效的业务ID: %s") % attrs["bk_biz_id"])
                 attrs["metadata"]["namespace"] = space_uid
-            elif "namespace" not in attrs["metadata"]:
-                raise serializers.ValidationError(_("metadata.namespace 字段不能为空"))
+            elif not attrs["metadata"].get("namespace"):
+                # namespace 未传或为空字符串时，默认设置为 __all__
+                attrs["metadata"]["namespace"] = NAMESPACE_ALL
             return attrs
 
     def perform_request(self, validated_request_data):
@@ -345,14 +481,15 @@ class GetEntityResource(Resource):
         bk_biz_id = serializers.IntegerField(required=False, label="业务ID")
 
         def validate(self, attrs):
-            # 如果 bk_biz_id 存在，则覆盖 namespace，否则 namespace 为必填
+            # 如果 bk_biz_id 存在，则覆盖 namespace
             if "bk_biz_id" in attrs and attrs["bk_biz_id"]:
                 space_uid = bk_biz_id_to_space_uid(attrs["bk_biz_id"])
                 if not space_uid:
                     raise serializers.ValidationError(_("无效的业务ID: %s") % attrs["bk_biz_id"])
                 attrs["namespace"] = space_uid
-            elif "namespace" not in attrs:
-                raise serializers.ValidationError(_("namespace 字段不能为空"))
+            elif not attrs.get("namespace"):
+                # namespace 未传或为空字符串时，默认设置为 __all__
+                attrs["namespace"] = NAMESPACE_ALL
             return attrs
 
     def perform_request(self, validated_request_data):
@@ -477,8 +614,9 @@ class DeleteEntityResource(Resource):
                 if not space_uid:
                     raise serializers.ValidationError(_("无效的业务ID: %s") % attrs["bk_biz_id"])
                 attrs["namespace"] = space_uid
-            elif "namespace" not in attrs:
-                raise serializers.ValidationError(_("namespace 字段不能为空"))
+            elif not attrs.get("namespace"):
+                # namespace 未传或为空字符串时，默认设置为 __all__
+                attrs["namespace"] = NAMESPACE_ALL
             return attrs
 
     def perform_request(self, validated_request_data):

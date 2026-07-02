@@ -91,6 +91,13 @@ class QuerySchema(Schema):
 
 UserSchema = Regex(r"^(user#|group#)?[a-zA-Z0-9-_]+$")
 
+IssueConfigSchema = {
+    Optional("enabled", default=True): bool,
+    Optional("dimensions", default=lambda: []): [str],
+    Optional("levels", default=lambda: []): [Or("fatal", "warning", "remind")],
+    Optional("conditions", default=""): str,
+}
+
 StrategySchema = Schema(
     {
         "name": And(str, lambda p: 128 >= len(p) > 0),
@@ -165,6 +172,9 @@ StrategySchema = Schema(
             Optional("chart_image_enabled", default=True): bool,
             Optional("interval_mode", default="standard"): Or("standard", "increasing"),
             Optional("interval", default=120): int,
+            # 不设 default：未声明时让 validate 不写入字段，parse_yaml 据此判定"用户未显式配置"，
+            # 透传到 DB 后由 fta_action 运行时落默认 parallel（与 NotifyActionConfigSlz 行为对齐）
+            Optional("voice_notice"): Or("parallel", "serial"),
             Optional(
                 "template",
                 default=lambda: {
@@ -201,6 +211,7 @@ StrategySchema = Schema(
                 },
             }
         ],
+        Optional("issue_config", default=None): Or(None, IssueConfigSchema),
     },
     ignore_extra_keys=True,
 )

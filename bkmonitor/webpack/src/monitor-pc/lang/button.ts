@@ -112,6 +112,12 @@ export default {
   修改后重试: 'Retry after modification',
   设为默认: 'Set as default',
   取消默认: 'Remove default',
+  取消选择: 'Cancel Selection',
+  修改全局配置: 'Modify Global Configuration',
+  全局生效规则: 'Global Effective Rules',
+  备注: 'Remark',
+  返回码备注: 'Return Code Remark',
+  全局生效: 'Global Effective',
 
   // 规范：平台特性 术语
   新建节点: 'New Probe',
@@ -214,6 +220,7 @@ export default {
   新建自定义服务: 'New Custom Service',
   指标设置: 'Metric Settings',
   新建研发项目: 'New R&D Project',
+  清空选择: 'Clear Selection',
 
   // 标签类
   'button-执行中': 'Running',
@@ -272,6 +279,10 @@ export default {
   前往节点管理处理: 'Go to NodeMan',
   前往选择监控目标: 'Go to Select Targets',
   采集器安装前往节点管理: 'Go to NodeMan',
+  手动选择: 'Manual Selection',
+  自动发现: 'Automatic Discovery',
+  自动发现规则: 'Automatic Discovery Rules',
+  恢复: 'Recover',
 
   // - Tool Text：工具栏文本，用于描述工具栏按钮的作用，例如“新建”、“保存”等。
   // 图表操作类
@@ -516,4 +527,26 @@ export default {
   添加告警策略: 'Add Alert Policy',
   更多地址: 'More',
   维度聚合: 'Group by',
+  上一个: 'Previous',
+  下一个: 'Next',
+  分析详情: 'Analysis Details',
+
+  // ISSUES
+  标为已解决: 'Mark as Resolved',
+  标记为已解决: 'Mark as Resolved',
+  重新打开: 'Reopen',
+  添加跟进信息: 'Add Follow-up Information',
+  批量添加跟进信息: 'Batch Add Follow-up Information',
+  未指派: 'Unassigned',
+  'button-高': 'High',
+  'button-中': 'Medium',
+  'button-低': 'Low',
+  'button-富文本编辑': 'Rich Text Editor',
+
+  确认拆分: 'Confirm Split',
+  '拆分为新 Issue': 'Split to New Issue',
+  确认合并: 'Confirm Merge',
+  '设为主 Issue': 'Set as Main Issue',
+  了解更多: 'Learn More',
+  合并: 'Merge',
 };

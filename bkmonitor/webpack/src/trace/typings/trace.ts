@@ -28,7 +28,9 @@ import type { Process, Span } from '../components/trace-view/typings';
 
 export enum EListItemType {
   events = 'Events',
+  links = 'Links',
   process = 'Process',
+  resource = 'Resource',
   stageTime = 'StageTime',
   tags = 'Tags',
 }
@@ -100,7 +102,9 @@ export interface IInfo {
 
 export interface IListItem {
   [EListItemType.events]?: IEventsItem;
+  [EListItemType.links]?: ISpanLinksItem;
   [EListItemType.process]?: IProcessItem;
+  [EListItemType.resource]?: ITagsItem;
   [EListItemType.stageTime]?: IStageTimeItem;
   [EListItemType.tags]?: ITagsItem;
   isExpan: boolean;
@@ -203,6 +207,18 @@ export interface ISpanDetail {
       traceID: string;
     }[];
   };
+}
+
+export interface ISpanLinkItem {
+  content: ITagContent[];
+  isExpan: boolean;
+  header: {
+    name: string;
+  };
+}
+
+export interface ISpanLinksItem {
+  list: ISpanLinkItem[];
 }
 
 export interface ISpanListItem {
@@ -312,7 +328,7 @@ export interface ITraceListItem {
   statusCode?: number;
   time?: number;
   trace_id: string;
-  trace_info: IDetailInfo;
+  trace_info?: IDetailInfo;
   traceID?: string;
   type?: string;
 }

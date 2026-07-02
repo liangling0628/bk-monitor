@@ -8,6 +8,8 @@ an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express o
 specific language governing permissions and limitations under the License.
 """
 
+import enum
+import logging
 import uuid
 from typing import Any
 
@@ -16,6 +18,47 @@ from django.utils.translation import gettext as _
 from rest_framework import serializers
 
 from metadata.models.common import BaseModel
+
+NAMESPACE_ALL = "__all__"
+
+logger = logging.getLogger("metadata")
+
+
+class GraphDelimiter(str, enum.Enum):
+    """
+    图节点唯一标识符（UID）拼接用的字段分隔符枚举
+
+    核心作用：告诉下游（bkbase / bmw DataBus）如何将 id_fields 中的多个字段值拼接成图节点的 UID。
+
+    示例：
+        id_fields = ["pod_name", "namespace"]
+        原始数据 = {"pod_name": "nginx-xxx", "namespace": "default"}
+
+        delimiter=UNDERSCORE("_") → uid="nginx-xxx_default"
+        delimiter=HYPHEN("-")     → uid="nginx-xxx-default"
+        delimiter=DOT(".")        → uid="nginx-xxx.default"
+
+    注意：
+        - 此配置会随 SurrealDBBindingConfig 下发到 bkbase
+        - 下游 bmw 的 SchemaProvider/DataBus 会按此格式生成/解析节点 ID
+        - delimiter 不一致会导致关系查询失败、图结构断裂
+
+    TODO(未来扩展):
+        当前所有 vertex/relation 统一使用默认值 UNDERSCORE("_")。
+        后续若需按资源类型使用不同分隔符（如 IP 用 "."、服务名用 "-"），
+        可在 ResourceDefinition / RelationDefinition 的 labels 或 spec 中增加
+        "delimiter" 可选字段，并在 convert_to_vertices_and_relations 中按实例级配置覆盖默认值。
+    """
+
+    UNDERSCORE = "_"  # 下划线分隔符（默认，如 nginx_default）
+    HYPHEN = "-"  # 连字符分隔符（如 nginx-default）
+    DOT = "."  # 点号分隔符（如 nginx.default）
+    COMMA = ","  # 逗号分隔符（如 nginx,default）
+
+    @classmethod
+    def default(cls) -> "GraphDelimiter":
+        """返回默认的分隔符（下划线）"""
+        return cls.UNDERSCORE
 
 
 class EntityMeta(BaseModel):
@@ -38,10 +81,10 @@ class EntityMeta(BaseModel):
     )
 
     uid = models.UUIDField(_("唯一标识符"), default=uuid.uuid4, editable=False, unique=True, db_index=True)
-    generation = models.BigIntegerField(_("世代号"), default=1, help_text=_("跟踪资源规格变更次数"))
-    namespace = models.CharField(_("命名空间"), max_length=128, db_index=True)
+    generation = models.BigIntegerField(_("generation"), default=1, help_text=_("跟踪资源规格变更次数"))
+    namespace = models.CharField(_("命名空间"), max_length=128, blank=True, db_index=True)
     name = models.CharField(_("资源名称"), max_length=128)
-    labels = models.JSONField(_("资源标签"), default=dict)
+    labels = models.JSONField(_("资源标签"), default=dict, blank=True)
 
     class Meta:
         unique_together = ("namespace", "name")
@@ -49,6 +92,12 @@ class EntityMeta(BaseModel):
 
     def __str__(self):
         return f"{self.namespace}/{self.name}"
+
+    def save(self, *args, **kwargs):
+        # 统一空 namespace 为 NAMESPACE_ALL，确保 DB 真值唯一
+        if not self.namespace:
+            self.namespace = NAMESPACE_ALL
+        super().save(*args, **kwargs)
 
     @classmethod
     def get_kind(cls) -> str:
@@ -117,6 +166,90 @@ class EntityMeta(BaseModel):
         setattr(cls, cache_attr, serializer_class)
         return serializer_class
 
+    # ====================================================================
+    # 图定义查询与转换工具方法
+    # ====================================================================
+
+    @staticmethod
+    def query_with_fallback(
+        model_class: type["EntityMeta"],
+        biz_namespace: str,
+    ) -> list["EntityMeta"]:
+        """
+        查询 EntityMeta 子类实例，支持 fallback 到全局命名空间 (__all__)
+
+        合并策略：
+        - 业务级定义优先于全局级定义
+        - 按 name 字段去重，保留首次出现的记录（即业务级）
+        """
+        biz_entities = list(model_class.objects.filter(namespace=biz_namespace))
+        global_entities = list(model_class.objects.filter(namespace=NAMESPACE_ALL))
+
+        merged = {entity.name: entity for entity in biz_entities}
+        for entity in global_entities:
+            if entity.name not in merged:
+                merged[entity.name] = entity
+
+        return list(merged.values())
+
+    @staticmethod
+    def merge_entities_by_name(
+        primary_list: list["EntityMeta"],
+        fallback_list: list["EntityMeta"],
+    ) -> list["EntityMeta"]:
+        """合并两个实体列表，按 name 属性去重，主列表优先。"""
+        merged = {entity.name: entity for entity in primary_list}
+        for entity in fallback_list:
+            if entity.name not in merged:
+                merged[entity.name] = entity
+        return list(merged.values())
+
+    @classmethod
+    def auto_query_graph_definitions(
+        cls,
+        bk_biz_id: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """
+        自动查询并转换 ResourceDefinition/RelationDefinition 为 vertices/relations 格式。
+        """
+        try:
+            from bkm_space.utils import bk_biz_id_to_space_uid
+
+            biz_namespace = bk_biz_id_to_space_uid(bk_biz_id)
+            if not biz_namespace:
+                raise ValueError(f"bk_biz_id={bk_biz_id} cannot resolve to a valid space uid")
+
+            resource_defs = cls.query_with_fallback(
+                model_class=ResourceDefinition,
+                biz_namespace=biz_namespace,
+            )
+            relation_defs = cls.query_with_fallback(
+                model_class=RelationDefinition,
+                biz_namespace=biz_namespace,
+            )
+
+            vertices, relations = convert_to_vertices_and_relations(
+                resource_defs=resource_defs,
+                relation_defs=relation_defs,
+            )
+
+            logger.info(
+                "auto_query_graph_definitions: bk_biz_id->[%s] queried %d resources, %d relations",
+                bk_biz_id,
+                len(resource_defs),
+                len(relation_defs),
+            )
+
+            return vertices, relations
+
+        except Exception as e:
+            logger.exception(
+                "auto_query_graph_definitions: failed for bk_biz_id->[%s]: %s",
+                bk_biz_id,
+                e,
+            )
+            raise ValueError(f"无法查询资源关联定义 (bk_biz_id={bk_biz_id}): {e}") from e
+
 
 class CustomRelationStatus(EntityMeta):
     """自定义关联状态表"""
@@ -131,3 +264,250 @@ class CustomRelationStatus(EntityMeta):
 
     def __str__(self):
         return f"{self.namespace}/{self.name} -> {self.from_resource} -> {self.to_resource}"
+
+
+class ResourceDefinition(EntityMeta):
+    """
+    资源类型定义
+
+    定义资源的元数据结构，包括字段定义列表。
+    用于 bmw 的 SchemaProvider，支持资源关联查询功能。
+
+    字段结构示例:
+    [
+        {"namespace": "k8s", "name": "pod", "required": true},
+        {"namespace": "bkmonitor", "name": "bk_biz_id", "required": true}
+    ]
+    """
+
+    fields = models.JSONField(
+        _("字段定义列表"), default=list, blank=True, help_text=_("资源的字段定义，每个字段包含 namespace, name, required")
+    )
+
+    class Meta:
+        verbose_name = _("资源类型定义")
+        verbose_name_plural = _("资源类型定义")
+        unique_together = ("namespace", "name")
+
+    def __str__(self):
+        return f"ResourceDefinition({self.namespace}/{self.name})"
+
+    def to_redis_json(self) -> dict[str, Any]:
+        """
+        生成 Redis 存储格式的 JSON，供 bmw SchemaProvider 消费
+
+        - namespace: string
+        - name: string
+        - fields: []FieldDefinition
+        - labels: map[string]string
+        """
+        return {
+            "namespace": self.namespace or NAMESPACE_ALL,
+            "name": self.name,
+            "fields": self.fields,
+            "labels": self.labels,
+            "generation": self.generation,
+        }
+
+
+class RelationDefinition(EntityMeta):
+    """
+    关联关系定义
+
+    定义资源之间的关联关系，支持单向和双向关系。
+    用于 bmw 的 SchemaProvider，支持资源关联查询功能。
+    """
+
+    # 关联类别选项
+    CATEGORY_STATIC = "static"
+    CATEGORY_DYNAMIC = "dynamic"
+    CATEGORY_CHOICES = (
+        (CATEGORY_STATIC, _("静态关联")),
+        (CATEGORY_DYNAMIC, _("动态关联")),
+    )
+
+    from_resource = models.CharField(_("源资源类型"), max_length=128, help_text=_("关联的源资源类型名称"))
+    to_resource = models.CharField(_("目标资源类型"), max_length=128, help_text=_("关联的目标资源类型名称"))
+    category = models.CharField(
+        _("关联类别"),
+        max_length=32,
+        choices=CATEGORY_CHOICES,
+        default=CATEGORY_STATIC,
+        help_text=_("静态关联或动态关联"),
+    )
+    is_directional = models.BooleanField(
+        _("是否单向关系"), default=False, help_text=_("单向关系使用 from_to_to 格式命名")
+    )
+    is_belongs_to = models.BooleanField(
+        _("是否归属关系"), default=False, help_text=_("仅对双向关系有效，表示 from_resource 归属于 to_resource")
+    )
+
+    class Meta:
+        verbose_name = _("关联关系定义")
+        verbose_name_plural = _("关联关系定义")
+        unique_together = ("namespace", "name")
+
+    def __str__(self):
+        direction = "->" if self.is_directional else "<->"
+        return f"RelationDefinition({self.namespace}/{self.name}: {self.from_resource} {direction} {self.to_resource})"
+
+    def to_redis_json(self) -> dict[str, Any]:
+        """
+        生成 Redis 存储格式的 JSON，供 bmw SchemaProvider 消费
+
+        - namespace: string
+        - name: string
+        - from_resource: string
+        - to_resource: string
+        - category: string
+        - is_directional: bool
+        - is_belongs_to: bool
+        - labels: map[string]string
+        """
+        return {
+            "namespace": self.namespace or NAMESPACE_ALL,
+            "name": self.name,
+            "from_resource": self.from_resource,
+            "to_resource": self.to_resource,
+            "category": self.category,
+            "is_directional": self.is_directional,
+            "is_belongs_to": self.is_belongs_to,
+            "labels": self.labels,
+            "generation": self.generation,
+        }
+
+
+def get_relation_metric_name(rel_def: RelationDefinition) -> str:
+    """Return the metric name consumed by bmw for this relation definition."""
+    if rel_def.is_directional:
+        return f"{rel_def.from_resource}_to_{rel_def.to_resource}_flow"
+    from_resource, to_resource = sorted([rel_def.from_resource, rel_def.to_resource])
+    return f"{from_resource}_with_{to_resource}_relation"
+
+
+def get_resource_definition_id_fields(res_def: ResourceDefinition) -> list[str]:
+    """Return validated required field names used to build a graph vertex UID."""
+    if not isinstance(res_def.fields, list):
+        raise ValueError(f"ResourceDefinition[{res_def.name}].fields must be a list")
+
+    id_fields = []
+    for index, field in enumerate(res_def.fields):
+        if not isinstance(field, dict):
+            raise ValueError(f"ResourceDefinition[{res_def.name}].fields[{index}] must be an object")
+
+        field_name = field.get("name")
+        if not isinstance(field_name, str) or not field_name.strip():
+            raise ValueError(f"ResourceDefinition[{res_def.name}].fields[{index}].name must be a non-empty string")
+
+        required = field.get("required")
+        if required is not None and not isinstance(required, bool):
+            raise ValueError(f"ResourceDefinition[{res_def.name}].fields[{index}].required must be a boolean")
+
+        if required is True:
+            id_fields.append(field_name.strip())
+
+    if not id_fields:
+        raise ValueError(f"ResourceDefinition[{res_def.name}] must define at least one required field")
+
+    return id_fields
+
+
+def get_relation_semantics_key(rel_def: RelationDefinition, metric_name: str) -> tuple[str, str, str]:
+    """Return the dedup key for a graph relation definition."""
+    if rel_def.is_directional:
+        return rel_def.from_resource, rel_def.to_resource, metric_name
+
+    from_resource, to_resource = sorted([rel_def.from_resource, rel_def.to_resource])
+    return from_resource, to_resource, metric_name
+
+
+def convert_to_vertices_and_relations(
+    resource_defs: list[ResourceDefinition],
+    relation_defs: list[RelationDefinition],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    将 ResourceDefinition 和 RelationDefinition 转换为 SurrealDB 所需的 vertices 和 relations 格式
+
+    核心作用：
+        告诉下游（bkbase / bmw DataBus）如何拼接图节点的唯一标识符(UID)。
+        通过 delimiter 字段指定 id_fields 中多个字段值之间的连接符。
+
+    转换映射关系：
+    - ResourceDefinition.name -> vertex.name
+    - ResourceDefinition.fields[required=true].name -> vertex.id_fields[]
+    - RelationDefinition.name -> relation.name
+    - RelationDefinition.from_resource -> relation.from
+    - RelationDefinition.to_resource -> relation.to
+    - RelationDefinition.from_resource/to_resource/is_directional -> relation.metric（BMW GetRelationName 规则）
+
+    Args:
+        resource_defs: ResourceDefinition 列表
+        relation_defs: RelationDefinition 列表
+
+    Returns:
+        tuple: (vertices, relations)
+
+    输出示例:
+        >>> vertices = [{"name":"pod", "id_fields":["pod_name","namespace"], "delimiter":"_"}]
+        >>> relations = [
+        ...     {"name":"pod_node", "from":"pod", "to":"node", "metric":"node_with_pod_relation", "delimiter":"_"}
+        ... ]
+    """
+    # 转换 ResourceDefinition -> vertices
+    vertices = []
+    seen_vertex_names = set()
+    for res_def in resource_defs:
+        if res_def.name in seen_vertex_names:
+            continue  # 去重
+        seen_vertex_names.add(res_def.name)
+
+        vertex = {
+            "name": res_def.name,
+            "id_fields": get_resource_definition_id_fields(res_def),
+            # delimiter: 告诉下游 bkbase 如何将 id_fields 拼接成节点唯一标识符(UID)
+            # 例如 id_fields=["pod_name","namespace"], delimiter="_" → UID格式: "nginx_default"
+            "delimiter": GraphDelimiter.default().value,
+        }
+        vertices.append(vertex)
+
+    # 转换 RelationDefinition -> relations
+    relations = []
+    seen_relation_names = set()
+    seen_relation_keys = {}
+    for rel_def in relation_defs:
+        if rel_def.name in seen_relation_names:
+            continue  # 去重
+        seen_relation_names.add(rel_def.name)
+
+        if rel_def.from_resource not in seen_vertex_names:
+            raise ValueError(
+                f"RelationDefinition[{rel_def.name}].from_resource references unknown ResourceDefinition"
+                f"[{rel_def.from_resource}]"
+            )
+        if rel_def.to_resource not in seen_vertex_names:
+            raise ValueError(
+                f"RelationDefinition[{rel_def.name}].to_resource references unknown ResourceDefinition"
+                f"[{rel_def.to_resource}]"
+            )
+
+        metric_name = get_relation_metric_name(rel_def)
+        relation_key = get_relation_semantics_key(rel_def, metric_name)
+        existing_relation_name = seen_relation_keys.get(relation_key)
+        if existing_relation_name is not None:
+            raise ValueError(
+                f"RelationDefinition[{rel_def.name}] duplicates relation semantics with "
+                f"RelationDefinition[{existing_relation_name}]"
+            )
+        seen_relation_keys[relation_key] = rel_def.name
+
+        relation = {
+            "name": rel_def.name,
+            "from": rel_def.from_resource,
+            "to": rel_def.to_resource,
+            "metric": metric_name,
+            # delimiter: 与 vertex 一致，确保关系边两端节点的 UID 拼接规则相同
+            "delimiter": GraphDelimiter.default().value,
+        }
+        relations.append(relation)
+
+    return vertices, relations

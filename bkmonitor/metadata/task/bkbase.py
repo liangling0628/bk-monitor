@@ -9,13 +9,14 @@ specific language governing permissions and limitations under the License.
 """
 
 import copy
+import itertools
+import json
 import logging
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import redis
 from django.conf import settings
@@ -24,8 +25,10 @@ from django.db import transaction
 from alarm_backends.core.lock.service_lock import share_lock
 from core.drf_resource import api
 from core.prometheus import metrics
-from metadata import config, models
-from metadata.models.data_link.data_link_configs import ClusterConfig
+from metadata import models
+from metadata.config import KAFKA_SASL_PROTOCOL
+from metadata.models.data_link.constants import BKBASE_NAMESPACE_BK_LOG, BKBASE_NAMESPACE_BK_MONITOR, DataLinkKind
+from metadata.models.data_link.data_link_configs import COMPONENT_CLASS_MAP, ClusterConfig, ResultTableConfig
 from metadata.models.space.constants import SpaceStatus, SpaceTypes
 from metadata.task.constants import BKBASE_V4_KIND_STORAGE_CONFIGS
 from metadata.task.tasks import sync_bkbase_v4_metadata
@@ -39,6 +42,7 @@ logger = logging.getLogger("metadata")
 
 
 DEFAULT_VM_EXPIRES_MS = 24 * 3600 * 90 * 1000
+PUBSUB_POLL_TIMEOUT_SECONDS = 1.0
 
 
 def watch_bkbase_meta_redis_task():
@@ -116,11 +120,10 @@ def watch_bkbase_meta_redis(redis_conn, key_pattern, runtime_limit=86400):
     bkbase_pattern = settings.BKBASE_REDIS_PATTERN
     channel_regex = re.compile(rf"__keyspace@\d+__:{bkbase_pattern}:\d+$")
 
-    # 计算任务结束时间
-    start_time = datetime.now()
-    end_time = start_time + timedelta(seconds=runtime_limit)
+    # 使用单调时钟控制运行时长，避免 pubsub 阻塞时无法及时退出。
+    end_time = time.monotonic() + runtime_limit
 
-    while datetime.now() < end_time:  # 运行时间控制
+    while time.monotonic() < end_time:  # 运行时间控制
         pubsub = None
         try:
             # 初始化 pubsub
@@ -128,9 +131,15 @@ def watch_bkbase_meta_redis(redis_conn, key_pattern, runtime_limit=86400):
             pubsub.psubscribe(keyspace_channel)  # 监听特定模式的键事件
             logger.info("watch_bkbase_meta_redis: Subscribed to Redis channel -> [%s]", keyspace_channel)
 
-            # 监听消息
-            for message in pubsub.listen():
-                if datetime.now() >= end_time:  # 超出运行时间，退出监听
+            # 轮询消息，避免 listen() 在无消息时无限阻塞，导致任务无法按 runtime_limit 退出。
+            while time.monotonic() < end_time:
+                remaining_seconds = max(end_time - time.monotonic(), 0)
+                message = pubsub.get_message(timeout=min(PUBSUB_POLL_TIMEOUT_SECONDS, remaining_seconds))
+
+                if message is None:
+                    continue
+
+                if time.monotonic() >= end_time:  # 超出运行时间，退出监听
                     logger.info("watch_bkbase_meta_redis: Runtime limit reached, stopping listener.")
                     return
 
@@ -270,6 +279,7 @@ def sync_bkbase_cluster_info(
     username = _get_attr_by_path(cluster_spec, field_mappings["username"])
     password = _get_attr_by_path(cluster_spec, field_mappings["password"])
     version = _get_attr_by_path(cluster_spec, field_mappings.get("version", ""))
+    bk_biz_id = _get_attr_by_path(cluster_spec, field_mappings.get("bk_biz_id", ""))
 
     # kafka 集群专用字段
     sasl_mechanisms = _get_attr_by_path(cluster_spec, field_mappings.get("sasl_mechanisms", ""))
@@ -291,17 +301,23 @@ def sync_bkbase_cluster_info(
 
     # 设置集群配置
     default_settings = {}
+    custom_option = ""
 
     if cluster_type == models.ClusterInfo.TYPE_VM:
         # 如果是VictoriaMetrics集群，需要获取过期时间和所属业务ID
         # 记录过期时间，单位为秒
         default_settings["retention_time"] = (cluster_spec.get("expiresMs") or DEFAULT_VM_EXPIRES_MS) // 1000
         # 记录集群所属业务ID，只有业务独立集群才会有对应字段，默认为None
-        default_settings["bk_biz_id"] = cluster_spec.get("bkBizId")
+        default_settings["bk_biz_id"] = bk_biz_id
+    elif cluster_type == models.ClusterInfo.TYPE_DORIS:
+        # 记录集群所属业务ID，只有业务独立集群才会有对应字段，默认为None
+        default_settings["bk_biz_id"] = bk_biz_id
+        if bk_biz_id is not None:
+            custom_option = json.dumps({"bk_biz_id": bk_biz_id})
     elif cluster_type == models.ClusterInfo.TYPE_KAFKA:
         # 如果是kafka集群，需要获取SASL认证信息
         if is_auth:
-            security_protocol = config.KAFKA_SASL_PROTOCOL
+            security_protocol = KAFKA_SASL_PROTOCOL
 
         if v3_channel_id:
             default_settings["v3_channel_id"] = v3_channel_id
@@ -322,9 +338,9 @@ def sync_bkbase_cluster_info(
         "default_settings": default_settings,
         "sasl_mechanisms": sasl_mechanisms,
         "is_auth": is_auth,
-        "gse_stream_to_id": stream_to_id,
         "security_protocol": security_protocol,
-        "version": version,
+        # "version": version,
+        # "gse_stream_to_id": stream_to_id,
     }
 
     with transaction.atomic():
@@ -348,6 +364,11 @@ def sync_bkbase_cluster_info(
                     setattr(cluster, field, value)
                     is_updated = True
                     update_fields.append(field)
+
+            if custom_option and not cluster.custom_option:
+                cluster.custom_option = custom_option
+                is_updated = True
+                update_fields.append("custom_option")
 
             # 如果集群未被标记为已注册到bkbase平台，则标记为已注册
             if not cluster.registered_to_bkbase:
@@ -379,11 +400,12 @@ def sync_bkbase_cluster_info(
                 username=username or "",
                 password=password or "",
                 is_default_cluster=False,
+                custom_option=custom_option,
                 default_settings=default_settings,
                 registered_system=models.ClusterInfo.BKDATA_REGISTERED_SYSTEM,
                 registered_to_bkbase=True,
                 version=version,
-                gse_stream_to_id=stream_to_id,
+                gse_stream_to_id=stream_to_id or -1,
             )
             logger.info(f"sync_bkbase_cluster_info: created new {cluster_type} cluster: {cluster_name}")
 
@@ -409,8 +431,14 @@ def sync_bkbase_metadata_all():
     matching_keys = []
 
     while True:
-        cursor, keys = bkbase_redis.scan(
-            cursor=cursor, match=f"{settings.BKBASE_REDIS_PATTERN}:*", count=settings.BKBASE_REDIS_SCAN_COUNT
+        # NOTE: `bkbase_redis_client()` 返回的 redis client 在类型存根中可能被标注为异步接口，
+        # 会导致静态检查将 `scan()` 推断为 Awaitable，从而报“不能迭代”的错误。
+        # 这里按运行时行为（同步 scan 返回 (cursor, keys)）做一次显式 cast，以消除误报。
+        cursor, keys = cast(
+            tuple[int, list[Any]],
+            bkbase_redis.scan(
+                cursor=cursor, match=f"{settings.BKBASE_REDIS_PATTERN}:*", count=settings.BKBASE_REDIS_SCAN_COUNT
+            ),
         )
         decoded_keys = [k.decode("utf-8") if isinstance(k, bytes) else k for k in keys]
         matching_keys.extend(decoded_keys)
@@ -500,3 +528,203 @@ def sync_bkbase_rt_meta_info_all():
         task_name="sync_bkbase_rt_meta_info_all", process_target=None
     ).observe(cost_time)
     logger.info("sync_bkbase_rt_meta_info_all: finished syncing bkbase rt meta info,cost->[%s]", cost_time)
+
+
+def _get_bkbase_components_config(
+    bk_tenant_id: str, kind: str, namespace: str, config: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """获取BKBase组件配置
+
+    Args:
+        bk_tenant_id: 租户ID
+        kind: 组件类型
+        namespace: 命名空间
+        config: 组件配置
+
+    Returns:
+        基础字段配置和额外字段配置
+        - 基础字段配置: 包含数据链路名称、租户ID、命名空间、名称、业务ID、状态
+        - 额外字段配置: 包含组件状态，其他关联字段等
+    """
+
+    metadata = config["metadata"]
+    annotations: dict[str, Any] = metadata.get("annotations", {})
+    labels: dict[str, Any] = metadata.get("labels", {})
+    bk_biz_id: int = int(labels.get("bk_biz_id", 0))
+    name: str = metadata["name"]
+    status: str = config["status"]["phase"]
+    spec: dict[str, Any] = config["spec"]
+
+    # 基础字段
+    base_config: dict[str, Any] = {
+        "data_link_name": "",
+        "bk_tenant_id": bk_tenant_id,
+        "namespace": namespace,
+        "name": name,
+        "bk_biz_id": bk_biz_id,
+    }
+    extra_config: dict[str, Any] = {"status": status}
+
+    def _get_result_table_id(rt_name: str) -> str:
+        return (
+            ResultTableConfig.objects.filter(bk_tenant_id=bk_tenant_id, namespace=namespace, name=rt_name)
+            .values_list("table_id", flat=True)
+            .first()
+            or ""
+        )
+
+    # 根据kind处理不同字段
+    match kind:
+        case DataLinkKind.DATAID.value:
+            bk_data_id = int(annotations.get("dataId") or annotations.get("DataId") or 0)
+            extra_config["bk_data_id"] = bk_data_id
+        case DataLinkKind.RESULTTABLE.value:
+            extra_config["bkbase_table_id"] = _get_annotation_value(annotations, "ResultTableId") or ""
+            extra_config["data_type"] = spec["dataType"]
+        case DataLinkKind.VMSTORAGEBINDING.value:
+            extra_config["vm_cluster_name"] = spec["storage"]["name"]
+            extra_config["bkbase_result_table_name"] = spec["data"]["name"]
+            extra_config["table_id"] = _get_result_table_id(spec["data"]["name"])
+        case DataLinkKind.ESSTORAGEBINDING.value:
+            extra_config["es_cluster_name"] = spec["storage"]["name"]
+            extra_config["bkbase_result_table_name"] = spec["data"]["name"]
+        case DataLinkKind.DORISBINDING.value:
+            extra_config["doris_cluster_name"] = spec["storage"]["name"]
+            extra_config["bkbase_result_table_name"] = spec["data"]["name"]
+        case DataLinkKind.SURREALDBBINDING.value:
+            extra_config["surrealdb_cluster_name"] = spec["storage"]["name"]
+            extra_config["bkbase_result_table_name"] = spec["data"]["name"]
+            extra_config["table_id"] = _get_result_table_id(spec["data"]["name"])
+            extra_config["table_type"] = spec.get("table_type", "temporary")
+            extra_config["vertices"] = spec.get("vertices", [])
+            extra_config["relations"] = spec.get("relations", [])
+        case DataLinkKind.DATABUS.value:
+            sink_names = [f"{sink['kind']}:{sink['name']}" for sink in spec["sinks"]]
+            extra_config["data_id_name"] = spec["sources"][0]["name"]
+            extra_config["sink_names"] = sink_names
+            extra_config["consumer_group"] = spec.get("consumerGroup", "")
+            extra_config["data_link_strategy"] = labels.get("bkm_data_link_strategy", "")
+        case DataLinkKind.BASEREPORTSINK.value:
+            vm_storage_binding_names = []
+            for mapping in spec.get("mappings", []):
+                for sink in mapping.get("sinks", []):
+                    if sink.get("kind") == DataLinkKind.VMSTORAGEBINDING.value and sink.get("name"):
+                        vm_storage_binding_names.append(sink["name"])
+            extra_config["vm_storage_binding_names"] = list(dict.fromkeys(vm_storage_binding_names))
+    return base_config, extra_config
+
+
+def _get_annotation_value(annotations: dict[str, Any], key: str) -> Any:
+    """兼容 BKBase annotation key 的大小写/下划线差异。"""
+    normalized_key = key.replace("_", "").lower()
+    for annotation_key, value in annotations.items():
+        if annotation_key.replace("_", "").lower() == normalized_key:
+            return value
+    return None
+
+
+def _sync_bkbase_v4_datalink_components(bk_tenant_id: str, namespace: str, kind: str):
+    """创建或更新组件"""
+    logger.info(
+        "sync_bkbase_v4_datalink_components: start syncing,bk_tenant_id->[%s],namespace->[%s],kind->[%s]",
+        bk_tenant_id,
+        namespace,
+        kind,
+    )
+    component_class = COMPONENT_CLASS_MAP[kind]
+    exists_components = {
+        component.name: component
+        for component in component_class.objects.filter(bk_tenant_id=bk_tenant_id, namespace=namespace)
+    }
+    configs = api.bkdata.list_data_link(
+        bk_tenant_id=bk_tenant_id, kind=DataLinkKind.get_choice_value(kind), namespace=namespace
+    )
+    updated_components = []
+    created_components = []
+    update_fields = set()
+    for config in configs:
+        # 获取组件基础字段和额外字段
+        base_config, extra_config = _get_bkbase_components_config(
+            bk_tenant_id=bk_tenant_id, kind=kind, namespace=namespace, config=config
+        )
+        if base_config["name"] in exists_components:
+            # 如果没有额外字段，则跳过
+            if not extra_config:
+                continue
+
+            # 如果组件已存在，则只更新额外字段
+            exists_component = exists_components[base_config["name"]]
+            is_updated = False
+            for field, value in extra_config.items():
+                if (
+                    _should_update_bkbase_component_field(kind, field, value)
+                    and getattr(exists_component, field) != value
+                ):
+                    setattr(exists_component, field, value)
+                    is_updated = True
+                    update_fields.add(field)
+            if is_updated:
+                updated_components.append(exists_component)
+        else:
+            created_components.append(component_class(**base_config, **extra_config))
+
+    # 批量创建或更新组件
+    with transaction.atomic():
+        if created_components:
+            component_class.objects.bulk_create(created_components, batch_size=1000)
+        if updated_components and update_fields:
+            component_class.objects.bulk_update(updated_components, fields=list(update_fields), batch_size=1000)
+
+    logger.info(
+        "sync_bkbase_v4_datalink_components: finished syncing,bk_tenant_id->[%s],namespace->[%s],kind->[%s],created_components->[%s],updated_components->[%s]",
+        bk_tenant_id,
+        namespace,
+        kind,
+        len(created_components),
+        len(updated_components),
+    )
+
+
+def _should_update_bkbase_component_field(kind: str, field: str, value: Any) -> bool:
+    if value:
+        return True
+    if kind == DataLinkKind.DATABUS.value and field == "data_link_strategy" and value == "":
+        return True
+    return kind == DataLinkKind.SURREALDBBINDING.value and field in {"vertices", "relations"} and value == []
+
+
+@share_lock(ttl=3600, identify="metadata_sync_bkbase_v4_datalink_components")
+def sync_bkbase_v4_datalink_components():
+    """定时同步 V4 链路组件配置"""
+    logger.info("sync_bkbase_v4_datalink_components: start")
+    start_time = time.time()
+    metrics.METADATA_CRON_TASK_STATUS_TOTAL.labels(
+        task_name="sync_bkbase_v4_datalink_components", status=TASK_STARTED, process_target=None
+    ).inc()
+
+    # 遍历所有租户、命名空间和组件类型，创建或更新组件
+    tenants: list[dict[str, Any]] = api.bk_login.list_tenant()
+    namespaces: list[str] = [BKBASE_NAMESPACE_BK_MONITOR, BKBASE_NAMESPACE_BK_LOG]
+    kinds: list[str] = [
+        DataLinkKind.VMSTORAGEBINDING.value,
+        DataLinkKind.ESSTORAGEBINDING.value,
+        DataLinkKind.DORISBINDING.value,
+        DataLinkKind.SURREALDBBINDING.value,
+        DataLinkKind.DATABUS.value,
+        DataLinkKind.DATAID.value,
+        DataLinkKind.RESULTTABLE.value,
+        DataLinkKind.CONDITIONALSINK.value,
+        DataLinkKind.BASEREPORTSINK.value,
+    ]
+    for tenant, namespace, kind in itertools.product(tenants, namespaces, kinds):
+        _sync_bkbase_v4_datalink_components(bk_tenant_id=tenant["id"], namespace=namespace, kind=kind)
+
+    cost_time = time.time() - start_time
+    metrics.METADATA_CRON_TASK_STATUS_TOTAL.labels(
+        task_name="sync_bkbase_v4_datalink_components", status=TASK_FINISHED_SUCCESS, process_target=None
+    ).inc()
+    metrics.METADATA_CRON_TASK_COST_SECONDS.labels(
+        task_name="sync_bkbase_v4_datalink_components", process_target=None
+    ).observe(cost_time)
+    metrics.report_all()
+    logger.info("sync_bkbase_v4_datalink_components: finished,cost_time->[%s]", cost_time)

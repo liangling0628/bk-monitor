@@ -77,10 +77,12 @@ from apps.log_databus.serializers import (
     TaskDetailSerializer,
     TaskStatusSerializer,
     ValidateContainerCollectorYamlSerializer,
+    CollectorStopSerializer,
 )
 from apps.log_search.constants import (
     BKDATA_OPEN,
     HAVE_DATA_ID,
+    HAVE_TABLE_ID,
     IGNORE_DISPLAY_CONFIG,
     NOT_CUSTOM,
     CollectorScenarioEnum,
@@ -135,7 +137,6 @@ class CollectorViewSet(ModelViewSet):
             "start",
             "stop",
             "etl_preview",
-            "etl_time",
             "update_or_create_clean_config",
             "custom_update",
             "report_token",
@@ -148,6 +149,8 @@ class CollectorViewSet(ModelViewSet):
         if self.request.query_params.get("collector_id_list", None):
             collector_id_list = self.request.query_params.get("collector_id_list").split(",")
             qs = qs.filter(collector_config_id__in=collector_id_list)
+        if self.request.query_params.get("bk_data_id"):
+            qs = qs.filter(bk_data_id=self.request.query_params.get("bk_data_id"))
         if self.request.query_params.get(HAVE_DATA_ID):
             qs = qs.filter(bk_data_id__isnull=False)
         if self.request.query_params.get(BKDATA_OPEN) and settings.FEATURE_TOGGLE["scenario_bkdata"] == "off":
@@ -158,6 +161,8 @@ class CollectorViewSet(ModelViewSet):
             )
         if self.request.query_params.get(IGNORE_DISPLAY_CONFIG):
             return qs.all()
+        if self.request.query_params.get(HAVE_TABLE_ID):
+            qs = qs.filter(table_id__isnull=False)
         return qs.filter(is_display=True)
 
     def get_serializer_class(self, *args, **kwargs):
@@ -376,6 +381,7 @@ class CollectorViewSet(ModelViewSet):
         @apiParam {Int} collector_config_id 采集项ID
         @apiSuccess {String} collector_scenario_id 日志类型 可选字段`row, section, win_event`
         @apiSuccess {String} collector_scenario_name 日志类型名称
+        @apiSuccess {String} log_access_type 日志接入类型
         @apiSuccess {String} collector_config_name 采集项名称
         @apiSuccess {String} category_id 数据分类
         @apiSuccess {String} category_name 数据分类显示名称
@@ -1189,7 +1195,11 @@ class CollectorViewSet(ModelViewSet):
         @apiName stop_collector
         @apiGroup 10_Collector
         @apiDescription 停止采集项
-        @apiParam {Int} collector_config_id 采集项ID
+        @apiParam {Int} collector_config_id 采集项 ID
+        @apiParamExample {json} 请求样例:
+        {
+            "is_stop_index_set": True
+        }
         @apiSuccessExample {json} 成功返回:
         {
             "message": "",
@@ -1198,7 +1208,12 @@ class CollectorViewSet(ModelViewSet):
             "result": true
         }
         """
-        return Response(CollectorHandler.get_instance(collector_config_id).stop())
+        data = self.params_valid(CollectorStopSerializer)
+        return Response(
+            CollectorHandler.get_instance(collector_config_id).stop(
+                is_stop_index_set=data.get("is_stop_index_set", True)
+            )
+        )
 
     @detail_route(methods=["POST"])
     def etl_preview(self, request, collector_config_id=None):
@@ -1284,8 +1299,7 @@ class CollectorViewSet(ModelViewSet):
         }
         """
         data = self.params_valid(CollectorEtlTimeSerializer)
-        etl_handler = EtlHandler.get_instance(collector_config_id)
-        return Response(etl_handler.etl_time(**data))
+        return Response(EtlHandler.etl_time(**data))
 
     @detail_route(methods=["POST"])
     def update_or_create_clean_config(self, request, collector_config_id=None):
@@ -1836,6 +1850,7 @@ class CollectorViewSet(ModelViewSet):
         @apiDescription 采集项列表，运行状态通过异步接口获取，可不带分页参数
         @apiParam {Int} bk_biz_id 业务ID
         @apiParam {String} keyword 搜索关键字
+        @apiParam {Int} have_table_id 是否过滤掉未完成的采集项（table_id为空）
         @apiSuccess {Array} results 返回结果
         @apiSuccess {Int} results.collector_config_id 采集项ID
         @apiSuccess {Int} results.collector_config_name 采集项名称

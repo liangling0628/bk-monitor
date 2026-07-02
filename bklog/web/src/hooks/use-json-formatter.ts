@@ -45,6 +45,7 @@ export type FormatterConfig = {
   jsonValue: any;
   field: any;
   onSegmentClick: (_args: any) => void;
+  onSegmentRenderUpdate?: () => void;
   options?: Record<string, any>;
 };
 
@@ -122,7 +123,7 @@ export default class UseJsonFormatter {
 
   handleSegmentClick(e: MouseEvent, value) {
     // 如果是点击划选文本，则不进行处理
-    if (RetrieveHelper.isClickOnSelection(e, 2)) {
+    if (RetrieveHelper.isClickOnSelection(e, 2) || window?.getSelection()?.toString()?.length > 1) {
       return;
     }
     if (!value.toString() || value === '--') {
@@ -304,7 +305,7 @@ export default class UseJsonFormatter {
         removeScrollEvent();
 
         element.append(segmentContent);
-        setListItem(1000);
+        setListItem(1000, this.config.onSegmentRenderUpdate);
 
         if (appendText !== undefined) {
           const appendElement = document.createElement('span');
@@ -378,7 +379,7 @@ export default class UseJsonFormatter {
             this.getChildItem,
           );
           removeScrollEvent();
-          setListItem(600);
+          setListItem(600, this.config.onSegmentRenderUpdate);
         },
       });
 

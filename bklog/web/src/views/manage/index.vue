@@ -25,8 +25,13 @@
 -->
 
 <template>
-  <bk-navigation class="bk-log-navigation" :theme-color="navThemeColor" head-height="0" header-title=""
-    navigation-type="left-right" default-open @toggle="handleToggle">
+  <router-view
+    v-if="isHeadless"
+    class="manage-content manage-content-headless"
+    :key="refreshKey"
+  ></router-view>
+  <bk-navigation v-else class="bk-log-navigation" :theme-color="navThemeColor" head-height="0" header-title=""
+    navigation-type="left-right" :default-open="false" @toggle="handleToggle">
     <template #menu>
       <bk-navigation-menu :default-active="activeManageNav.id" :item-default-bg-color="navThemeColor">
         <template v-for="groupItem in menuList">
@@ -50,7 +55,7 @@
       <auth-container-page v-if="authPageInfo" :info="authPageInfo"></auth-container-page>
       <div class="manage-container">
         <div class="manage-main">
-          <sub-nav :sub-nav-list="menuList"></sub-nav>
+          <sub-nav :sub-nav-list="menuList" :show-sub-nav="showSubNav"></sub-nav>
           <router-view class="manage-content" :key="refreshKey"></router-view>
         </div>
       </div>
@@ -61,27 +66,37 @@
 
 <script>
   import SubNav from '@/components/nav/manage-nav';
-import { mapGetters, mapState } from 'vuex';
+import { mapState } from 'vuex';
+import { isFeatureToggleOn } from '@/store/helper';
 
   export default {
     name: 'ManageIndex',
     components: {
       SubNav,
     },
+    props: {
+      showSubNav: {
+        type: Boolean,
+        default: true,
+      },
+    },
     data() {
       return {
         navThemeColor: '#2c354d',
         isExpand: true,
-        refreshKey: ''
+        refreshKey: '',
       };
     },
 
     computed: {
       ...mapState(['topMenu', 'spaceUid', 'bkBizId', 'isExternal', 'globals']),
-      ...mapGetters({
-        authPageInfo: 'globals/authContainerInfo',
-      }),
+      authPageInfo() {
+        return this.isHeadless ? null : this.$store.getters['globals/authContainerInfo'];
+      },
       manageNavList() {
+        if (this.isHeadless) {
+          return [];
+        }
         return this.topMenu.find(item => item.id === 'manage')?.children || [];
       },
       menuList() {
@@ -93,8 +108,14 @@ import { mapGetters, mapState } from 'vuex';
         return list ?? [];
       },
       activeManageNav() {
+        if (this.isHeadless) {
+          return {};
+        }
         const childList = this.menuList.map(m => m.children).flat(2);
         return childList.find(t => t.id === this.$route.meta.navId) ?? {};
+      },
+      isHeadless() {
+        return this.$route.query.hl === '1';
       }
     },
     watch: {
@@ -114,6 +135,13 @@ import { mapGetters, mapState } from 'vuex';
             }
           }
 
+          // 检查当前是否在 log_manage_v2 需要隐藏的路由
+          const isV2HiddenRoute = this.checkIfV2HiddenRoute();
+          if (isV2HiddenRoute && this.checkLogManageV2()) {
+            this.redirectToFirstMenuItem();
+            return;
+          }
+
           // 获取最外层路径
           const topLevelRoute = this.getTopLevelRoute();
 
@@ -125,10 +153,29 @@ import { mapGetters, mapState } from 'vuex';
               bizId: this.bkBizId,
             },
           }).then(() => {
-            this.refreshKey = `${this.$router.name}_${this.$route.query.spaceUid}`
+            this.refreshKey = `${this.$router.name}_${this.$route.query.spaceUid}`;
           });
         }
       },
+    },
+    mounted() {
+      const bkBizId = this.$store.state.bkBizId;
+      const spaceUid = this.$store.state.spaceUid;
+
+      this.$router.replace({
+        query: {
+          bizId: bkBizId,
+          spaceUid: spaceUid,
+          ...this.$route.query,
+        },
+      }).then(() => {
+        this.refreshKey = `${this.$router.name}_${this.$route.query.spaceUid}`;
+      });
+      if (!this.isHeadless) {
+        setTimeout(() => {
+          this.handleToggle();
+        }, 10);
+      }
     },
     methods: {
       getMenuIcon(item) {
@@ -151,7 +198,7 @@ import { mapGetters, mapState } from 'vuex';
       // 获取当前路由的最外层路径，用于切换业务时跳转到菜单栏目录项
       getTopLevelRoute() {
         const currentPath = this.$route.path;
-        const match = currentPath.match(/^\/manage\/([^\/]+)/);  // 匹配 /manage/xxx 的模式
+        const match = currentPath.match(/^\/manage\/([^/]+)/);  // 匹配 /manage/xxx 的模式
 
         if (match) return match[1]; // 返回紧跟 /manage 的路径段
 
@@ -180,41 +227,33 @@ import { mapGetters, mapState } from 'vuex';
           return this.checkTgpaTaskFeatureToggle();
         }
 
+        // 如果是新版采集(log_manage_v2)启用，则隐藏计算平台、第三方ES、自定义上报
+        const v2HiddenMenus = ['bk-data-collection', 'es-collection', 'custom-report'];
+        if (v2HiddenMenus.includes(menuId)) {
+          return !this.checkLogManageV2();
+        }
+
         // 其他菜单项默认显示
         return true;
       },
       // 检查 tgpa_task 功能开关
       checkTgpaTaskFeatureToggle() {
-        const featureToggle = window.FEATURE_TOGGLE?.tgpa_task;
-
-        // 如果功能开关为 'on' 或不存在，显示菜单
-        if (featureToggle === 'on' || !featureToggle) {
-          return true;
-        }
-
-        // 如果功能开关为 'off'，隐藏菜单
-        if (featureToggle === 'off') {
-          return false;
-        }
-
-        // 如果功能开关为 'debug'，检查白名单
-        if (featureToggle === 'debug') {
-          const whiteList = window.FEATURE_TOGGLE_WHITE_LIST?.tgpa_task ?? [];
-          const bizId = this.$store.state.bkBizId;
-          const spaceUid = this.$store.state.spaceUid;
-
-          // 类型安全的白名单检查
-          const normalizedWhiteList = whiteList.map(id => String(id));
-          return normalizedWhiteList.includes(String(bizId)) ||
-            normalizedWhiteList.includes(String(spaceUid));
-        }
-
-        // 默认不显示
-        return false;
+        const bizId = this.$store.state.bkBizId;
+        const spaceUid = this.$store.state.spaceUid;
+        return isFeatureToggleOn('tgpa_task', [String(bizId), String(spaceUid)], { defaultEnabled: true });
       },
       // 检查当前路由是否为 tgpa-task 相关路由
       checkIfTgpaTaskRoute() {
         return this.$route.meta?.navId === 'tgpa-task';
+      },
+      // 检查当前路由是否为 log_manage_v2 启用后需要隐藏的路由
+      checkIfV2HiddenRoute() {
+        const hiddenNavIds = ['bk-data-collection', 'es-collection', 'custom-report'];
+        return hiddenNavIds.includes(this.$route.meta?.navId);
+      },
+      // 检查 log_manage_v2 功能开关（是否启用新版采集）
+      checkLogManageV2() {
+        return isFeatureToggleOn('log_manage_v2', [String(this.bkBizId), String(this.spaceUid)]);
       },
       // 跳转到manage首页
       redirectToFirstMenuItem() {
@@ -239,20 +278,6 @@ import { mapGetters, mapState } from 'vuex';
           });
         }
       },
-    },
-    mounted() {
-      const bkBizId = this.$store.state.bkBizId;
-      const spaceUid = this.$store.state.spaceUid;
-
-      this.$router.replace({
-        query: {
-          bizId: bkBizId,
-          spaceUid: spaceUid,
-          ...this.$route.query,
-        },
-      }).then(() => {
-        this.refreshKey = `${this.$router.name}_${this.$route.query.spaceUid}`
-      });
     },
   };
 </script>

@@ -30,6 +30,8 @@ from core.drf_resource import api
 from metadata import config
 from metadata.models.bkdata.result_table import BkBaseResultTable
 from metadata.models.constants import BULK_CREATE_BATCH_SIZE, DataIdCreatedFromSystem
+from metadata.models.data_link.constants import BKBASE_NAMESPACE_BK_MONITOR, DataLinkResourceStatus
+from metadata.models.data_link.utils import compose_transfer_consumer_group
 from metadata.utils.basic import getitems
 
 from .common import BaseModel, Label, OptionBase
@@ -41,10 +43,12 @@ from .storage import (
     ArgusStorage,
     BkDataStorage,
     ClusterInfo,
+    DorisStorage,
     ESStorage,
     InfluxDBStorage,
     KafkaStorage,
     RedisStorage,
+    SurrealDBStorage,
 )
 
 logger = logging.getLogger("metadata")
@@ -68,9 +72,11 @@ class ResultTable(models.Model):
     # TODO: 多租户 下面所有的存储实体表都需要添加 bk_tenant_id
     REAL_STORAGE_DICT = {
         ClusterInfo.TYPE_ES: ESStorage,
+        ClusterInfo.TYPE_DORIS: DorisStorage,
         ClusterInfo.TYPE_INFLUXDB: InfluxDBStorage,
         ClusterInfo.TYPE_REDIS: RedisStorage,
         ClusterInfo.TYPE_KAFKA: KafkaStorage,
+        ClusterInfo.TYPE_SURREALDB: SurrealDBStorage,
         ClusterInfo.TYPE_BKDATA: BkDataStorage,
         ClusterInfo.TYPE_ARGUS: ArgusStorage,
     }
@@ -99,6 +105,7 @@ class ResultTable(models.Model):
     label = models.CharField(verbose_name="结果表标签", max_length=128, default=Label.RESULT_TABLE_LABEL_OTHER)
     # 数据标签
     data_label: str = models.CharField("数据标签", max_length=128, default="", null=True, blank=True)  # pyright: ignore [reportAssignmentType]
+    labels = models.JSONField("扩展标签", default=dict, blank=True)
     is_builtin = models.BooleanField("是否内置", default=False)
     bk_biz_id_alias = models.CharField("业务ID别名", max_length=128, default="", null=True, blank=True)
 
@@ -333,6 +340,7 @@ class ResultTable(models.Model):
         time_option=None,
         create_storage=True,
         data_label: str | None = None,
+        labels: dict[str, Any] | None = None,
         is_builtin=False,
         bk_biz_id_alias=None,
     ):
@@ -360,6 +368,7 @@ class ResultTable(models.Model):
         :param time_option: 时间字段的配置内容
         :param create_storage: 是否创建存储，默认为 True
         :param data_label: 数据标签
+        :param labels: 扩展标签
         :param is_builtin: 是否为系统内置的结果表
         :param bk_biz_id_alias: 结果表所属业务名称
         :return: result_table instance | raise Exception
@@ -435,6 +444,7 @@ class ResultTable(models.Model):
             bk_biz_id=bk_biz_id,
             label=label,
             data_label=data_label or "",
+            labels=labels or {},
             is_builtin=is_builtin,
             bk_biz_id_alias=bk_biz_id_alias,
         )
@@ -569,10 +579,13 @@ class ResultTable(models.Model):
         # 删除数据链路及对应的关联记录
         for record in records:
             data_link_name = record.data_link_name
-            DataLink.objects.get(bk_tenant_id=self.bk_tenant_id, data_link_name=data_link_name).delete_data_link()
-            record.delete()
+            datalink = DataLink.objects.filter(bk_tenant_id=self.bk_tenant_id, data_link_name=data_link_name).first()
+            if datalink:
+                datalink.delete_data_link()
+            record.status = DataLinkResourceStatus.TERMINATING.value
+            record.save()
 
-    def apply_datalink(self, force_update: bool = False) -> None:
+    def apply_datalink(self, force_update: bool = False, delay: bool = True) -> None:
         """创建数据链路"""
         from metadata.models.space.constants import ENABLE_V4_DATALINK_ETL_CONFIGS
         from metadata.task.datalink import apply_event_group_datalink, apply_log_datalink
@@ -601,31 +614,61 @@ class ResultTable(models.Model):
                 datasource.created_from == DataIdCreatedFromSystem.BKDATA.value
                 and datasource.etl_config in ENABLE_V4_DATALINK_ETL_CONFIGS
             )
-            if (is_v4_datalink_etl_config and settings.ENABLE_V2_VM_DATA_LINK) or not settings.ENABLE_INFLUXDB_STORAGE:
+
+            # 如果存在指标组维度配置或开启插件V4链路，则强制将数据链路更新为V4链路
+            consumer_group = None
+            if ResultTableOption.OPTION_METRIC_GROUP_DIMENSIONS in options or options.get(
+                ResultTableOption.OPTION_ENABLE_PLUGIN_V4_DATA_LINK, False
+            ):
+                is_v4_datalink_etl_config = True
+
+            if not settings.ENABLE_INFLUXDB_STORAGE or (settings.ENABLE_V2_VM_DATA_LINK and is_v4_datalink_etl_config):
+                # 如果datasource是gse创建的，则需要注册到BKBASE并且设置consumer_group
+                if datasource.created_from == DataIdCreatedFromSystem.BKGSE.value and is_v4_datalink_etl_config:
+                    logger.info(
+                        "apply_datalink: datasource created_from is BKGSE, register to bkbase, bk_data_id->[%s], table_id->[%s]",
+                        datasource.bk_data_id,
+                        self.table_id,
+                    )
+                    consumer_group = compose_transfer_consumer_group(datasource)
+                    datasource.register_to_bkbase(bk_biz_id=target_bk_biz_id, namespace=BKBASE_NAMESPACE_BK_MONITOR)
+
                 # NOTE: 使用 on_commit 确保事务提交后再执行异步任务，避免事务未提交但异步任务先执行的情况
                 # 提取变量值到局部变量，确保闭包捕获的是值而不是引用
                 bk_data_id = datasource.bk_data_id
                 bk_tenant_id = self.bk_tenant_id
                 table_id = self.table_id
-                try:
-                    on_commit(
-                        func=lambda: access_bkdata_vm.delay(
-                            bk_tenant_id,
-                            target_bk_biz_id,
-                            table_id,
-                            bk_data_id,
-                            is_v4_datalink_etl_config,
-                            force_update=force_update,
-                        ),
-                        using=config.DATABASE_CONNECTION_NAME,
+                if delay:
+                    try:
+                        on_commit(
+                            func=lambda: access_bkdata_vm.delay(
+                                bk_tenant_id,
+                                target_bk_biz_id,
+                                table_id,
+                                bk_data_id,
+                                is_v4_datalink_etl_config,
+                                force_update=force_update,
+                                consumer_group=consumer_group,
+                            ),
+                            using=config.DATABASE_CONNECTION_NAME,
+                        )
+                    except Exception as e:  # pylint: disable=broad-except
+                        logger.error("create_result_table: access vm error: %s", e)
+                else:
+                    access_bkdata_vm(
+                        bk_tenant_id,
+                        target_bk_biz_id,
+                        table_id,
+                        bk_data_id,
+                        is_v4_datalink_etl_config,
+                        force_update=force_update,
+                        consumer_group=consumer_group,
                     )
-                except Exception as e:  # pylint: disable=broad-except
-                    logger.error("create_result_table: access vm error: %s", e)
         elif self.default_storage in [ClusterInfo.TYPE_ES, ClusterInfo.TYPE_DORIS]:
-            # 如果存在日志V4数据链路配置，则创建日志V4数据链路
+            # 日志 V4 数据链路
             if options and options.get(ResultTableOption.OPTION_ENABLE_V4_LOG_DATA_LINK, False):
                 apply_log_datalink(bk_tenant_id=self.bk_tenant_id, table_id=self.table_id)
-            # 如果存在事件组V4数据链路配置或默认启用事件组V4数据链路，则创建事件组V4数据链路
+            # 事件组 V4 数据链路
             elif datasource.etl_config == EtlConfigs.BK_STANDARD_V2_EVENT.value:
                 apply_event_group_datalink(bk_tenant_id=self.bk_tenant_id, table_id=self.table_id)
         else:
@@ -907,7 +950,6 @@ class ResultTable(models.Model):
             for ex_storage_type, ex_storage_config in list(external_storage.items()):
                 try:
                     ex_storage = self.REAL_STORAGE_DICT[ex_storage_type]
-
                 except KeyError:
                     logger.error(
                         f"try to set storage->[{ex_storage_type}] for table->[{self.table_id}] of bk_tenant_id->[{bk_tenant_id}] "
@@ -1135,6 +1177,7 @@ class ResultTable(models.Model):
         is_enable=None,
         time_option=None,
         data_label=None,
+        labels=None,
         need_delete_storages=None,
         bk_biz_id_alias=None,
     ):
@@ -1153,6 +1196,7 @@ class ResultTable(models.Model):
         :param is_enable: 是否启用结果表
         :param time_option: 时间字段配置
         :param data_label: 数据标签
+        :param labels: 扩展标签
         :param need_delete_storages 需要删除额外存储配置
         :param bk_biz_id_alias: 结果表业务ID别名
         :return: True | raise Exception
@@ -1368,12 +1412,30 @@ class ResultTable(models.Model):
             ):
                 force_update_datalink = True
 
+            # 检查指标组维度配置是否发生变化或指标组维度配置不为空但没有迁移到V4链路
+            metric_group_dimensions_option = ResultTableOption.objects.filter(
+                table_id=self.table_id,
+                bk_tenant_id=self.bk_tenant_id,
+                name=ResultTableOption.OPTION_METRIC_GROUP_DIMENSIONS,
+            ).first()
+            existing_metric_group_dimensions_option_value = (
+                (metric_group_dimensions_option.get_value() or []) if metric_group_dimensions_option else []
+            )
+            new_metric_group_dimensions_option_value = (
+                option.get(ResultTableOption.OPTION_METRIC_GROUP_DIMENSIONS) or []
+            )
+            if existing_metric_group_dimensions_option_value != new_metric_group_dimensions_option_value or (
+                new_metric_group_dimensions_option_value
+                and self.data_source.created_from == DataIdCreatedFromSystem.BKGSE.value
+            ):
+                force_update_datalink = True
+
             # 目前rt的option存在清洗和查询两类option，清洗的option需要清理，查询的option需要保留。
             # 目前在option配置的时候并没有标记option的类型，因此只能通过名单的方式进行管理
             # TODO: 后续需要优化option的配置方式，增加option的类型标记
             result_table_option_ids = (
                 ResultTableOption.objects.filter(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id)
-                .exclude(name__in=list(set(ResultTableFieldOption.QUERY_OPTION_NAME_LIST) - set(option.keys())))
+                .exclude(name__in=list(set(ResultTableOption.QUERY_OPTION_NAME_LIST) - set(option.keys())))
                 .values_list("id", flat=True)
             )
             self.raw_delete(result_table_option_ids)
@@ -1437,6 +1499,10 @@ class ResultTable(models.Model):
         # 是否需要修改数据标签
         if data_label is not None:
             self.data_label = data_label
+
+        # 是否需要修改扩展标签
+        if labels is not None:
+            self.labels = labels
 
         self.last_modify_user = operator
         self.save()
@@ -1738,6 +1804,7 @@ class ResultTable(models.Model):
             "bk_data_id": self.data_source.bk_data_id if self.default_storage != ClusterInfo.TYPE_BKDATA else None,
             "is_enable": self.is_enable,
             "data_label": self.data_label,
+            "labels": self.labels or {},
         }
 
         if query_alias_settings:
@@ -1769,6 +1836,7 @@ class ResultTable(models.Model):
             "label": self.label,
             "is_enable": self.is_enable,
             "data_label": self.data_label,
+            "labels": self.labels or {},
         }
 
     def get_tag_values(self, tag_name):
@@ -2296,7 +2364,7 @@ class ResultTableField(models.Model):
         fields, field_names, option_data = cls()._compose_data(table_id, field_data, bk_tenant_id=bk_tenant_id)
 
         # 校验字段是否已经创建
-        cls()._check_existed_fields(table_id, field_names)
+        cls()._check_existed_fields(table_id, field_names, bk_tenant_id=bk_tenant_id)
 
         # 写入数据
         cls.objects.bulk_create([cls(**field) for field in fields])
@@ -2486,6 +2554,7 @@ class ResultTableField(models.Model):
         table_id_list: list[str],
         is_consul_config: bool | None = False,
         bk_tenant_id: str | None = DEFAULT_TENANT_ID,
+        lite_mode: bool | None = None,
     ) -> dict:
         table_field_option_dict = ResultTableFieldOption.batch_field_option(
             table_id_list=table_id_list, bk_tenant_id=bk_tenant_id
@@ -2514,8 +2583,12 @@ class ResultTableField(models.Model):
                 item["field_name"] = i.alias_name
                 item["alias_name"] = i.field_name
 
-            if settings.ENABLE_CONSUL_LITE_MODE and is_consul_config:
-                logger.info("Consul Lite Mode Enabled, remove unnecessary fields")
+            # 如果 lite_mode 为 None，则使用默认值
+            if lite_mode is None:
+                lite_mode = settings.ENABLE_CONSUL_LITE_MODE
+
+            if lite_mode and is_consul_config:
+                logger.debug("Consul Lite Mode Enabled, remove unnecessary fields")
                 if item["default_value"] is None:
                     item.pop("default_value")
 
@@ -2808,8 +2881,9 @@ class LogV4DataLinkOption(pydantic.BaseModel):
 
         storage_keys: list[str] = pydantic.Field(description="存储键")
         json_fields: list[str] = pydantic.Field(description="JSON字段列表", default_factory=list)
+        original_json_fields: list[str] = pydantic.Field(description="原始JSON字段列表", default_factory=list)
         field_config_group: dict[str, Any] = pydantic.Field(description="字段配置组", default_factory=dict)
-        flush_timeout: int | None = pydantic.Field(description="刷新超时时间(s)，默认为60秒")
+        flush_timeout: int | None = pydantic.Field(description="刷新超时时间(s)，默认为60秒", default=None)
 
     class CleanRule(pydantic.BaseModel):
         """清洗规则"""
@@ -2819,8 +2893,8 @@ class LogV4DataLinkOption(pydantic.BaseModel):
         operator: dict[str, Any] = pydantic.Field(description="操作符")
 
     clean_rules: list[CleanRule] = pydantic.Field(min_length=1, description="清洗规则")
-    es_storage_config: ESStorageConfig | None = pydantic.Field(description="ES存储配置")
-    doris_storage_config: DorisStorageConfig | None = pydantic.Field(description="Doris存储配置")
+    es_storage_config: ESStorageConfig | None = pydantic.Field(description="ES存储配置", default=None)
+    doris_storage_config: DorisStorageConfig | None = pydantic.Field(description="Doris存储配置", default=None)
 
     @pydantic.model_validator(mode="after")
     def validate_config(self) -> Self:
@@ -2842,15 +2916,27 @@ class ResultTableOption(OptionBase):
     OPTION_SEGMENTED_QUERY_ENABLE = "segmented_query_enable"
     OPTION_IS_SPLIT_MEASUREMENT = "is_split_measurement"
     OPTION_ENABLE_FIELD_BLACK_LIST = "enable_field_black_list"
+    OPTION_IS_VIRTUAL_TABLE = "is_virtual_table"
 
     OPTION_ENABLE_V4_EVENT_GROUP_DATA_LINK = "enable_v4_event_group_data_link"
     OPTION_ENABLE_V4_LOG_DATA_LINK = "enable_log_v4_data_link"
     OPTION_V4_LOG_DATA_LINK = "log_v4_data_link"
+    OPTION_ENABLE_PLUGIN_V4_DATA_LINK = "enable_plugin_v4_data_link"
+    OPTION_ENABLE_DATA_LINK_COMPONENT_REUSE = "enable_data_link_component_reuse"
+    OPTION_BINDING_BCS_CLUSTER_ID = "binding_bcs_cluster_id"
+    OPTION_METRIC_GROUP_DIMENSIONS = "metric_group_dimensions"
 
     # 选项类型
     TYPE_BOOL = "bool"
     TYPE_STRING = "string"
     TYPE_LIST = "list"
+
+    # 查询选项名称列表
+    QUERY_OPTION_NAME_LIST: list[str] = [
+        "need_add_time",  # 是否需要添加时间字段
+        "time_field",  # 指定查询时间单位，如：day、hour、minute、second
+        OPTION_BINDING_BCS_CLUSTER_ID,  # 绑定BCS集群ID
+    ]
 
     table_id = models.CharField("结果表ID", max_length=128, db_index=True)
     name = models.CharField(
@@ -2863,6 +2949,9 @@ class ResultTableOption(OptionBase):
             (OPTION_SEGMENTED_QUERY_ENABLE, _("分段查询开关")),
             (OPTION_IS_SPLIT_MEASUREMENT, _("是否为单指标单表")),
             (OPTION_ENABLE_FIELD_BLACK_LIST, _("是否开启指标黑名单")),
+            (OPTION_IS_VIRTUAL_TABLE, _("是否为虚拟结果表")),
+            (OPTION_ENABLE_DATA_LINK_COMPONENT_REUSE, _("是否开启DataLink组件复用")),
+            (OPTION_BINDING_BCS_CLUSTER_ID, _("绑定BCS集群ID")),
         ),
         max_length=128,
     )
@@ -3215,7 +3304,7 @@ class ESFieldQueryAliasOption(BaseModel):
     field_path = models.CharField("原始字段路径", max_length=256)
     path_type = models.CharField("路径类型", max_length=128, default="keyword")
     query_alias = models.CharField("查询别名", max_length=256)
-    is_deleted = models.BooleanField("是否已删除", default=False)
+    is_deleted = models.BooleanField("是否已删除(已废弃)", default=False)
 
     @classmethod
     def generate_query_alias_settings(cls, table_id: str, bk_tenant_id: str):
@@ -3259,66 +3348,71 @@ class ESFieldQueryAliasOption(BaseModel):
 
     @staticmethod
     @transaction.atomic
-    def manage_query_alias_settings(table_id, query_alias_settings, operator, bk_tenant_id=DEFAULT_TENANT_ID):
+    def manage_query_alias_settings(
+        table_id: str,
+        query_alias_settings: list[dict[str, Any]],
+        operator: str,
+        bk_tenant_id: str,
+    ) -> None:
         """
-        管理ES字段关联别名配置记录（支持一个field_path对应多个alias）
-        :param table_id: 结果表ID
-        :param query_alias_settings: 用户传入的query_alias_settings列表
-        :param operator: 操作者
-        :param bk_tenant_id 租户ID
+        管理ES字段关联别名配置记录（支持一个field_path对应多个alias）。
+
+        说明：
+            - 同一 table_id 内，query_alias 必须唯一（与 ES alias 语义一致）。
+            - 采用硬删除清理多余记录，避免软删除残留导致唯一冲突。
+
+        Args:
+            table_id: 结果表ID。
+            query_alias_settings: 用户传入的 query_alias_settings 列表。
+            operator: 操作者。
+            bk_tenant_id: 租户ID。
+
+        Returns:
+            None
         """
         logger.info(
             "manage_query_alias_settings: try to manage alias settings for table_id->[%s],query_alias_settings->[%s]",
             table_id,
             query_alias_settings,
         )
-        # 获取当前数据库中的记录（包括软删除记录）
-        existing_records = ESFieldQueryAliasOption.objects.filter(table_id=table_id, bk_tenant_id=bk_tenant_id)
-        existing_map = {(record.field_path, record.query_alias): record for record in existing_records}
-
         if not query_alias_settings:
             logger.info(
                 "manage_query_alias_settings: table_id->[%s] now has no query_alias_settings,will delete old records",
                 table_id,
             )
-            ESFieldQueryAliasOption.objects.filter(table_id=table_id).update(is_deleted=True)
+            ESFieldQueryAliasOption.objects.filter(table_id=table_id, bk_tenant_id=bk_tenant_id).delete()
             return
 
-        # 提取用户传入的数据组合，field_path+query_alias 为唯一组合
-        incoming_combinations = {(item["field_name"], item["query_alias"]) for item in query_alias_settings}
-
         try:
-            # 新增或更新记录
+            incoming_aliases = {item["query_alias"] for item in query_alias_settings}
+            # 删除不再需要的别名（硬删除）
+            ESFieldQueryAliasOption.objects.filter(table_id=table_id, bk_tenant_id=bk_tenant_id).exclude(
+                query_alias__in=incoming_aliases
+            ).delete()
+
+            # 新增或更新记录（依赖唯一约束保证同别名唯一）
             for item in query_alias_settings:
-                field_path = item["field_name"]
                 query_alias = item["query_alias"]
+                field_path = item["field_name"]
                 path_type = item.get("path_type", "keyword")
-
-                if (field_path, query_alias) in existing_map:
-                    # 更新记录
-                    record = existing_map[(field_path, query_alias)]
-                    record.is_deleted = False  # 重置软删除标记
-                    record.path_type = path_type  # 更新 path_type
+                record, created = ESFieldQueryAliasOption.objects.get_or_create(
+                    table_id=table_id,
+                    bk_tenant_id=bk_tenant_id,
+                    query_alias=query_alias,
+                    is_deleted=False,
+                    defaults={
+                        "field_path": field_path,
+                        "path_type": path_type,
+                        "updater": operator,
+                        "creator": operator,
+                    },
+                )
+                if not created:
+                    record.field_path = field_path
+                    record.path_type = path_type
                     record.updater = operator
-                    record.save()
-                else:
-                    # 新增记录
-                    ESFieldQueryAliasOption.objects.create(
-                        table_id=table_id,
-                        bk_tenant_id=bk_tenant_id,
-                        field_path=field_path,
-                        query_alias=query_alias,
-                        path_type=path_type,  # 设置 path_type
-                        creator=operator,
-                        is_deleted=False,
-                    )
-
-            # 标记未提供的记录为软删除
-            for (field_path, query_alias), record in existing_map.items():
-                if (field_path, query_alias) not in incoming_combinations and not record.is_deleted:
-                    record.is_deleted = True
-                    record.updater = operator
-                    record.save()
+                    record.is_deleted = False
+                    record.save(update_fields=["field_path", "path_type", "updater", "is_deleted", "update_time"])
         except Exception as e:  # pylint: disable=broad-except
             logger.error(
                 "manage_query_alias_settings: failed to manage alias settings for table_id->[%s], "

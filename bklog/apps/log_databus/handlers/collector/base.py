@@ -52,6 +52,7 @@ from apps.log_databus.constants import (
     BKDATA_TAGS,
     BULK_CLUSTER_INFOS_LIMIT,
     CACHE_KEY_CLUSTER_INFO,
+    COLLECTOR_SCENARIO_TO_SCENE,
     META_DATA_ENCODING,
     ArchiveInstanceType,
     CollectStatus,
@@ -61,6 +62,8 @@ from apps.log_databus.constants import (
     RunStatus,
     RETRIEVE_CHAIN,
     Environment,
+    build_scene_labels,
+    STORAGE_CLUSTER_TYPE,
 )
 from apps.log_databus.exceptions import (
     CollectNotSuccess,
@@ -98,10 +101,12 @@ from apps.log_search.constants import (
     CustomTypeEnum,
     GlobalCategoriesEnum,
     InnerTag,
+    LogAccessTypeEnum,
 )
 from apps.log_search.handlers.biz import BizHandler
 from apps.log_search.handlers.index_set import IndexSetHandler
 from apps.log_search.models import (
+    TAG_TYPE_SCENE,
     IndexSetTag,
     LogIndexSet,
     LogIndexSetData,
@@ -109,7 +114,7 @@ from apps.log_search.models import (
     Space,
 )
 from apps.models import model_to_dict
-from apps.utils.cache import caches_one_hour
+from apps.utils.cache import caches_ten_minute
 from apps.utils.custom_report import BK_CUSTOM_REPORT, CONFIG_OTLP_FIELD
 from apps.utils.db import array_chunk
 from apps.utils.function import map_if
@@ -127,10 +132,12 @@ class CollectorHandler:
     def __init__(self, collector_config_id=None, data=None):
         self.collector_config_id = collector_config_id
         self.data = data if data else None
+        self.storage_cluster_type = data.storage_cluster_type if data else STORAGE_CLUSTER_TYPE
 
         if collector_config_id and not data:
             try:
                 self.data = CollectorConfig.objects.get(collector_config_id=self.collector_config_id)
+                self.storage_cluster_type = self.data.storage_cluster_type
             except CollectorConfig.DoesNotExist:
                 raise CollectorConfigNotExistException()
 
@@ -183,7 +190,7 @@ class CollectorHandler:
             multi_execute_func.append(
                 "result_table_storage",
                 TransferApi.get_result_table_storage,
-                params={"result_table_list": self.data.table_id, "storage_type": "elasticsearch"},
+                params={"result_table_list": self.data.table_id, "storage_type": self.storage_cluster_type},
                 use_request=use_request,
             )
         if self.data.subscription_id:
@@ -388,6 +395,26 @@ class CollectorHandler:
         collector_config["configs"] = container_configs
         return collector_config
 
+    def add_log_access_type(self, collector_config, context):
+        """
+        补充新版日志接入类型
+        @param collector_config:
+        @param context:
+        @return:
+        """
+        container_collector_type = ""
+        if self.data.is_container_environment:
+            container_config = next(iter(collector_config.get("configs", [])), {})
+            container_collector_type = container_config.get("collector_type", "")
+
+        collector_config["log_access_type"] = LogAccessTypeEnum.get_log_access_type(
+            scenario_id=collector_config.get("scenario_id", ""),
+            collector_scenario_id=collector_config.get("collector_scenario_id", ""),
+            environment=collector_config.get("environment", ""),
+            container_collector_type=container_collector_type,
+        )
+        return collector_config
+
     def encode_yaml_config(self, collector_config, context):
         """
         encode_yaml_config
@@ -445,7 +472,7 @@ class CollectorHandler:
         raise NotImplementedError
 
     @transaction.atomic
-    def stop(self, **kwargs):
+    def stop(self, is_stop_index_set=True, **kwargs):
         """
         停止采集配置
         :return: task_id
@@ -453,10 +480,11 @@ class CollectorHandler:
         self.data.is_active = False
         self.data.save()
 
-        # 停止采集项
+        # 停止索引集
         if self.data.index_set_id:
-            index_set_handler = IndexSetHandler(self.data.index_set_id)
-            index_set_handler.stop()
+            if is_stop_index_set:
+                index_set_handler = IndexSetHandler(self.data.index_set_id)
+                index_set_handler.stop()
 
         self._pre_stop()
 
@@ -496,6 +524,8 @@ class CollectorHandler:
             collector_config.update(
                 {"sort_fields": log_index_set_obj.sort_fields, "target_fields": log_index_set_obj.target_fields}
             )
+            parent_index_set_ids = log_index_set_obj.get_parent_index_set_ids()
+            collector_config.update({"parent_index_set_ids": parent_index_set_ids})
         return collector_config
 
     def custom_update(
@@ -507,6 +537,7 @@ class CollectorHandler:
         etl_params=None,
         fields=None,
         storage_cluster_id=None,
+        storage_cluster_type=STORAGE_CLUSTER_TYPE,
         retention=7,
         allocation_min_days=0,
         storage_replies=1,
@@ -514,6 +545,10 @@ class CollectorHandler:
         is_display=True,
         sort_fields=None,
         target_fields=None,
+        parent_index_set_ids=None,
+        is_platform_index=None,
+        platform_index_visibility=None,
+        platform_index_filter=None,
     ):
         collector_config_update = {
             "collector_config_name": collector_config_name,
@@ -546,7 +581,18 @@ class CollectorHandler:
             index_set_name = _("[采集项]") + self.data.collector_config_name
             LogIndexSet.objects.filter(index_set_id=self.data.index_set_id).update(index_set_name=index_set_name)
 
+        # 更新归属索引集
+        if self.data.index_set_id:
+            IndexSetHandler(self.data.index_set_id).update_parent_index_sets(parent_index_set_ids)
+
         custom_config = get_custom(self.data.custom_type)
+
+        # otlp 上报自动补充 target_fields、sort_fields 默认值
+        if not target_fields and custom_config.default_target_fields:
+            target_fields = custom_config.default_target_fields.copy()
+        if not sort_fields and custom_config.default_sort_fields:
+            sort_fields = custom_config.default_sort_fields.copy()
+
         if etl_params and fields:
             # 1. 传递了清洗参数，则优先级最高
             etl_params, etl_config, fields = etl_params, etl_config, fields
@@ -581,6 +627,7 @@ class CollectorHandler:
             etl_params = {
                 "table_id": table_id_name,
                 "storage_cluster_id": storage_cluster_id,
+                "storage_cluster_type": storage_cluster_type,
                 "retention": retention,
                 "es_shards": es_shards,
                 "allocation_min_days": allocation_min_days,
@@ -590,8 +637,13 @@ class CollectorHandler:
                 "fields": fields,
                 "sort_fields": sort_fields,
                 "target_fields": target_fields,
+                "labels": self._build_scene_labels(),
+                "is_platform_index": is_platform_index,
+                "platform_index_visibility": platform_index_visibility,
+                "platform_index_filter": platform_index_filter,
             }
             etl_handler.update_or_create(**etl_params)
+            self._sync_scene_tags_to_index_set(etl_params["labels"])
 
         custom_config.after_hook(self.data)
 
@@ -729,7 +781,7 @@ class CollectorHandler:
         return [node["bk_inst_id"] for node in nodes if node["bk_obj_id"] == node_type]
 
     @staticmethod
-    @caches_one_hour(key=CACHE_KEY_CLUSTER_INFO, need_deconstruction_name="result_table_list", need_md5=True)
+    @caches_ten_minute(key=CACHE_KEY_CLUSTER_INFO, need_deconstruction_name="result_table_list", need_md5=True)
     def bulk_cluster_infos(result_table_list: list):
         """
         批量获取集群信息，单个失败不影响其他，将单个失败的 result_table 进行重试
@@ -738,17 +790,32 @@ class CollectorHandler:
         @return:
         """
 
-        def get_cluster_info(result_table_str: str):
+        def get_cluster_info(result_table_str: str, storage_type: str = "elasticsearch"):
             """
             获取集群信息（支持批量查询）
             """
             try:
                 return TransferApi.get_result_table_storage(
-                    params={"result_table_list": result_table_str, "storage_type": "elasticsearch"}
+                    params={"result_table_list": result_table_str, "storage_type": storage_type}
                 )
             except Exception as e:
-                logger.warning(f"获取集群信息失败(result_tables={result_table_str}): {e}", exc_info=True)
+                logger.warning(
+                    f"获取集群信息失败(result_tables={result_table_str}, storage_type={storage_type}): {e}",
+                    exc_info=True,
+                )
                 return {}
+
+        def _get_table_id_to_cluster_type_map(result_table_list: list):
+            """
+            获取结果表 -> 存储集群类型映射字典
+            从 CollectorConfig.storage_cluster_type 字段读取，未命中的结果表默认走 ES
+            """
+            table_id_to_cluster_type = dict(
+                CollectorConfig.objects.filter(table_id__in=result_table_list).values_list(
+                    "table_id", "storage_cluster_type"
+                )
+            )
+            return {t_id: table_id_to_cluster_type.get(t_id) or STORAGE_CLUSTER_TYPE for t_id in result_table_list}
 
         cluster_infos = {}
 
@@ -757,17 +824,33 @@ class CollectorHandler:
 
         unique_tables = list(dict.fromkeys(result_table_list))
 
-        # 按分片批量获取
-        chunk_multi_execute_func = MultiExecuteFunc()
-        unique_table_chunks: list[list[str]] = array_chunk(unique_tables, BULK_CLUSTER_INFOS_LIMIT)
+        table_id_to_cluster_type_map = _get_table_id_to_cluster_type_map(unique_tables)
 
+        storage_cluster_type_to_table_ids_map = defaultdict(list)
+
+        for t_id in unique_tables:
+            storage_cluster_type_to_table_ids_map[table_id_to_cluster_type_map.get(t_id, STORAGE_CLUSTER_TYPE)].append(
+                t_id
+            )
+
+        chunk_multi_execute_func = MultiExecuteFunc()
         # 记录每个 chunk_str 对应的 table_chunk
         table_chunk_dict: dict[str, list[str]] = {}
 
-        for table_chunk in unique_table_chunks:
-            chunk_str = ",".join(table_chunk)
-            table_chunk_dict[chunk_str] = table_chunk
-            chunk_multi_execute_func.append(chunk_str, get_cluster_info, chunk_str)
+        # 不同存储集群类型分开查询
+        for storage_cluster_type, current_tables in storage_cluster_type_to_table_ids_map.items():
+            # 按分片批量查询
+            current_table_chunks: list[list[str]] = array_chunk(current_tables, BULK_CLUSTER_INFOS_LIMIT)
+
+            for table_chunk in current_table_chunks:
+                chunk_str = ",".join(table_chunk)
+                table_chunk_dict[chunk_str] = table_chunk
+                chunk_multi_execute_func.append(
+                    chunk_str,
+                    get_cluster_info,
+                    {"result_table_str": chunk_str, "storage_type": storage_cluster_type},
+                    multi_func_params=True,
+                )
 
         chunk_response = chunk_multi_execute_func.run()
 
@@ -798,9 +881,16 @@ class CollectorHandler:
             )
 
             single_multi_execute_func = MultiExecuteFunc()
-
             for table_id in retry_tables:
-                single_multi_execute_func.append(table_id, get_cluster_info, table_id)
+                single_multi_execute_func.append(
+                    table_id,
+                    get_cluster_info,
+                    {
+                        "result_table_str": table_id,
+                        "storage_type": table_id_to_cluster_type_map.get(table_id, STORAGE_CLUSTER_TYPE),
+                    },
+                    multi_func_params=True,
+                )
 
             single_response = single_multi_execute_func.run()
 
@@ -834,16 +924,31 @@ class CollectorHandler:
             cluster_infos = {}
 
         time_zone = get_local_param("time_zone")
+
+        index_set_ids = list(set([item.get("index_set_id") for item in data if item.get("index_set_id", None)]))
+        index_set_objs = LogIndexSet.origin_objects.filter(index_set_id__in=index_set_ids)
+        index_set_obj_dict = {obj.index_set_id: obj for obj in index_set_objs}
+
+        abnormal_index_set_ids = set(
+            LogIndexSetData.objects.filter(
+                index_set_id__in=index_set_ids,
+            )
+            .exclude(apply_status="normal")
+            .values_list("index_set_id", flat=True)
+            .distinct()
+        )
+
         for _data in data:
             cluster_info = cluster_infos.get(
                 _data["table_id"],
                 {"cluster_config": {"cluster_id": -1, "cluster_name": ""}, "storage_config": {"retention": 0}},
             )
             _data["storage_cluster_id"] = cluster_info["cluster_config"]["cluster_id"]
-            _data["storage_cluster_name"] = (
-                cluster_info["cluster_config"].get("display_name") or cluster_info["cluster_config"]["cluster_name"]
+            _data["storage_cluster_name"] = cluster_info["cluster_config"].get("cluster_name", "")
+            _data["storage_display_name"] = (
+                cluster_info["cluster_config"].get("display_name") or _data["storage_cluster_name"]
             )
-            _data["retention"] = cluster_info["storage_config"]["retention"]
+            _data["retention"] = cluster_info["storage_config"].get("retention", 0)
             # table_id
             if _data.get("table_id"):
                 table_id_prefix, table_id = _data["table_id"].split(".")
@@ -868,12 +973,13 @@ class CollectorHandler:
             )
 
             # 是否可以检索
-            if _data["is_active"] and _data["index_set_id"]:
-                _data["is_search"] = (
-                    not LogIndexSetData.objects.filter(index_set_id=_data["index_set_id"])
-                    .exclude(apply_status="normal")
-                    .exists()
-                )
+            if _data.get("index_set_id"):
+                index_set_obj = index_set_obj_dict.get(_data["index_set_id"])
+
+                if index_set_obj and index_set_obj.is_active:
+                    _data["is_search"] = _data["index_set_id"] not in abnormal_index_set_ids
+                else:
+                    _data["is_search"] = False
             else:
                 _data["is_search"] = False
 
@@ -892,8 +998,8 @@ class CollectorHandler:
             tag_ids_mapping[obj.index_set_id] = obj.tag_ids
             tag_ids_all.extend(obj.tag_ids)
 
-        # 查询出所有的tag信息
-        index_set_tag_objs = IndexSetTag.objects.filter(tag_id__in=tag_ids_all)
+        # 查询出所有的tag信息（排除场景化检索路由标签，仅后端使用，不暴露给前端）
+        index_set_tag_objs = IndexSetTag.objects.filter(tag_id__in=tag_ids_all).exclude(tag_type=TAG_TYPE_SCENE)
         index_set_tag_mapping = {
             obj.tag_id: {
                 "name": InnerTag.get_choice_label(obj.name),
@@ -1304,6 +1410,7 @@ class CollectorHandler:
         etl_params=None,
         fields=None,
         storage_cluster_id=None,
+        storage_cluster_type=STORAGE_CLUSTER_TYPE,
         retention=7,
         allocation_min_days=0,
         storage_replies=1,
@@ -1314,7 +1421,13 @@ class CollectorHandler:
         sort_fields=None,
         target_fields=None,
         collector_scenario_id=CollectorScenarioEnum.CUSTOM.value,
+        parent_index_set_ids=None,
+        is_platform_index=None,
+        platform_index_visibility=None,
+        platform_index_filter=None,
+        ignore_exists=False,
     ):
+        data_link_id = self.get_data_link_id(bk_biz_id=bk_biz_id, data_link_id=int(data_link_id or 0))
         collector_config_params = {
             "bk_biz_id": bk_biz_id,
             "collector_config_name": collector_config_name,
@@ -1323,7 +1436,7 @@ class CollectorHandler:
             "custom_type": custom_type,
             "category_id": category_id,
             "description": description or collector_config_name,
-            "data_link_id": int(data_link_id) if data_link_id else 0,
+            "data_link_id": data_link_id,
             "bk_app_code": bk_app_code,
             "bkdata_biz_id": bkdata_biz_id,
             "is_display": is_display,
@@ -1331,6 +1444,16 @@ class CollectorHandler:
         bkdata_biz_id = bkdata_biz_id or bk_biz_id
         # 判断是否已存在同英文名collector
         if self._pre_check_collector_config_en(model_fields=collector_config_params, bk_biz_id=bkdata_biz_id):
+            if ignore_exists:
+                existing = CollectorConfig.objects.get(
+                    collector_config_name_en=collector_config_name_en, bk_biz_id=bkdata_biz_id
+                )
+                return {
+                    "collector_config_id": existing.collector_config_id,
+                    "index_set_id": existing.index_set_id,
+                    "bk_data_id": existing.bk_data_id,
+                    "created": False,
+                }
             logger.error(f"collector_config_name_en {collector_config_name_en} already exists")
             raise CollectorConfigNameENDuplicateException(
                 CollectorConfigNameENDuplicateException.MESSAGE.format(
@@ -1373,6 +1496,11 @@ class CollectorHandler:
             )
             self.data.save()
 
+            # 创建索引集，并添加到归属索引集中
+            index_set = self.data.create_index_set()
+            if parent_index_set_ids:
+                IndexSetHandler(index_set.index_set_id).add_to_parent_index_sets(parent_index_set_ids)
+
         # add user_operation_record
         operation_record = {
             "username": get_request_username(),
@@ -1390,6 +1518,12 @@ class CollectorHandler:
 
         custom_config = get_custom(custom_type)
 
+        # otlp 上报自动补充 target_fields、sort_fields 默认值
+        if not target_fields and custom_config.default_target_fields:
+            target_fields = custom_config.default_target_fields.copy()
+        if not sort_fields and custom_config.default_sort_fields:
+            sort_fields = custom_config.default_sort_fields.copy()
+
         # 仅在有集群ID时创建清洗
         if storage_cluster_id:
             from apps.log_databus.handlers.etl import EtlHandler
@@ -1398,6 +1532,7 @@ class CollectorHandler:
             params = {
                 "table_id": collector_config_name_en,
                 "storage_cluster_id": storage_cluster_id,
+                "storage_cluster_type": storage_cluster_type,
                 "retention": retention,
                 "allocation_min_days": allocation_min_days,
                 "storage_replies": storage_replies,
@@ -1407,12 +1542,16 @@ class CollectorHandler:
                 "fields": custom_config.fields,
                 "sort_fields": sort_fields,
                 "target_fields": target_fields,
+                "labels": self._build_scene_labels(),
+                "is_platform_index": is_platform_index,
+                "platform_index_visibility": platform_index_visibility,
+                "platform_index_filter": platform_index_filter,
             }
             if etl_params and fields:
-                # 如果传递了清洗参数，则优先使用
                 params.update({"etl_params": etl_params, "etl_config": etl_config, "fields": fields})
             self.data.index_set_id = etl_handler.update_or_create(**params)["index_set_id"]
             self.data.save(update_fields=["index_set_id"])
+            self._sync_scene_tags_to_index_set(params["labels"])
 
         custom_config.after_hook(self.data)
 
@@ -1420,6 +1559,7 @@ class CollectorHandler:
             "collector_config_id": self.data.collector_config_id,
             "index_set_id": self.data.index_set_id,
             "bk_data_id": self.data.bk_data_id,
+            "created": True,
         }
 
         # create custom Log Group
@@ -1489,32 +1629,100 @@ class CollectorHandler:
             for label_key, label_valus in obj_item["metadata"]["labels"].items()
         ]
 
+    def _build_scene_labels(self) -> dict:
+        """Build ResultTable.labels based on collector scenario and environment.
+
+        判定优先级：
+        1. OTLP 日志上报（custom + otlp_log）→ trpc（tRPC 服务通过 OTLP 上报，
+           按场景化检索设计方案归 trpc 场景；独立于容器判定，即使部署在 k8s）
+        2. 容器日志（is_container_collector = is_container_environment OR
+           is_custom_container）→ k8s（同时覆盖 BCS 容器采集和 custom + custom_type=log）
+        3. 兜底按 COLLECTOR_SCENARIO_TO_SCENE 映射（默认 host）
+        """
+        if (
+            self.data.collector_scenario_id == CollectorScenarioEnum.CUSTOM.value
+            and self.data.custom_type == CustomTypeEnum.OTLP_LOG.value
+        ):
+            return build_scene_labels("trpc")
+        if self.data.is_container_collector:
+            stream = self._detect_container_stream()
+            return build_scene_labels("k8s", cluster_id=self.data.bcs_cluster_id or "", stream=stream)
+        scene = COLLECTOR_SCENARIO_TO_SCENE.get(self.data.collector_scenario_id, "host")
+        return build_scene_labels(scene)
+
+    def _detect_container_stream(self) -> str:
+        """Determine stream type (stdout / file) from ContainerCollectorConfig.collector_type."""
+        from apps.log_databus.constants import ContainerCollectorType
+
+        container_configs = ContainerCollectorConfig.objects.filter(
+            collector_config_id=self.data.collector_config_id
+        ).values_list("collector_type", flat=True)
+        collector_types = set(container_configs)
+        if ContainerCollectorType.STDOUT in collector_types:
+            return "stdout"
+        if ContainerCollectorType.CONTAINER in collector_types:
+            return "file"
+        return ""
+
+    def _sync_scene_tags_to_index_set(self, labels: dict):
+        """
+        Persist scene labels as IndexSetTag records and attach them to the
+        collector's LogIndexSet.tag_ids so that dimension_values can be
+        queried purely from DB.
+        """
+        if not self.data.index_set_id:
+            return
+
+        tag_ids = []
+        for key, value in labels.items():
+            if value:
+                tag_ids.append(str(IndexSetTag.get_tag_id(name=key, value=value, tag_type=TAG_TYPE_SCENE)))
+
+        if not tag_ids:
+            return
+
+        try:
+            index_set = LogIndexSet.objects.get(index_set_id=self.data.index_set_id)
+        except LogIndexSet.DoesNotExist:
+            return
+
+        existing = set(str(t) for t in (index_set.tag_ids or []) if t)
+        merged = existing | set(tag_ids)
+        index_set.tag_ids = list(merged)
+        index_set.save(update_fields=["tag_ids"])
+
     def create_or_update_clean_config(self, is_update, params):
         if is_update:
             table_id = self.data.table_id
             # 更新场景，需要把之前的存储设置拿出来，和更新的配置合并一下
             result_table_info = TransferApi.get_result_table_storage(
-                {"result_table_list": table_id, "storage_type": "elasticsearch"}
+                {"result_table_list": table_id, "storage_type": self.storage_cluster_type}
             )
             result_table = result_table_info.get(table_id, {})
             if not result_table:
                 raise ResultTableNotExistException(ResultTableNotExistException.MESSAGE.format(table_id))
 
             default_etl_params = {
-                "es_shards": result_table["storage_config"]["index_settings"]["number_of_shards"],
-                "storage_replies": result_table["storage_config"]["index_settings"]["number_of_replicas"],
+                "es_shards": result_table["storage_config"].get("index_settings", {}).get("number_of_shards", 1),
+                "storage_replies": (
+                    result_table["storage_config"].get("index_settings", {}).get("number_of_replicas", 0)
+                ),
                 "storage_cluster_id": result_table["cluster_config"]["cluster_id"],
-                "retention": result_table["storage_config"]["retention"],
+                "retention": result_table["storage_config"].get("retention", 0),
                 "allocation_min_days": params.get("allocation_min_days", 0),
                 "etl_config": self.data.etl_config,
             }
             default_etl_params.update(params)
             params = default_etl_params
 
+        params.setdefault("labels", self._build_scene_labels())
+
         from apps.log_databus.handlers.etl import EtlHandler
 
         etl_handler = EtlHandler.get_instance(self.data.collector_config_id)
-        return etl_handler.update_or_create(**params)
+        result = etl_handler.update_or_create(**params)
+        self._sync_scene_tags_to_index_set(params["labels"])
+        return result
 
     @classmethod
     def _send_create_notify(cls, collector_config: CollectorConfig):
@@ -1536,10 +1744,16 @@ class CollectorHandler:
             collector_config.bk_app_code,
         )
 
-        NOTIFY_EVENT(content=content,
-                     dimensions={"space_uid": space_uid, "collector_name": collector_config.collector_config_name,
-                                 "collector_id": collector_config.collector_config_id,
-                                 "enable_v4": collector_config.enable_v4, "msg_type": "create_collector_config"})
+        NOTIFY_EVENT(
+            content=content,
+            dimensions={
+                "space_uid": space_uid,
+                "collector_name": collector_config.collector_config_name,
+                "collector_id": collector_config.collector_config_id,
+                "enable_v4": collector_config.enable_v4,
+                "msg_type": "create_collector_config",
+            },
+        )
 
     @staticmethod
     def get_data_link_id(bk_biz_id: int, data_link_id: int = 0) -> int:
@@ -1555,7 +1769,7 @@ class CollectorHandler:
             return data_link_id
         # 业务可见的私有链路ID
         data_link_obj = (
-            DataLinkConfig.objects.filter(bk_biz_id=bk_biz_id, bk_tenant_id=get_request_tenant_id())
+            DataLinkConfig.objects.filter(bk_biz_id=bk_biz_id, bk_tenant_id=get_request_tenant_id(), is_active=True)
             .order_by("data_link_id")
             .first()
         )
@@ -1563,7 +1777,7 @@ class CollectorHandler:
             return data_link_obj.data_link_id
         # 公共链路ID
         data_link_obj = (
-            DataLinkConfig.objects.filter(bk_biz_id=0, bk_tenant_id=get_request_tenant_id())
+            DataLinkConfig.objects.filter(bk_biz_id=0, bk_tenant_id=get_request_tenant_id(), is_active=True)
             .order_by("data_link_id")
             .first()
         )

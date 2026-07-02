@@ -53,6 +53,7 @@ const logPluginConfig = {
       window.COLLECTOR_GUIDE_URL = '\${COLLECTOR_GUIDE_URL}'
       window.FEATURE_TOGGLE = \${FEATURE_TOGGLE | n}
       window.FEATURE_TOGGLE_WHITE_LIST = \${FEATURE_TOGGLE_WHITE_LIST | n}
+      window.FEATURE_TOGGLE_BLACK_LIST = \${FEATURE_TOGGLE_BLACK_LIST | n}
       window.SPACE_UID_WHITE_LIST = \${SPACE_UID_WHITE_LIST | n}
       window.FIELD_ANALYSIS_CONFIG = \${FIELD_ANALYSIS_CONFIG | n}
       window.REAL_TIME_LOG_MAX_LENGTH = '\${REAL_TIME_LOG_MAX_LENGTH}'
@@ -83,6 +84,7 @@ const logPluginConfig = {
       window.BK_PAAS_API_HOST = '\${BK_PAAS_API_HOST}'
       window.BK_USER_URL = '\${BK_USER_URL}'
       window.BK_IAM_URL = '\${BK_IAM_URL}'
+      window.TGPA_SDK_DOC_URL = '\${TGPA_SDK_DOC_URL}'
     </script>`,
 };
 if (fs.existsSync(path.resolve(__dirname, './local.settings.js'))) {
@@ -114,7 +116,8 @@ module.exports = (baseConfig, { app, mobile, production, fta, log: _log, email =
 
     config.devServer = Object.assign({}, config.devServer || {}, {
       port: devConfig.port,
-      host: devConfig.host,
+      host: '0.0.0.0',
+      allowedHosts: 'all',
       open: false,
       static: [
         // 开发环境：优先直接从 node_modules 提供 log-web1-dll 资源
@@ -126,6 +129,18 @@ module.exports = (baseConfig, { app, mobile, production, fta, log: _log, email =
               publicPath: '/static/dist/log-web1-dll',
               serveIndex: false, // 禁用目录索引
               watch: false, // 不监听文件变化
+            },
+            {
+              directory: logWebDistPath,
+              publicPath: '/log-web1-dll',
+              serveIndex: false,
+              watch: false,
+            },
+            {
+              directory: path.resolve(logWebDistPath, './fonts'),
+              publicPath: '/fonts',
+              serveIndex: false,
+              watch: false,
             },
           ]
           : []),

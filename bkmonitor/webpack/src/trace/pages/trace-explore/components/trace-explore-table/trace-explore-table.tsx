@@ -37,7 +37,8 @@ import {
 } from 'vue';
 
 import { type SortInfo, type TableSort, PrimaryTable } from '@blueking/tdesign-ui';
-import { $bkPopover, Loading } from 'bkui-vue';
+import { Loading } from 'bkui-vue';
+import tippy, { type Instance, type SingleTarget } from 'tippy.js';
 
 import TableSkeleton from '../../../../components/skeleton/table-skeleton';
 import ExploreFieldSetting from '../explore-field-setting/explore-field-setting';
@@ -46,6 +47,7 @@ import StatisticsList from '../statistics-list';
 import ExploreConditionMenu from './components/explore-condition-menu';
 import ExploreTableEmpty from './components/explore-table-empty';
 import {
+  CAN_TABLE_SORT_FIELD_TYPES,
   ENABLED_TABLE_CONDITION_MENU_CLASS_NAME,
   ENABLED_TABLE_DESCRIPTION_HEADER_CLASS_NAME,
   ENABLED_TABLE_ELLIPSIS_CELL_CLASS_NAME,
@@ -69,6 +71,11 @@ const DEFAULT_SCROLL_CONTAINER_SELECTOR = '.trace-explore-view';
 export default defineComponent({
   name: 'TraceExploreTable',
   props: {
+    /** 是否显示操作按钮 */
+    showOperation: {
+      type: Boolean,
+      default: true,
+    },
     /** 滚动容器选择器 */
     scrollContainerSelector: {
       type: String,
@@ -133,6 +140,11 @@ export default defineComponent({
         descending: null,
       }),
     },
+    /** 支持排序的字段类型 */
+    canSortFieldTypes: {
+      type: [Set, Array] as PropType<Set<string> | string[]>,
+      default: () => CAN_TABLE_SORT_FIELD_TYPES,
+    },
     /** 是否启用点击弹出操作下拉菜单 */
     enabledClickMenu: {
       type: Boolean,
@@ -145,6 +157,11 @@ export default defineComponent({
     },
     /** 是否启用字段分析统计面板功能 */
     enableStatistics: {
+      type: Boolean,
+      default: true,
+    },
+    /** 是否显示列头图标 */
+    showHeaderIcon: {
       type: Boolean,
       default: true,
     },
@@ -170,8 +187,8 @@ export default defineComponent({
     let scrollContainer: HTMLElement = null;
     /** 滚动结束后回调逻辑执行计时器  */
     let scrollPointerEventsTimer = null;
-    /** 统计弹窗实例 */
-    let statisticsPopoverInstance = null;
+    /** 统计弹窗 tippy 实例 */
+    let statisticsPopoverInstance: Instance | null = null;
 
     const tableRef = useTemplateRef<InstanceType<typeof PrimaryTable>>('tableRef');
     const conditionMenuRef = useTemplateRef<InstanceType<typeof ExploreConditionMenu>>('conditionMenuRef');
@@ -258,7 +275,16 @@ export default defineComponent({
       },
     });
 
-    const { tableCellRender } = useTableCell(tableRowKeyField);
+    const { tableCellRender, renderContext } = useTableCell({
+      rowKeyField: tableRowKeyField,
+      customDefaultGetRenderValue: (row, column) => {
+        const alias = row?.[column.colKey];
+        if (typeof alias !== 'object' || alias == null) {
+          return alias;
+        }
+        return JSON.stringify(alias);
+      },
+    });
     const { tableColumns, tableDisplayColumns } = useExploreColumnConfig({
       appName: toRef(props, 'appName'),
       displayFields: toRef(props, 'displayFields'),
@@ -268,6 +294,8 @@ export default defineComponent({
       sortContainer: toRef(props, 'sortContainer'),
       sourceFieldConfigs: toRef(props, 'sourceFieldConfigs'),
       enabledClickMenu: toRef(props, 'enabledClickMenu'),
+      canSortFieldTypes: toRef(props, 'canSortFieldTypes'),
+      renderContext,
       tableHeaderCellRender: (...args) => tableHeaderCellRender(...args),
       tableCellRender,
       handleConditionMenuShow: (...args) => handleConditionMenuShow(...args),
@@ -288,13 +316,13 @@ export default defineComponent({
     /**
      * @description 滚动触底加载更多
      */
-    const handleScrollToEnd = (target: HTMLElement) => {
-      if (!props.tableHasScrollLoading) {
+    const handleScrollToEnd = (target?: HTMLElement) => {
+      if (!props.tableHasScrollLoading || !target) {
         return;
       }
       const { scrollHeight, scrollTop, clientHeight } = target;
-      const isEnd = !!scrollTop && Math.abs(scrollHeight - scrollTop - clientHeight) <= 1;
-      const noScrollBar = scrollHeight <= clientHeight + 1;
+      const isEnd = !!scrollTop && Math.abs(scrollHeight - scrollTop - clientHeight) < 1;
+      const noScrollBar = scrollHeight < clientHeight + 1;
       const shouldRequest = noScrollBar || isEnd;
       if (!shouldRequest) return;
       if (
@@ -447,9 +475,11 @@ export default defineComponent({
      */
     const handleStatisticsPopoverHide = (resetActiveStatisticsField = true) => {
       showStatisticsPopover.value = false;
-      statisticsPopoverInstance?.hide(0);
-      statisticsPopoverInstance?.close();
-      statisticsPopoverInstance = null;
+      const inst = statisticsPopoverInstance;
+      if (inst) {
+        statisticsPopoverInstance = null;
+        inst.destroy();
+      }
       if (resetActiveStatisticsField) {
         activeStatisticsField.value = '';
       }
@@ -463,28 +493,42 @@ export default defineComponent({
       handleStatisticsPopoverHide();
       activeStatisticsField.value = item.name;
       if (!item.is_dimensions) return;
-      statisticsPopoverInstance = $bkPopover({
-        target: e.currentTarget as HTMLDivElement,
-        content: statisticsListRef.value.$refs.dimensionPopover as HTMLDivElement,
-        trigger: 'click',
+      const contentEl = statisticsListRef.value?.$refs?.dimensionPopover as HTMLDivElement | undefined;
+      if (!contentEl) return;
+      const tippyInst = tippy(e.currentTarget as SingleTarget, {
+        content: contentEl,
+        trigger: 'manual',
         placement: 'right',
-        theme: 'light',
+        theme: 'light statistics-dimension-popover-cls',
         arrow: true,
-        boundary: 'viewport',
-        extCls: 'statistics-dimension-popover-cls',
-        width: 405,
-        // @ts-expect-error
-        distance: -5,
-        onHide() {
+        interactive: true,
+        maxWidth: 405,
+        offset: [0, 8],
+        appendTo: () => document.body,
+        popperOptions: {
+          modifiers: [
+            {
+              name: 'preventOverflow',
+              options: {
+                boundary: 'viewport',
+              },
+            },
+          ],
+        },
+        onHidden(instance) {
+          if (statisticsPopoverInstance !== instance) return;
           showStatisticsPopover.value = false;
           if (!statisticsSliderShow) {
             activeStatisticsField.value = '';
           }
+          statisticsPopoverInstance = null;
         },
       });
+      statisticsPopoverInstance = tippyInst;
       setTimeout(() => {
+        if (statisticsPopoverInstance !== tippyInst) return;
         showStatisticsPopover.value = true;
-        statisticsPopoverInstance.show();
+        tippyInst.show();
       }, 100);
     };
 
@@ -524,10 +568,13 @@ export default defineComponent({
             key={title}
             class={`explore-header-col ${chartIconActive}`}
           >
-            <FieldTypeIcon
-              class='col-type-icon'
-              type={fieldType}
-            />
+            {props.showHeaderIcon && (
+              <FieldTypeIcon
+                class='col-type-icon'
+                type={fieldType}
+              />
+            )}
+
             <div class={`${ENABLED_TABLE_ELLIPSIS_CELL_CLASS_NAME}`}>
               <span
                 class={`th-label ${ENABLED_TABLE_DESCRIPTION_HEADER_CLASS_NAME}`}
@@ -580,6 +627,7 @@ export default defineComponent({
     onBeforeUnmount(() => {
       scrollPointerEventsTimer && clearTimeout(scrollPointerEventsTimer);
       removeScrollListener();
+      handleStatisticsPopoverHide();
     });
 
     return {
@@ -607,10 +655,11 @@ export default defineComponent({
       >
         <PrimaryTable
           ref='tableRef'
-          class={this.tableSkeletonConfig?.tableClass}
+          class={`explore-table ${this.tableSkeletonConfig?.tableClass}`}
           v-slots={{
             empty: () => (
               <ExploreTableEmpty
+                showOperation={this.showOperation}
                 onClearFilter={() => this.$emit('clearRetrievalFilter')}
                 onDataSourceConfigClick={this.handleDataSourceConfigClick}
               />
@@ -668,15 +717,20 @@ export default defineComponent({
                 )
               : undefined
           }
-          rowspanAndColspan={({ colIndex }) => {
-            return {
-              rowspan: 1,
-              colspan: colIndex === this.tableDisplayColumns.length - 1 ? 2 : 1,
-            };
-          }}
+          rowspanAndColspan={
+            this.enabledDisplayFieldSetting
+              ? ({ colIndex }) => {
+                  return {
+                    rowspan: 1,
+                    colspan: colIndex === this.tableDisplayColumns.length - 1 ? 2 : 1,
+                  };
+                }
+              : undefined
+          }
           activeRowType='single'
           data={this.tableData}
           hover={true}
+          needCustomScroll={false}
           resizable={true}
           rowKey={this.tableRowKeyField}
           showSortColumnBgColor={true}
@@ -687,6 +741,7 @@ export default defineComponent({
           onColumnResizeChange={context => this.$emit('columnResize', context)}
           onSortChange={this.handleSortChange}
         />
+
         <TableSkeleton class={`explore-table-skeleton ${this.tableSkeletonConfig?.skeletonClass}`} />
 
         <div style='display: none'>

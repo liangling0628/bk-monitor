@@ -41,6 +41,7 @@ from monitor_web.scene_view.builtin import (
     post_handle_view_list_config,
     post_handle_view_config,
 )
+from monitor_web.strategies.metric_cache.process_dimensions import get_process_extra_dimensions
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,7 @@ class GetSceneViewResource(ApiAuthResource):
             label="服务类型具体值(APM场景变量)", required=False, allow_null=True
         )
         apm_span_id = serializers.CharField(label="SpanId(APM场景变量)", required=False, allow_null=True)
+        apm_trace_id = serializers.CharField(label="TraceId(APM场景变量)", required=False, allow_null=True)
         # ---
         # 主机信息场景变量
         bk_host_innerip = serializers.CharField(label="主机内网IP", required=False, allow_null=True)
@@ -604,10 +606,16 @@ class GetSceneViewDimensionsResource(ApiAuthResource):
             yield from metrics
 
     def perform_request(self, params):
+        metrics = list(self.get_metrics(params))
+        extra = get_process_extra_dimensions(
+            bk_biz_id_to_bk_tenant_id(params["bk_biz_id"]),
+            params["bk_biz_id"],
+            {metric.result_table_id for metric in metrics},
+        )
         existed_dimensions = set()
         dimensions = []
-        for metric in self.get_metrics(params):
-            for dimension in metric.dimensions:
+        for metric in metrics:
+            for dimension in list(metric.dimensions) + extra.get(metric.result_table_id, []):
                 if dimension["id"] in existed_dimensions:
                     continue
                 addon_top_limit_attributes(dimension)
@@ -639,11 +647,16 @@ class GetSceneViewDimensionValueResource(ApiAuthResource):
         )
 
     def perform_request(self, params):
-        for metric in GetSceneViewDimensionsResource.get_metrics(params):
-            for dimension in metric.dimensions:
-                if dimension["id"] != params["field"]:
-                    continue
-
+        metrics = list(GetSceneViewDimensionsResource.get_metrics(params))
+        extra = get_process_extra_dimensions(
+            bk_biz_id_to_bk_tenant_id(params["bk_biz_id"]),
+            params["bk_biz_id"],
+            {metric.result_table_id for metric in metrics},
+        )
+        for metric in metrics:
+            field_ids = {dimension["id"] for dimension in metric.dimensions}
+            field_ids |= {dimension["id"] for dimension in extra.get(metric.result_table_id, [])}
+            if params["field"] in field_ids:
                 data_source_class = load_data_source(metric.data_source_label, metric.data_type_label)
                 data_source = data_source_class(
                     bk_biz_id=params["bk_biz_id"],

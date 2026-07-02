@@ -29,12 +29,18 @@ import { onMounted } from 'vue';
 
 import { promiseTimeout, useResizeObserver } from '@vueuse/core';
 import { Dropdown } from 'bkui-vue';
-import tippy, { sticky } from 'tippy.js';
 import { useI18n } from 'vue-i18n';
+import { useTippy } from 'vue-tippy';
 
 import AutoWidthInput from './auto-width-input';
-import { METHOD_MAP, NOT_TYPE_METHODS, SETTING_KV_SELECTOR_EMITS, SETTING_KV_SELECTOR_PROPS } from './typing';
-import { NOT_VALUE_METHODS, onClickOutside, triggerShallowRef } from './utils';
+import {
+  EFieldType,
+  METHOD_MAP,
+  NOT_TYPE_METHODS,
+  SETTING_KV_SELECTOR_EMITS,
+  SETTING_KV_SELECTOR_PROPS,
+} from './typing';
+import { isNumeric, NOT_VALUE_METHODS, onClickOutside, triggerShallowRef } from './utils';
 import ValueOptions from './value-options';
 import ValueTagInput from './value-tag-input';
 
@@ -69,6 +75,7 @@ export default defineComponent({
     });
     const isHighLight = computed(() => !!inputValue.value || showSelector.value || expand.value);
     const notNeedValueWrap = computed(() => NOT_VALUE_METHODS.includes(localMethod.value));
+    const isTypeInteger = computed(() => [EFieldType.integer, EFieldType.long].includes(props.fieldInfo?.type));
 
     init();
     onMounted(async () => {
@@ -164,8 +171,8 @@ export default defineComponent({
         destroyPopoverInstance();
         return;
       }
-      popoverInstance.value = tippy(event.target as any, {
-        content: selectorRef.value,
+      popoverInstance.value = useTippy(event.target as any, {
+        content: () => selectorRef.value,
         trigger: 'click',
         placement: 'bottom-start',
         theme: 'light common-monitor padding-0',
@@ -175,7 +182,6 @@ export default defineComponent({
         interactive: true,
         offset: [0, 4],
         sticky: 'reference',
-        plugins: [sticky],
         onHidden: () => {
           destroyPopoverInstance();
         },
@@ -213,7 +219,11 @@ export default defineComponent({
     }
     function handleEnter() {
       if (!isChecked.value || !showSelector.value) {
-        if (!localValue.value.map(str => String(str)).includes(inputValue.value) && inputValue.value) {
+        if (
+          !localValue.value.map(str => String(str)).includes(inputValue.value) &&
+          inputValue.value &&
+          (isTypeInteger.value ? isNumeric(inputValue.value) : true)
+        ) {
           localValue.value.push(inputValue.value);
           triggerShallowRef(localValue);
           handleChange();
@@ -268,7 +278,7 @@ export default defineComponent({
       isChecked.value = v;
     }
     function handleValueUpdate(v: string, index: number) {
-      if (v) {
+      if (v && (isTypeInteger.value ? isNumeric(v) : true)) {
         localValue.value.splice(index, 1, v);
       } else {
         localValue.value.splice(index, 1);
@@ -455,6 +465,8 @@ export default defineComponent({
               fieldInfo={this.fieldInfo}
               getValueFn={this.getValueFn}
               isPopover={true}
+              limit={this.limit}
+              loadDelay={this.loadDelay}
               noDataSimple={true}
               search={this.inputValue}
               selected={this.localValue}

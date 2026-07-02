@@ -7,7 +7,6 @@ export const exportAlert = request('POST', 'fta/alert/alert/export/');
 export const alertDateHistogram = request('POST', 'fta/alert/alert/date_histogram/');
 export const listAlertTags = request('POST', 'fta/alert/alert/tags/');
 export const alertDetail = request('GET', 'fta/alert/alert/detail/');
-export const editDataMeaning = request('POST', 'fta/alert/alert/edit_data_meaning/');
 export const getExperience = request('GET', 'fta/alert/alert/get_experience/');
 export const saveExperience = request('POST', 'fta/alert/alert/save_experience/');
 export const deleteExperience = request('POST', 'fta/alert/alert/delete_experience/');
@@ -41,6 +40,7 @@ export const getTmpData = request('GET', 'fta/alert/alert/get_tmp_data/');
 export const getFourMetricsData = request('GET', 'fta/alert/alert/get_four_metrics_data/');
 export const quickAlertShield = request('GET', 'fta/alert/alert/quick_shield/');
 export const quickAlertAck = request('GET', 'fta/alert/alert/quick_ack/');
+export const generateQueryString = request('POST', 'fta/alert/generate_query_string/');
 
 export default {
   listAllowedBiz,
@@ -83,5 +83,5 @@ export default {
   getFourMetricsData,
   quickAlertShield,
   quickAlertAck,
-  editDataMeaning,
+  generateQueryString,
 };

@@ -11,14 +11,17 @@ specific language governing permissions and limitations under the License.
 import abc
 import base64
 import datetime
+import ipaddress
 import json
 import logging
 import random
 import re
 import string
+import tempfile
 import time
 import traceback
-from typing import TYPE_CHECKING, Any
+from contextlib import ExitStack
+from typing import TYPE_CHECKING, Any, Self
 
 import arrow
 import curator
@@ -26,12 +29,14 @@ import elasticsearch
 import elasticsearch5
 import elasticsearch6
 import influxdb
+import pymysql
 import requests
 from bkcrypto.contrib.django.fields import SymmetricTextField
 from django.conf import settings
 from django.db import models, transaction
+from django.db.models import Q
 from django.db.models.fields import DateTimeField
-from django.db.transaction import atomic
+from django.db.transaction import atomic, on_commit
 from django.utils import timezone as django_timezone
 from django.utils.functional import cached_property
 from django.utils.translation import gettext as _
@@ -112,6 +117,17 @@ class ClusterInfo(models.Model):
     TYPE_ARGUS = "argus"
     TYPE_VM = "victoria_metrics"
     TYPE_DORIS = "doris"
+    TYPE_SURREALDB = "surrealdb"
+
+    DEFAULT_CHECK_TIMEOUT = 5
+    CHECK_STATUS_AVAILABLE = "available"
+    CHECK_STATUS_UNAVAILABLE = "unavailable"
+    CHECK_STATUS_UNSUPPORTED = "unsupported"
+    CHECK_ERROR_CONNECTION_FAILED = "CONNECTION_FAILED"
+    CHECK_ERROR_CLUSTER_UNHEALTHY = "CLUSTER_UNHEALTHY"
+    CHECK_ERROR_HTTP_UNHEALTHY = "HTTP_UNHEALTHY"
+    CHECK_ERROR_INVALID_CONFIG = "INVALID_CONFIG"
+    CHECK_ERROR_UNSUPPORTED_CLUSTER_TYPE = "UNSUPPORTED_CLUSTER_TYPE"
 
     CLUSTER_TYPE_CHOICES = (
         (TYPE_INFLUXDB, "influxDB"),
@@ -122,6 +138,7 @@ class ClusterInfo(models.Model):
         (TYPE_VM, "victoria_metrics"),
         (TYPE_DORIS, "doris"),
         (TYPE_BKDATA, "bkdata"),
+        (TYPE_SURREALDB, "surrealdb"),
     )
 
     # 默认注册系统名
@@ -204,6 +221,318 @@ class ClusterInfo(models.Model):
             data[f.name] = value
 
         return data
+
+    def health_check(self, timeout: int | None = None) -> dict[str, Any]:
+        """探测集群连接和可用状态，返回统一结构。"""
+
+        if timeout is None:
+            timeout = self.DEFAULT_CHECK_TIMEOUT
+        checker_name = {
+            self.TYPE_DORIS: "_check_doris_cluster",
+            self.TYPE_ES: "_check_es_cluster",
+            self.TYPE_KAFKA: "_check_kafka_cluster",
+            self.TYPE_VM: "_check_vm_cluster",
+        }.get(self.cluster_type)
+
+        if not checker_name:
+            return self._build_cluster_check_result(
+                status=self.CHECK_STATUS_UNSUPPORTED,
+                is_connected=False,
+                is_available=False,
+                error=self._build_cluster_check_error(
+                    code=self.CHECK_ERROR_UNSUPPORTED_CLUSTER_TYPE,
+                    message=f"暂不支持探测集群类型: {self.cluster_type}",
+                    details={"cluster_type": self.cluster_type},
+                ),
+            )
+
+        try:
+            if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+                raise ValueError("timeout 必须是大于 0 的整数")
+            return getattr(self, checker_name)(timeout=timeout)
+        except ValueError as error:
+            return self._build_cluster_check_result(
+                status=self.CHECK_STATUS_UNAVAILABLE,
+                is_connected=False,
+                is_available=False,
+                error=self._build_cluster_check_error(
+                    code=self.CHECK_ERROR_INVALID_CONFIG,
+                    message="集群探测配置不完整或不合法",
+                    details=self._format_check_exception(error),
+                ),
+            )
+        except Exception as error:  # pylint: disable=broad-except
+            logger.exception(
+                "ClusterInfo.health_check failed, cluster_id->[%s], cluster_type->[%s]",
+                self.cluster_id,
+                self.cluster_type,
+            )
+            return self._build_cluster_check_result(
+                status=self.CHECK_STATUS_UNAVAILABLE,
+                is_connected=False,
+                is_available=False,
+                error=self._build_cluster_check_error(
+                    code=self.CHECK_ERROR_CONNECTION_FAILED,
+                    message="集群连接失败",
+                    details=self._format_check_exception(error),
+                ),
+            )
+
+    def _build_cluster_check_result(
+        self,
+        status: str,
+        is_connected: bool,
+        is_available: bool,
+        error: dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """统一集群探测返回格式。"""
+
+        return {
+            "cluster_id": self.cluster_id,
+            "cluster_name": self.cluster_name,
+            "cluster_type": self.cluster_type,
+            "status": status,
+            "is_connected": is_connected,
+            "is_available": is_available,
+            "error": error,
+            "details": details or {},
+        }
+
+    @staticmethod
+    def _build_cluster_check_error(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"code": code, "message": message, "details": details or {}}
+
+    @staticmethod
+    def _format_check_exception(error: Exception) -> dict[str, str]:
+        return {"type": error.__class__.__name__, "message": str(error)}
+
+    def _validate_check_endpoint(self) -> None:
+        if not self.domain_name:
+            raise ValueError("domain_name 不能为空")
+        if not self.port:
+            raise ValueError("port 不能为空")
+
+    @staticmethod
+    def _write_check_temp_file(stack: ExitStack, content: str) -> str:
+        temp_file = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+", delete=True))
+        temp_file.write(content)
+        temp_file.flush()
+        return temp_file.name
+
+    @staticmethod
+    def _get_kafka_admin_client_class():
+        from confluent_kafka.admin import AdminClient
+
+        return AdminClient
+
+    def _normalize_kafka_bootstrap_host(self, host: str) -> str:
+        if host.startswith("["):
+            match = re.fullmatch(r"\[(?P<address>[^\]]+)\](?::(?P<port>\d+))?", host)
+            if not match:
+                raise ValueError(f"Kafka bootstrap host 非法: {host}")
+
+            address = ipaddress.ip_address(match.group("address"))
+            port = int(match.group("port") or self.port)
+            if address.version == 6:
+                return f"[{address.compressed}]:{port}"
+            return f"{address.compressed}:{port}"
+
+        if host.count(":") == 1:
+            return host
+
+        if host.count(":") > 1:
+            address_part, port_part = host.rsplit(":", 1)
+            if port_part.isdigit():
+                try:
+                    address = ipaddress.ip_address(address_part)
+                except ValueError:
+                    pass
+                else:
+                    if address.version == 6:
+                        return f"[{address.compressed}]:{int(port_part)}"
+                    return f"{address.compressed}:{int(port_part)}"
+
+            address = ipaddress.ip_address(host)
+            if address.version == 6:
+                return f"[{address.compressed}]:{self.port}"
+            return f"{address.compressed}:{self.port}"
+
+        return f"{host}:{self.port}"
+
+    def _compose_kafka_bootstrap_servers(self) -> str:
+        self._validate_check_endpoint()
+        bootstrap_servers = []
+        for host in str(self.domain_name).split(","):
+            host = host.strip()
+            if not host:
+                continue
+            bootstrap_servers.append(self._normalize_kafka_bootstrap_host(host))
+
+        if not bootstrap_servers:
+            raise ValueError("Kafka bootstrap servers 为空")
+
+        return ",".join(bootstrap_servers)
+
+    def _build_kafka_admin_config(self, timeout: int, stack: ExitStack) -> dict[str, Any]:
+        bootstrap_servers = self._compose_kafka_bootstrap_servers()
+        conf: dict[str, Any] = {
+            "bootstrap.servers": bootstrap_servers,
+            "socket.timeout.ms": timeout * 1000,
+            "request.timeout.ms": timeout * 1000,
+            "metadata.request.timeout.ms": timeout * 1000,
+        }
+
+        has_ssl = bool(
+            self.is_ssl_verify or self.ssl_certificate_authorities or self.ssl_certificate or self.ssl_certificate_key
+        )
+        has_sasl = bool(self.username and self.password)
+        if self.is_auth and not has_sasl:
+            raise ValueError("Kafka 开启鉴权但缺少 username/password")
+
+        if self.security_protocol:
+            security_protocol = self.security_protocol
+        elif has_ssl and has_sasl:
+            security_protocol = "SASL_SSL"
+        elif has_ssl:
+            security_protocol = "SSL"
+        elif has_sasl:
+            security_protocol = config.KAFKA_SASL_PROTOCOL
+        else:
+            security_protocol = "PLAINTEXT"
+        conf["security.protocol"] = security_protocol
+
+        if has_sasl:
+            conf["sasl.mechanisms"] = self.sasl_mechanisms or config.KAFKA_SASL_MECHANISM
+            conf["sasl.username"] = self.username
+            conf["sasl.password"] = self.password
+
+        if self.ssl_insecure_skip_verify:
+            conf["enable.ssl.certificate.verification"] = False
+        if self.ssl_certificate_authorities:
+            conf["ssl.ca.location"] = self._write_check_temp_file(stack, self.ssl_certificate_authorities)
+        if self.ssl_certificate:
+            conf["ssl.certificate.location"] = self._write_check_temp_file(stack, self.ssl_certificate)
+        if self.ssl_certificate_key:
+            conf["ssl.key.location"] = self._write_check_temp_file(stack, self.ssl_certificate_key)
+
+        return conf
+
+    def _check_kafka_cluster(self, timeout: int) -> dict[str, Any]:
+        with ExitStack() as stack:
+            conf = self._build_kafka_admin_config(timeout=timeout, stack=stack)
+            metadata = self._get_kafka_admin_client_class()(conf).list_topics(timeout=timeout)
+
+        return self._build_cluster_check_result(
+            status=self.CHECK_STATUS_AVAILABLE,
+            is_connected=True,
+            is_available=True,
+            details={
+                "bootstrap_servers": conf["bootstrap.servers"],
+                "broker_count": len(metadata.brokers or {}),
+                "topic_count": len(metadata.topics or {}),
+                "security_protocol": conf.get("security.protocol"),
+                "sasl_mechanisms": conf.get("sasl.mechanisms"),
+                "auth_enabled": bool(self.is_auth or self.username),
+            },
+        )
+
+    def _check_es_cluster(self, timeout: int) -> dict[str, Any]:
+        client = es_tools.get_client(bk_tenant_id=self.bk_tenant_id, cluster_id=self.cluster_id)
+        try:
+            health = client.cluster.health(request_timeout=timeout)
+        except TypeError:
+            health = client.cluster.health()
+
+        health_status = (health or {}).get("status")
+        details = {
+            "health_status": health_status,
+            "number_of_nodes": (health or {}).get("number_of_nodes"),
+            "active_shards": (health or {}).get("active_shards"),
+            "unassigned_shards": (health or {}).get("unassigned_shards"),
+        }
+        if health_status == "red":
+            return self._build_cluster_check_result(
+                status=self.CHECK_STATUS_UNAVAILABLE,
+                is_connected=True,
+                is_available=False,
+                error=self._build_cluster_check_error(
+                    code=self.CHECK_ERROR_CLUSTER_UNHEALTHY,
+                    message="Elasticsearch 集群健康状态为 red",
+                    details=details,
+                ),
+                details=details,
+            )
+
+        return self._build_cluster_check_result(
+            status=self.CHECK_STATUS_AVAILABLE,
+            is_connected=True,
+            is_available=True,
+            details=details,
+        )
+
+    def _check_vm_cluster(self, timeout: int) -> dict[str, Any]:
+        self._validate_check_endpoint()
+        schema = self.schema if self.schema in ("http", "https") else "http"
+        url = f"{schema}://{self.domain_name}:{self.port}/health"
+        with ExitStack() as stack:
+            verify: bool | str = True
+            if schema == "https":
+                if self.ssl_insecure_skip_verify:
+                    verify = False
+                elif self.ssl_certificate_authorities:
+                    verify = self._write_check_temp_file(stack, self.ssl_certificate_authorities)
+
+            response = requests.get(url, timeout=timeout, verify=verify)
+
+        details = {"url": url, "status_code": response.status_code}
+        if response.status_code >= 400:
+            details["response"] = response.text[:200]
+            return self._build_cluster_check_result(
+                status=self.CHECK_STATUS_UNAVAILABLE,
+                is_connected=True,
+                is_available=False,
+                error=self._build_cluster_check_error(
+                    code=self.CHECK_ERROR_HTTP_UNHEALTHY,
+                    message="VictoriaMetrics health 接口返回异常状态码",
+                    details=details,
+                ),
+                details=details,
+            )
+
+        return self._build_cluster_check_result(
+            status=self.CHECK_STATUS_AVAILABLE,
+            is_connected=True,
+            is_available=True,
+            details=details,
+        )
+
+    def _check_doris_cluster(self, timeout: int) -> dict[str, Any]:
+        self._validate_check_endpoint()
+        connection = pymysql.connect(
+            host=self.domain_name,
+            port=int(self.port),
+            user=self.username or "",
+            password=self.password or "",
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=timeout,
+            read_timeout=timeout,
+            write_timeout=timeout,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+
+        return self._build_cluster_check_result(
+            status=self.CHECK_STATUS_AVAILABLE,
+            is_connected=True,
+            is_available=True,
+            details={"query": "SELECT 1", "response": row},
+        )
 
     @classmethod
     def refresh_consul_storage_config(cls):
@@ -2033,7 +2362,9 @@ class ESStorage(models.Model, StorageResultTable):
         else:
             from metadata.task import tasks
 
-            tasks.create_es_storage_index.delay(table_id=table_id)
+            on_commit(
+                lambda: tasks.create_es_storage_index.delay(table_id=table_id), using=config.DATABASE_CONNECTION_NAME
+            )
             logger.info(f"result_table->[{table_id}] create async with celery task")
 
     @classmethod
@@ -2746,6 +3077,85 @@ class ESStorage(models.Model, StorageResultTable):
                 now_gap += self.slice_gap
 
         return True
+
+    @classmethod
+    def move_last_day_write_alias(cls, es_storage: Self, force_move: bool = False, dry_run: bool = False):
+        """移动前一天的写别名到当前最新的索引
+
+        Notes:
+            由于数据决定使用哪个写别名是基于UTC时间的, 而索引创建是基于东八区时间的, 因此存在索引轮转后, 数据不写向新索引的情况。
+            而且还可能存在数据堆积处理延迟的情况, kafka中也可能存在几个小时前的数据未被消费的情况。
+            在正常情况下，这不会有什么问题，但是一旦遇到故障切换或扩容等场景，实际上我们希望数据不要写向旧索引，而是写向新索引。
+            因此需要将前一天的写别名指向最新的索引，同时删除旧索引的写别名，这样就可以保证数据写向新索引，同时需要将前一天的读别名指向最新的索引。
+
+        执行步骤:
+            1. 确定最新的索引名称
+            2. 确定前一天的读写别名名称
+            3. 确定前一天写别名指向的索引列表
+            4. 如果写别名已经指向最新的索引，则不需要进行写别名的移动
+            5. 检查索引状态, 如果索引状态为red, 则强制进行写别名的移动
+            6. 如果确定需要移动写别名，则执行创建新的写别名指向最新的索引，
+               同时添加对应日期的读别名，并删除旧的写别名指向的索引
+
+        Args:
+            es_storage: ESStorage对象
+            force_move: 默认仅处理上一个写别名指向的索引为read的情况。如果想要在任何情况下都移动写别名, 则需要将force_move设置为True
+            dry_run: 是否只进行模拟，不实际执行操作
+        """
+        # 确定最新的索引名称
+        latest_index_name = sorted(es_storage.get_index_names())[-1]
+
+        # 确定前一天的读写别名
+        last_datetime_object = es_storage.now - datetime.timedelta(minutes=1440)
+        last_date_str = last_datetime_object.strftime(es_storage.date_format)
+        last_write_alias_name = f"write_{last_date_str}_{es_storage.index_name}"
+        last_read_alias_name = f"{es_storage.index_name}_{last_date_str}_read"
+
+        # 确定上一个写别名指向的索引
+        last_indexes = list(es_storage.es_client.indices.get_alias(name=last_write_alias_name).keys())
+        if not last_indexes:
+            print("上一个索引没有进行配置，因此也不需要进行写别名的移动")
+            return
+
+        # 如果写别名已经指向最新的索引，则不需要进行写别名的移动
+        if latest_index_name in last_indexes:
+            print(f"最新的索引->[{latest_index_name}]已经在写别名指向的索引列表中，因此不需要进行写别名的移动")
+            return
+
+        # 如果写别名指向了多个索引，配置存在问题，后续需要检查为什么会出现这种情况？
+        if len(last_indexes) > 1:
+            print(f"Warning: 写别名指向了多个索引！索引列表->[{last_indexes}]")
+
+        # 检查索引状态，如果索引状态为red，则强制进行写别名的移动
+        if not force_move:
+            for index in last_indexes:
+                index_info = es_storage.get_index_info(index)
+                if index_info["status"] == "red":
+                    print(f"索引->[{index}]状态为red，因此要强制进行写别名的移动")
+                    force_move = True
+                    break
+
+        if force_move:
+            # 创建新的写别名指向最新的索引，同时添加对应日期的读别名
+            actions = [
+                {"add": {"index": latest_index_name, "alias": last_write_alias_name}},
+                {"add": {"index": latest_index_name, "alias": last_read_alias_name}},
+            ]
+
+            print(f"将写别名->[{last_write_alias_name}]指向索引->[{latest_index_name}]")
+            print(f"将读别名->[{last_read_alias_name}]指向索引->[{latest_index_name}]")
+
+            # 删除旧的写别名指向的索引
+            for index in last_indexes:
+                actions.append({"remove": {"index": index, "alias": last_write_alias_name}})
+                print(f"删除写别名->[{last_write_alias_name}]指向索引->[{index}]")
+
+            if not dry_run:
+                es_storage._update_aliases_with_retry(actions=actions, new_index_name=latest_index_name)
+            else:
+                print(
+                    f"模拟执行, _update_aliases_with_retry, actions->[{actions}], new_index_name->[{latest_index_name}]"
+                )
 
     def create_or_update_aliases(self, ahead_time=1440, force_rotate: bool = False, is_moving_cluster: bool = False):
         """
@@ -4250,8 +4660,14 @@ class ESStorage(models.Model, StorageResultTable):
         return self.have_snapshot_conf and self.is_index_enable()
 
     @property
+    def running_snapshot_query(self):
+        """启用中快照配置查询条件"""
+        return Q(table_id=self.table_id, status=EsSnapshot.ES_RUNNING_STATUS, bk_tenant_id=self.bk_tenant_id)
+
+    @property
     def have_snapshot_conf(self):
-        return EsSnapshot.objects.filter(table_id=self.table_id).exists()
+        # 存在启用中的快照配置，才做快照管理
+        return EsSnapshot.objects.filter(self.running_snapshot_query).exists()
 
     @property
     def is_snapshot_stopped(self):
@@ -4263,15 +4679,20 @@ class ESStorage(models.Model, StorageResultTable):
 
     @property
     def can_delete_snapshot(self):
-        es_snapshot: EsSnapshot = EsSnapshot.objects.filter(table_id=self.table_id).first()
-        # 永久或者状态是停用的状态，则不允许删除快照数据
+        # table_id存在多份快照配置，这里只管理启用中的快照配置
+        es_snapshot: EsSnapshot = EsSnapshot.objects.filter(self.running_snapshot_query).first()
+
+        # 永久的状态，则不允许删除快照数据
         if es_snapshot:
-            return not (es_snapshot.is_permanent() or es_snapshot.status == EsSnapshot.ES_STOPPED_STATUS)
+            return not es_snapshot.is_permanent()
         return False
 
     @cached_property
     def snapshot_obj(self):
-        return EsSnapshot.objects.get(table_id=self.table_id)
+        snapshot = EsSnapshot.objects.filter(self.running_snapshot_query).first()
+        if not snapshot:
+            raise EsSnapshot.DoesNotExist(f"No running snapshot found for table_id: {self.table_id}")
+        return snapshot
 
     @property
     def snapshot_complete_state(self):
@@ -4395,11 +4816,8 @@ class ESStorage(models.Model, StorageResultTable):
         }
 
     def create_snapshot(self):
+        # 存在启用的快照配置，且结果表处于启用中，才进行快照创建
         if not self.can_snapshot:
-            return
-
-        # 如果是停用状态，则不能新建快照
-        if self.is_snapshot_stopped:
             return
 
         current_snapshot_info = self.current_snapshot_info()
@@ -4413,6 +4831,7 @@ class ESStorage(models.Model, StorageResultTable):
                 table_id=self.table_id,
                 snapshot_name=current_snapshot_name,
                 bk_tenant_id=self.bk_tenant_id,
+                repository_name=self.snapshot_obj.target_snapshot_repository_name,
             ).exists()
             es_snapshot_exists = current_snapshot_info["datetime"].day == now.day
             current_snapshot_is_success = current_snapshot_info["is_success"]
@@ -4511,12 +4930,13 @@ class ESStorage(models.Model, StorageResultTable):
             .get("_source")
         )
 
-    def expired_date_timestamp(self, snapshot):
+    def expired_date_timestamp(self, snapshot, snapshot_days):
         snapshot_re = self.snapshot_re
         re_result = snapshot_re.match(snapshot)
         snapshot_datetime_str = re_result.group("datetime")
         snapshot_datetime = datetime_str_to_datetime(snapshot_datetime_str, self.snapshot_date_format, self.time_zone)
-        expired_datetime_point = snapshot_datetime + datetime.timedelta(days=self.snapshot_obj.snapshot_days)
+        # 所有归档配置的过期时间都能获取到
+        expired_datetime_point = snapshot_datetime + datetime.timedelta(days=snapshot_days)
         return expired_datetime_point.timestamp()
 
     def match_expired_snapshot(self, snapshots: list, expired_datetime_point, snapshot_name_key="snapshot") -> list:
@@ -4537,6 +4957,7 @@ class ESStorage(models.Model, StorageResultTable):
         return expired_snapshots
 
     def get_expired_snapshot(self, expired_days: int):
+        # 只会获取启用中归档配置的过期快照
         logger.info("table_id -> [%s] filter expired snapshot before %s days", self.table_id, expired_days)
         expired_datetime_point = self.now - datetime.timedelta(days=expired_days)
 
@@ -4551,9 +4972,11 @@ class ESStorage(models.Model, StorageResultTable):
 
         # 获取本地残留的过期快照
         all_snapshots = list(
-            EsSnapshotIndice.objects.filter(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id).values(
-                "snapshot_name"
-            )
+            EsSnapshotIndice.objects.filter(
+                table_id=self.table_id,
+                bk_tenant_id=self.bk_tenant_id,
+                repository_name=self.snapshot_obj.target_snapshot_repository_name,
+            ).values("snapshot_name")
         )
         local_expired_snapshots = self.match_expired_snapshot(
             all_snapshots, expired_datetime_point, snapshot_name_key="snapshot_name"
@@ -4574,6 +4997,7 @@ class ESStorage(models.Model, StorageResultTable):
                 table_id=self.table_id,
                 snapshot_name__in=residual_expired_snapshots,
                 bk_tenant_id=self.bk_tenant_id,
+                repository_name=self.snapshot_obj.target_snapshot_repository_name,
             ).delete()
             logger.info("table_id->[%s] has clean residual snapshot %s", self.table_id, residual_expired_snapshots)
 
@@ -4588,7 +5012,10 @@ class ESStorage(models.Model, StorageResultTable):
     @atomic(config.DATABASE_CONNECTION_NAME)
     def delete_snapshot(self, snapshot_name, target_snapshot_repository_name):
         EsSnapshotIndice.objects.filter(
-            table_id=self.table_id, snapshot_name=snapshot_name, bk_tenant_id=self.bk_tenant_id
+            table_id=self.table_id,
+            snapshot_name=snapshot_name,
+            bk_tenant_id=self.bk_tenant_id,
+            repository_name=target_snapshot_repository_name,
         ).delete()
         self.es_client.snapshot.delete(target_snapshot_repository_name, snapshot_name)
         logger.info("table_id -> [%s] has delete snapshot -> [%s]", self.table_id, snapshot_name)
@@ -4616,7 +5043,9 @@ class ESStorage(models.Model, StorageResultTable):
             raise ValueError(_("delete all snapshot has failed %s") % delete_exception_snapshots)
 
         # 删除残留的快照物理索引记录
-        EsSnapshotIndice.objects.filter(table_id=self.table_id, bk_tenant_id=self.bk_tenant_id).delete()
+        EsSnapshotIndice.objects.filter(
+            table_id=self.table_id, bk_tenant_id=self.bk_tenant_id, repository_name=target_snapshot_repository_name
+        ).delete()
         logger.info("table_id -> [%s] has delete all snapshot", self.table_id)
 
     @atomic(config.DATABASE_CONNECTION_NAME)
@@ -4624,15 +5053,11 @@ class ESStorage(models.Model, StorageResultTable):
         if not self.can_snapshot:
             return
 
-        # 如果是停用状态，则不能重试快照
-        if self.is_snapshot_stopped:
-            return
-
         # 检查快照是否可重试
         try:
-            snapshots = self.es_client.snapshot.get(
-                self.snapshot_obj.target_snapshot_repository_name, self.search_snapshot
-            ).get("snapshots", [])
+            snapshots = self.es_client.snapshot.get(target_snapshot_repository_name, self.search_snapshot).get(
+                "snapshots", []
+            )
         except (elasticsearch5.NotFoundError, elasticsearch.NotFoundError, elasticsearch6.NotFoundError):
             snapshots = []
 
@@ -5372,6 +5797,7 @@ class DorisStorage(models.Model, StorageResultTable):
     table_id = models.CharField("结果表ID", max_length=128)
     bk_tenant_id = models.CharField("租户ID", max_length=256, null=True, default="system")
     bkbase_table_id = models.CharField("bkbase表名", max_length=128, null=True)
+    origin_table_id = models.CharField("原始结果表名", max_length=128, blank=True, null=True)
     source_type = models.CharField("数据源类型", max_length=32, default="log")
 
     index_set = models.TextField("索引集", blank=True, null=True)
@@ -5387,6 +5813,511 @@ class DorisStorage(models.Model, StorageResultTable):
         verbose_name_plural = "Doris存储表"
 
     @classmethod
+    def get_by_table_id(cls, bk_tenant_id: str, table_id: str) -> "DorisStorage":
+        """按结果表 ID 获取 DorisStorage 记录。"""
+        storage = cls.objects.get(bk_tenant_id=bk_tenant_id, table_id=table_id)
+        return storage.get_effective_storage()
+
+    def get_effective_storage(self) -> "DorisStorage":
+        """虚拟 DorisStorage 通过 origin_table_id 关联到真实 DorisStorage。"""
+        if not self.origin_table_id:
+            return self
+        return DorisStorage.objects.get(bk_tenant_id=self.bk_tenant_id, table_id=self.origin_table_id)
+
+    @staticmethod
+    def _load_json_config(value: Any, warnings: list[dict[str, Any]], field_name: str) -> Any:
+        if value in (None, "") or not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError) as error:
+            warnings.append(
+                {
+                    "code": "DORIS_STORAGE_JSON_PARSE_FAILED",
+                    "message": f"{field_name} 不是合法 JSON，已返回原始值",
+                    "details": {"field": field_name, "error": str(error)},
+                }
+            )
+            return value
+
+    @staticmethod
+    def _quote_doris_identifier(identifier: str) -> str:
+        return f"`{identifier.replace('`', '``')}`"
+
+    @staticmethod
+    def _normalize_query_limit(limit: int, max_limit: int = 100) -> int:
+        try:
+            normalized_limit = int(limit)
+        except (TypeError, ValueError) as error:
+            raise ValueError("limit 必须是整数") from error
+        if normalized_limit < 1:
+            raise ValueError("limit 必须大于 0")
+        return min(normalized_limit, max_limit)
+
+    @staticmethod
+    def _split_physical_table_name(physical_table_name: str) -> tuple[str, str]:
+        parts = physical_table_name.split(".", 1)
+        if len(parts) != 2 or not all(parts):
+            raise ValueError(f"PhysicalTableName 格式不合法: {physical_table_name}")
+        return parts[0], parts[1]
+
+    def _serialize_doris_storage(self, warnings: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "table_id": self.table_id,
+            "bk_tenant_id": self.bk_tenant_id,
+            "bkbase_table_id": self.bkbase_table_id,
+            "origin_table_id": self.origin_table_id,
+            "source_type": self.source_type,
+            "index_set": self.index_set,
+            "table_type": self.table_type,
+            "field_config_mapping": self._load_json_config(self.field_config_mapping, warnings, "field_config_mapping"),
+            "expire_days": self.expire_days,
+            "storage_cluster_id": self.storage_cluster_id,
+        }
+
+    def get_doris_binding_config(self):
+        """获取当前结果表关联的 DorisStorageBindingConfig。"""
+        from metadata.models.data_link.data_link_configs import DorisStorageBindingConfig
+
+        effective_storage = self.get_effective_storage()
+        binding_config = (
+            DorisStorageBindingConfig.objects.filter(
+                bk_tenant_id=effective_storage.bk_tenant_id, table_id=effective_storage.table_id
+            )
+            .order_by("-last_modify_time")
+            .first()
+        )
+        if not binding_config:
+            raise ValueError(f"DorisStorageBindingConfig 不存在: table_id={effective_storage.table_id}")
+        return binding_config
+
+    def get_doris_binding_metadata(self) -> dict[str, Any]:
+        """通过本地 DorisStorageBindingConfig 获取 BKBase 侧最新 DorisBinding 配置。"""
+        binding_config = self.get_doris_binding_config()
+        component_config = binding_config.component_config
+        if not isinstance(component_config, dict):
+            raise ValueError(f"DorisBinding component_config 类型异常: table_id={self.table_id}")
+        if component_config.get("kind") != "DorisBinding":
+            raise ValueError(f"DorisBinding component_config kind 异常: table_id={self.table_id}")
+        return component_config
+
+    def get_physical_table_name(self, doris_binding: dict[str, Any] | None = None) -> dict[str, str]:
+        """获取 Doris 物理库表名，优先使用 DorisBinding annotations.PhysicalTableName。"""
+        doris_binding = doris_binding or self.get_doris_binding_metadata()
+        metadata = doris_binding.get("metadata") or {}
+        annotations = metadata.get("annotations") or {}
+        physical_table_name = annotations.get("PhysicalTableName")
+        source = "metadata.annotations.PhysicalTableName"
+
+        if physical_table_name:
+            database, table = self._split_physical_table_name(physical_table_name)
+        else:
+            storage_config = (doris_binding.get("spec") or {}).get("storage_config") or {}
+            database = storage_config.get("db")
+            table = storage_config.get("table")
+            if not (database and table):
+                raise ValueError("DorisBinding 缺少 PhysicalTableName 且 spec.storage_config.db/table 不完整")
+            physical_table_name = f"{database}.{table}"
+            source = "spec.storage_config.db_table"
+
+        return {
+            "physical_table_name": physical_table_name,
+            "database": database,
+            "table": table,
+            "source": source,
+        }
+
+    def get_doris_connection_config(self) -> dict[str, Any]:
+        """通过 storage_cluster_id 获取 Doris MySQL 协议连接信息。"""
+        cluster = self.get_effective_storage().storage_cluster
+        return {
+            "host": cluster.domain_name,
+            "port": cluster.port,
+            "username": cluster.username,
+            "password": cluster.password,
+            "cluster_id": cluster.cluster_id,
+            "cluster_name": cluster.cluster_name,
+            "version": cluster.version,
+        }
+
+    def _serialize_storage_cluster(self, connection_config: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "cluster_id": connection_config["cluster_id"],
+            "cluster_name": connection_config["cluster_name"],
+            "domain_name": connection_config["host"],
+            "port": connection_config["port"],
+            "version": connection_config["version"],
+        }
+
+    def _serialize_doris_binding(
+        self, doris_binding: dict[str, Any] | None, physical_table: dict[str, str] | None
+    ) -> dict[str, Any]:
+        if not doris_binding:
+            return {}
+        metadata = doris_binding.get("metadata") or {}
+        spec = doris_binding.get("spec") or {}
+        status = doris_binding.get("status") or {}
+        return {
+            "name": metadata.get("name"),
+            "namespace": metadata.get("namespace"),
+            "status": status,
+            "physical_table_name": physical_table.get("physical_table_name") if physical_table else None,
+            "physical_table_name_source": physical_table.get("source") if physical_table else None,
+            "storage_config": spec.get("storage_config") or {},
+        }
+
+    def _query_doris_physical_metadata(self, database: str, table: str, connection_config: dict[str, Any]) -> dict:
+        connection = pymysql.connect(
+            host=connection_config["host"],
+            port=int(connection_config["port"]),
+            user=connection_config["username"],
+            password=connection_config["password"],
+            database=database,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=10,
+            read_timeout=10,
+            write_timeout=10,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = %s
+                    """,
+                    (database, table),
+                )
+                tables = cursor.fetchall()
+
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s
+                    ORDER BY ordinal_position
+                    """,
+                    (database, table),
+                )
+                columns = cursor.fetchall()
+
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM information_schema.partitions
+                    WHERE table_schema = %s AND table_name = %s
+                    ORDER BY partition_ordinal_position
+                    """,
+                    (database, table),
+                )
+                partitions = cursor.fetchall()
+
+                quoted_table = ".".join([self._quote_doris_identifier(database), self._quote_doris_identifier(table)])
+                cursor.execute(f"SHOW CREATE TABLE {quoted_table}")
+                create_table = cursor.fetchall()
+
+                return {
+                    "tables": tables,
+                    "columns": columns,
+                    "partitions": partitions,
+                    "show_create_table": create_table,
+                }
+        finally:
+            connection.close()
+
+    def _query_doris_latest_records(
+        self, database: str, table: str, connection_config: dict[str, Any], limit: int, order_field: str
+    ) -> list[dict[str, Any]]:
+        if not order_field:
+            raise ValueError("order_field 不能为空")
+        normalized_limit = self._normalize_query_limit(limit)
+        connection = pymysql.connect(
+            host=connection_config["host"],
+            port=int(connection_config["port"]),
+            user=connection_config["username"],
+            password=connection_config["password"],
+            database=database,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=10,
+            read_timeout=10,
+            write_timeout=10,
+        )
+        try:
+            with connection.cursor() as cursor:
+                quoted_table = ".".join([self._quote_doris_identifier(database), self._quote_doris_identifier(table)])
+                quoted_order_field = self._quote_doris_identifier(order_field)
+                cursor.execute(
+                    f"SELECT * FROM {quoted_table} ORDER BY {quoted_order_field} DESC LIMIT %s",
+                    (normalized_limit,),
+                )
+                return list(cursor.fetchall())
+        finally:
+            connection.close()
+
+    def query_latest_physical_storage_records(
+        self, limit: int = 1, order_field: str = "dtEventTimeStamp"
+    ) -> dict[str, Any]:
+        """
+        从 Doris 物理表按时间字段倒序拉取最新 N 条原始数据。
+
+        返回示例（已脱敏精简）::
+
+            {
+                "doris_storage": {
+                    "table_id": "2_bklog.xxx",
+                    "bk_tenant_id": "system",
+                    "bkbase_table_id": "2_bklog_xxx",
+                    "origin_table_id": None,
+                    "source_type": "log",
+                    "index_set": "2_bklog_xxx",
+                    "table_type": "primary_table",
+                    "field_config_mapping": None,
+                    "expire_days": 30,
+                    "storage_cluster_id": 43,
+                },
+                "request_table_id": "2_bklog.xxx",
+                "storage_cluster": {
+                    "cluster_id": 43,
+                    "cluster_name": "doris_xxx",
+                    "domain_name": "doris.example.db",
+                    "port": 9030,
+                    "version": None,
+                },
+                "doris_binding": {
+                    "name": "bklog_xxx",
+                    "namespace": "bklog",
+                    "status": {"phase": "Ok", "message": ""},
+                    "physical_table_name": "db_xxx.table_xxx",
+                    "physical_table_name_source": "metadata.annotations.PhysicalTableName",
+                    "storage_config": {
+                        "table_type": "primary_table",
+                        "db": "db_xxx",
+                        "table": "table_xxx",
+                        "storage_keys": ["dtEventTimeStamp", "serverIp"],
+                        "expires": "30d",
+                    },
+                },
+                "physical_table": {
+                    "physical_table_name": "db_xxx.table_xxx",
+                    "database": "db_xxx",
+                    "table": "table_xxx",
+                    "source": "metadata.annotations.PhysicalTableName",
+                },
+                "order_field": "dtEventTimeStamp",
+                "limit": 1,
+                "records": [{"dtEventTimeStamp": 1710000000000, "log": "..."}],
+                "warnings": [],
+                "errors": [],
+            }
+        """
+        warnings: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        normalized_limit = self._normalize_query_limit(limit)
+        result: dict[str, Any] = {
+            "doris_storage": self.get_effective_storage()._serialize_doris_storage(warnings),
+            "request_table_id": self.table_id,
+            "storage_cluster": {},
+            "doris_binding": {},
+            "physical_table": {},
+            "order_field": order_field,
+            "limit": normalized_limit,
+            "records": [],
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+        doris_binding = None
+        physical_table = None
+        try:
+            doris_binding = self.get_doris_binding_metadata()
+            physical_table = self.get_physical_table_name(doris_binding=doris_binding)
+            result["physical_table"] = physical_table
+        except Exception as error:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "code": "DORIS_BINDING_METADATA_QUERY_FAILED",
+                    "message": "获取 DorisBinding 或物理表名失败",
+                    "details": {"error": str(error)},
+                }
+            )
+        result["doris_binding"] = self._serialize_doris_binding(doris_binding, physical_table)
+
+        connection_config = None
+        try:
+            connection_config = self.get_doris_connection_config()
+            result["storage_cluster"] = self._serialize_storage_cluster(connection_config)
+        except Exception as error:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "code": "DORIS_CLUSTER_QUERY_FAILED",
+                    "message": "获取 Doris 集群连接信息失败",
+                    "details": {"error": str(error)},
+                }
+            )
+
+        if physical_table and connection_config:
+            try:
+                result["records"] = self._query_doris_latest_records(
+                    database=physical_table["database"],
+                    table=physical_table["table"],
+                    connection_config=connection_config,
+                    limit=normalized_limit,
+                    order_field=order_field,
+                )
+            except Exception as error:  # pylint: disable=broad-except
+                errors.append(
+                    {
+                        "code": "DORIS_LATEST_RECORDS_QUERY_FAILED",
+                        "message": "查询 Doris 物理表最新数据失败",
+                        "details": {"error": str(error)},
+                    }
+                )
+
+        return result
+
+    def query_physical_storage_metadata(self) -> dict[str, Any]:
+        """
+        查询 DorisStorage 关联物理表的原始元信息。
+
+        返回示例（已脱敏精简）::
+
+            {
+                "doris_storage": {
+                    "table_id": "2_bklog.xxx",
+                    "bk_tenant_id": "system",
+                    "bkbase_table_id": "2_bklog_xxx",
+                    "origin_table_id": None,
+                    "source_type": "log",
+                    "index_set": "2_bklog_xxx",
+                    "table_type": "primary_table",
+                    "field_config_mapping": None,
+                    "expire_days": 30,
+                    "storage_cluster_id": 43,
+                },
+                "request_table_id": "2_bklog.xxx",
+                "storage_cluster": {
+                    "cluster_id": 43,
+                    "cluster_name": "doris_xxx",
+                    "domain_name": "doris.example.db",
+                    "port": 9030,
+                    "version": None,
+                },
+                "doris_binding": {
+                    "name": "bklog_xxx",
+                    "namespace": "bklog",
+                    "status": {"phase": "Ok", "message": ""},
+                    "physical_table_name": "db_xxx.table_xxx",
+                    "physical_table_name_source": "metadata.annotations.PhysicalTableName",
+                    "storage_config": {
+                        "table_type": "primary_table",
+                        "db": "db_xxx",
+                        "table": "table_xxx",
+                        "storage_keys": ["dtEventTimeStamp", "serverIp"],
+                        "json_fields": [],
+                        "original_json_fields": [],
+                        "field_config_group": {},
+                        "expires": "30d",
+                        "unique_partition_table": True,
+                    },
+                },
+                "physical_metadata": {
+                    "tables": [
+                        {
+                            "TABLE_SCHEMA": "db_xxx",
+                            "TABLE_NAME": "table_xxx",
+                            "TABLE_TYPE": "BASE TABLE",
+                            "ENGINE": "Doris",
+                            "TABLE_ROWS": 0,
+                            "CREATE_TIME": "datetime",
+                            "UPDATE_TIME": "datetime",
+                        }
+                    ],
+                    "columns": [
+                        {
+                            "COLUMN_NAME": "dtEventTimeStamp",
+                            "ORDINAL_POSITION": 4,
+                            "IS_NULLABLE": "NO",
+                            "DATA_TYPE": "bigint",
+                            "COLUMN_TYPE": "bigint(20)",
+                            "COLUMN_KEY": "",
+                        }
+                    ],
+                    "partitions": [
+                        {
+                            "PARTITION_NAME": "p20260512",
+                            "PARTITION_METHOD": "RANGE",
+                            "PARTITION_EXPRESSION": "thedate",
+                            "PARTITION_DESCRIPTION": "[(...), (...))",
+                            "TABLE_ROWS": 0,
+                        }
+                    ],
+                    "show_create_table": [{"Table": "table_xxx", "Create Table": "CREATE TABLE `table_xxx` (...)"}],
+                },
+                "warnings": [],
+                "errors": [],
+            }
+        """
+        warnings: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        result: dict[str, Any] = {
+            "doris_storage": self.get_effective_storage()._serialize_doris_storage(warnings),
+            "request_table_id": self.table_id,
+            "storage_cluster": {},
+            "doris_binding": {},
+            "physical_metadata": {},
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+        doris_binding = None
+        physical_table = None
+        try:
+            doris_binding = self.get_doris_binding_metadata()
+            physical_table = self.get_physical_table_name(doris_binding=doris_binding)
+        except Exception as error:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "code": "DORIS_BINDING_METADATA_QUERY_FAILED",
+                    "message": "获取 DorisBinding 或物理表名失败",
+                    "details": {"error": str(error)},
+                }
+            )
+        result["doris_binding"] = self._serialize_doris_binding(doris_binding, physical_table)
+
+        connection_config = None
+        try:
+            connection_config = self.get_doris_connection_config()
+            result["storage_cluster"] = self._serialize_storage_cluster(connection_config)
+        except Exception as error:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "code": "DORIS_CLUSTER_QUERY_FAILED",
+                    "message": "获取 Doris 集群连接信息失败",
+                    "details": {"error": str(error)},
+                }
+            )
+
+        if physical_table and connection_config:
+            try:
+                result["physical_metadata"] = self._query_doris_physical_metadata(
+                    database=physical_table["database"],
+                    table=physical_table["table"],
+                    connection_config=connection_config,
+                )
+            except Exception as error:  # pylint: disable=broad-except
+                errors.append(
+                    {
+                        "code": "DORIS_PHYSICAL_METADATA_QUERY_FAILED",
+                        "message": "查询 Doris 物理表元信息失败",
+                        "details": {"error": str(error)},
+                    }
+                )
+
+        return result
+
+    @classmethod
     def create_table(
         cls,
         table_id,
@@ -5394,6 +6325,7 @@ class DorisStorage(models.Model, StorageResultTable):
         bk_tenant_id="system",
         source_type="log",
         bkbase_table_id=None,
+        origin_table_id=None,
         index_set=None,
         table_type=PRIMARY_TABLE_TYPE,
         field_config_mapping=None,
@@ -5408,6 +6340,7 @@ class DorisStorage(models.Model, StorageResultTable):
         :param bk_tenant_id: 租户ID
         :param source_type: 数据源类型
         :param bkbase_table_id: bkbase表名
+        :param origin_table_id: 原始结果表ID
         :param index_set: 索引集
         :param table_type: 物理表存储模式类型
         :param field_config_mapping: 字段/分词配置
@@ -5443,6 +6376,7 @@ class DorisStorage(models.Model, StorageResultTable):
                     bk_tenant_id=bk_tenant_id,
                     source_type=source_type,
                     bkbase_table_id=bkbase_table_id,
+                    origin_table_id=origin_table_id,
                     index_set=index_set,
                     table_type=table_type,
                     field_config_mapping=json.dumps(field_config_mapping),
@@ -5456,7 +6390,7 @@ class DorisStorage(models.Model, StorageResultTable):
                     table_id=table_id,
                     cluster_id=storage_cluster_id,
                     defaults={
-                        "enable_time": datetime.datetime(1970, 1, 1),
+                        "enable_time": django_timezone.make_aware(datetime.datetime(1970, 1, 1)),
                         "is_current": True,
                     },
                 )
@@ -5469,8 +6403,156 @@ class DorisStorage(models.Model, StorageResultTable):
     def add_field(self, field):
         pass
 
+    @property
     def consul_config(self):
+        """返回一个实际存储的consul配置"""
+
+        try:
+            field_config_mapping = json.loads(self.field_config_mapping or "{}")
+        except (TypeError, json.JSONDecodeError):
+            logger.warning(
+                "DorisStorage.consul_config: table_id->[%s] field_config_mapping invalid, use empty config",
+                self.table_id,
+            )
+            field_config_mapping = {}
+        if field_config_mapping is None:
+            field_config_mapping = {}
+
+        consul_config = {
+            "storage_config": {
+                "bkbase_table_id": self.bkbase_table_id,
+                "source_type": self.source_type,
+                "index_set": self.index_set,
+                "table_type": self.table_type,
+                "field_config_mapping": field_config_mapping,
+                "expire_days": self.expire_days,
+                "bk_tenant_id": self.bk_tenant_id,
+            }
+        }
+        consul_config.update(self.storage_cluster.consul_config)
+
+        # 将存储的修改时间去掉，防止MD5命中失败
+        consul_config["cluster_config"].pop("last_modify_time")
+
+        return consul_config
+
+    def get_client(self):
         pass
+
+
+class SurrealDBStorage(models.Model, StorageResultTable):
+    """
+    SurrealDB 图数据库存储表
+    用于存储关联关系数据（顶点 + 边），通过 BKBase SurrealDBBinding 链路写入
+    """
+
+    STORAGE_TYPE = ClusterInfo.TYPE_SURREALDB
+
+    TEMPORARY_TABLE_TYPE = "temporary"  # 图能力表，支持顶点/边写入，支持指标入图
+    NORMAL_TABLE_TYPE = "normal"  # 基础表，无图能力
+
+    table_id = models.CharField("结果表ID", max_length=128)
+    bk_tenant_id = models.CharField("租户ID", max_length=256, null=True, default="system")
+    table_type = models.CharField("图表类型", max_length=32, default=TEMPORARY_TABLE_TYPE)
+    vertices = models.JSONField("顶点定义", default=list)
+    relations = models.JSONField("关系定义", default=list)
+    storage_cluster_id = models.IntegerField("存储集群")
+
+    class Meta:
+        verbose_name = "SurrealDB存储表"
+        verbose_name_plural = "SurrealDB存储表"
+        unique_together = (("table_id", "bk_tenant_id"),)
+
+    @classmethod
+    def create_table(
+        cls,
+        table_id,
+        is_sync_db=True,
+        bk_tenant_id="system",
+        table_type=TEMPORARY_TABLE_TYPE,
+        vertices=None,
+        relations=None,
+        storage_cluster_id=None,
+        **kwargs,
+    ):
+        """
+        创建/更新 SurrealDB 存储表记录（幂等，多次调用不会报错）
+        :param table_id: 结果表ID
+        :param is_sync_db: 是否同步创建（保留参数，SurrealDB 侧由 BKBase 负责实际建表）
+        :param bk_tenant_id: 租户ID
+        :param table_type: 图表类型，temporary=图能力表，normal=基础表
+        :param vertices: 顶点定义列表
+        :param relations: 关系定义列表
+        :param storage_cluster_id: SurrealDB 集群ID
+        """
+        if storage_cluster_id is None:
+            storage_cluster_id = ClusterInfo.objects.get(
+                bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_SURREALDB, is_default_cluster=True
+            ).cluster_id
+            logger.info("CreateSurrealDBStorage: use default SurrealDB cluster->[%s]", storage_cluster_id)
+        else:
+            if not ClusterInfo.objects.filter(
+                bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_SURREALDB, cluster_id=storage_cluster_id
+            ).exists():
+                logger.error("CreateSurrealDBStorage: storage cluster[%s] not exist", storage_cluster_id)
+                raise ValueError("SurrealDB存储集群配置有误，请确认或联系管理员处理")
+
+        try:
+            with atomic(config.DATABASE_CONNECTION_NAME):
+                record, created = cls.objects.update_or_create(
+                    table_id=table_id,
+                    bk_tenant_id=bk_tenant_id,
+                    defaults={
+                        "table_type": table_type,
+                        "vertices": vertices or [],
+                        "relations": relations or [],
+                        "storage_cluster_id": storage_cluster_id,
+                    },
+                )
+                surrealdb_cluster_ids = ClusterInfo.objects.filter(
+                    bk_tenant_id=bk_tenant_id,
+                    cluster_type=ClusterInfo.TYPE_SURREALDB,
+                ).values_list("cluster_id", flat=True)
+                StorageClusterRecord.objects.filter(
+                    bk_tenant_id=bk_tenant_id,
+                    table_id=table_id,
+                    is_current=True,
+                    cluster_id__in=surrealdb_cluster_ids,
+                ).exclude(cluster_id=storage_cluster_id).update(is_current=False)
+                StorageClusterRecord.objects.update_or_create(
+                    bk_tenant_id=bk_tenant_id,
+                    table_id=table_id,
+                    cluster_id=storage_cluster_id,
+                    defaults={
+                        "enable_time": django_timezone.make_aware(datetime.datetime(1970, 1, 1)),
+                        "is_current": True,
+                    },
+                )
+                action = "created" if created else "updated"
+                logger.info("CreateSurrealDBStorage: %s SurrealDB storage table[%s] success", action, record.table_id)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("CreateSurrealDBStorage: create SurrealDB storage table[%s] failed, error[%s]", table_id, e)
+            raise
+
+        logger.info("CreateSurrealDBStorage: ensure SurrealDB storage table->[%s] successfully", table_id)
+
+    def add_field(self, field):
+        pass
+
+    @property
+    def consul_config(self):
+        """返回 SurrealDB 存储配置，供通用 ResultTable storage 查询序列化。"""
+        consul_config = {
+            "storage_config": {
+                "table_type": self.table_type,
+                "vertices": self.vertices or [],
+                "relations": self.relations or [],
+                "bk_tenant_id": self.bk_tenant_id,
+            }
+        }
+        consul_config.update(self.storage_cluster.consul_config)
+        consul_config["cluster_config"].pop("last_modify_time", None)
+        return consul_config
 
     def get_client(self):
         pass

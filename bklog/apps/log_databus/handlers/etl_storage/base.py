@@ -25,7 +25,6 @@ import re
 from typing import Any
 
 from django.conf import settings
-from django.core.cache import cache
 from django.utils.module_loading import import_string
 from django.utils.translation import gettext_lazy as _
 
@@ -34,12 +33,14 @@ from apps.exceptions import ApiResultError, ValidationError
 from apps.feature_toggle.handlers.toggle import FeatureToggleObject
 from apps.log_databus.constants import (
     BKDATA_ES_TYPE_MAP,
-    CACHE_KEY_CLUSTER_INFO,
+    DORIS_CLUSTER_TYPE,
     FIELD_TEMPLATE,
     PARSE_FAILURE_FIELD,
+    V4_RESERVED_FIELD_NAMES,
     EtlConfig,
     MetadataTypeEnum,
     MIN_FLATTENED_SUPPORT_VERSION,
+    STORAGE_CLUSTER_TYPE,
 )
 from apps.log_databus.exceptions import (
     EtlParseTimeFieldException,
@@ -50,10 +51,14 @@ from apps.log_databus.handlers.collector_scenario.utils import build_es_option_t
 from apps.log_databus.models import CollectorConfig, CollectorPlugin
 from apps.log_databus.utils.es_config import get_es_config, is_version_less_than
 from apps.log_search.constants import (
+    DEFAULT_TIME_FIELD,
     FieldBuiltInEnum,
     FieldDataTypeEnum,
     FieldDateFormatEnum,
+    TimeFieldTypeEnum,
+    TimeFieldUnitEnum,
 )
+from apps.log_search.models import Scenario
 from apps.utils import is_match_variate
 from apps.utils.codecs import unicode_str_decode
 from apps.utils.db import array_group
@@ -68,6 +73,7 @@ class EtlStorage:
     etl_config = None
     separator_node_name = "bk_separator_object"
     path_separator_node_name = "bk_separator_object_path"
+    separator_key_is_index = False
 
     @classmethod
     def get_instance(cls, etl_config=None):
@@ -114,7 +120,15 @@ class EtlStorage:
     def get_bkdata_etl_config(self, fields, etl_params, built_in_config):
         raise NotImplementedError(_("功能暂未实现"))
 
-    def get_result_table_config(self, fields, etl_params, built_in_config, es_version="5.X", enable_v4=False):
+    def get_result_table_config(
+        self,
+        fields,
+        etl_params,
+        built_in_config,
+        es_version="5.X",
+        enable_v4=False,
+        storage_cluster_type=STORAGE_CLUSTER_TYPE,
+    ):
         """
         配置清洗入库策略，需兼容新增、编辑
         """
@@ -129,6 +143,73 @@ class EtlStorage:
         :return: clean_rules配置字典
         """
         raise NotImplementedError(_("V4版本clean_rules构建功能暂未实现"))
+
+    @staticmethod
+    def _is_v4_reserved_field(field_name: str) -> bool:
+        return field_name.lower() in V4_RESERVED_FIELD_NAMES
+
+    @classmethod
+    def _validate_v4_reserved_fields(cls, fields: list):
+        for field in fields:
+            if field.get("is_delete"):
+                continue
+            field_name = field.get("alias_name") or field["field_name"]
+            if cls._is_v4_reserved_field(field_name):
+                raise ValidationError(_("字段名与V4清洗保留字段冲突，请更换字段名") + f"：{field_name}")
+
+    @staticmethod
+    def _get_path_regexp(etl_params: dict, built_in_config: dict) -> str:
+        """
+        获取路径正则：优先从 etl_params["path_regexp"] 取（真实调用链），
+        built_in_config["option"]["separator_configs"] 作为 fallback。
+        """
+        path_regexp = etl_params.get("path_regexp", "")
+        if path_regexp:
+            return path_regexp
+        separator_configs = built_in_config.get("option", {}).get("separator_configs", [])
+        if separator_configs:
+            return separator_configs[0].get("separator_regexp", "")
+        return ""
+
+    def _build_path_regex_rules_v4(self, etl_params: dict, built_in_config: dict) -> list:
+        """构建 path regex 提取规则"""
+        path_regexp = self._get_path_regexp(etl_params, built_in_config)
+        if not path_regexp:
+            return []
+
+        rules = [
+            {
+                "input_id": "json_data",
+                "output_id": "path",
+                "operator": {
+                    "type": "get",
+                    "key_index": [{"type": "key", "value": "filename"}],
+                    "missing_strategy": None,
+                },
+            },
+            {
+                "input_id": "path",
+                "output_id": "bk_separator_object_path",
+                "operator": {"type": "regex", "regex": path_regexp},
+            },
+        ]
+
+        pattern = re.compile(path_regexp)
+        for field_name in pattern.groupindex.keys():
+            rules.append(
+                {
+                    "input_id": "bk_separator_object_path",
+                    "output_id": field_name,
+                    "operator": {
+                        "type": "assign",
+                        "key_index": field_name,
+                        "alias": field_name,
+                        "output_type": "string",
+                        "default_value": None,
+                    },
+                }
+            )
+        return rules
 
     @staticmethod
     def get_es_field_type(field):
@@ -150,16 +231,24 @@ class EtlStorage:
             "float": "double",
             "double": "double",
             "object": "dict",
+            "nested": "nested",
+            "flattened": "dict",
             "bool": "boolean",
             "boolean": "boolean",
+            "keyword": "string",
+            "text": "string",
         }
         return type_mapping.get(field_type, "string")
 
     @staticmethod
-    def _convert_v3_to_v4_time_format(v3_time_format: str) -> dict:
+    def _convert_v3_to_v4_time_format(
+        v3_time_format: str, time_zone: int = None, storage_cluster_type: str = STORAGE_CLUSTER_TYPE
+    ) -> dict:
         """
         将V3时间格式转换为V4 in_place_time_parsing配置
         :param v3_time_format: V3版本的时间格式字符串
+        :param time_zone: 用户配置的时区偏移（如8表示UTC+8），仅对不含内嵌时区的格式生效；
+                          None时保持mapping默认值（zone=0即UTC）
         :return: V4版本的in_place_time_parsing配置字典
         """
         # V3到V4时间格式映射表
@@ -176,6 +265,8 @@ class EtlStorage:
             "yyyyMMddHHmmss": {"format": "%Y%m%d%H%M%S", "zone": 0},
             "yyyyMMdd HHmmss": {"format": "%Y%m%d %H%M%S", "zone": 0},
             "yyyyMMdd HHmmss.SSS": {"format": "%Y%m%d %H%M%S.%3f", "zone": 0},
+            "yyyyMMdd HH:mm:ss.SSSSSS": {"format": "%Y%m%d %H:%M:%S.%6f", "zone": 0},
+            "YYYYMMdd HH:mm:ss.SSSSSS": {"format": "%Y%m%d %H:%M:%S.%6f", "zone": 0},
             "dd/MMM/yyyy:HH:mm:ss": {"format": "%d/%b/%Y:%H:%M:%S", "zone": 0},
             "dd/MMM/yyyy:HH:mm:ssZ": {"format": "%d/%b/%Y:%H:%M:%S%:z", "zone": None},
             "dd/MMM/yyyy:HH:mm:ss Z": {"format": "%d/%b/%Y:%H:%M:%S %:z", "zone": None},
@@ -188,6 +279,7 @@ class EtlStorage:
             "yyyyMMddTHHmmss.SSSSSSZ": {"format": "%Y%m%dT%H%M%S.%6f%:z", "zone": None},
             "yyyy-MM-ddTHH:mm:ss.SSSZ": {"format": "%Y-%m-%dT%H:%M:%S.%3f%:z", "zone": None},
             "yyyy-MM-ddTHH:mm:ss.SSSSSSZ": {"format": "%Y-%m-%dT%H:%M:%S.%6fZ", "zone": None},
+            "YYYY-MM-DDTHH:mm:ss.SSSSSSZ": {"format": "%Y-%m-%dT%H:%M:%S.%6fZ", "zone": None},
             "ISO8601": {"format": "%+", "zone": None},
             "yyyy-MM-ddTHH:mm:ssZ": {"format": "%Y-%m-%dT%H:%M:%S%:z", "zone": None},
             "yyyy-MM-ddTHH:mm:ss.SSSSSSZZ": {"format": "%Y-%m-%dT%H:%M:%S.%6f%:z", "zone": None},
@@ -211,22 +303,71 @@ class EtlStorage:
         format_config = time_format_mapping.get(v3_time_format)
         if not format_config:
             # 如果找不到映射，使用默认配置
+            zone = time_zone if time_zone is not None else 0
             return {
-                "from": {"format": "%Y-%m-%d %H:%M:%S", "zone": 0},
+                "from": {"format": "%Y-%m-%d %H:%M:%S", "zone": zone},
                 "interval_format": None,
                 "to": "millis",
                 "now_if_parse_failed": True,
             }
 
-        # 构建V4 in_place_time_parsing配置
+        # zone=None表示格式本身内嵌了时区信息（如%z、%:z），此时忽略用户time_zone
+        # zone=0表示格式不含时区信息，可被用户time_zone覆盖
+        zone = format_config["zone"]
+        if zone is not None and time_zone is not None:
+            zone = time_zone
+
+        if storage_cluster_type == DORIS_CLUSTER_TYPE:
+            return {"format": format_config["format"], "zone": zone}
+        else:
+            return {
+                "from": {"format": format_config["format"], "zone": zone},
+                "interval_format": None,
+                "to": "millis",
+                "now_if_parse_failed": True,
+            }
+
+    @staticmethod
+    def _has_user_time_field(built_in_config: dict) -> bool:
+        """
+        用户是否自定义了时间字段
+        有real_path说明时间来源于bk_separator_object（用户指定字段）而非json_data（采集器默认上报）
+        """
+        time_field = built_in_config.get("time_field") or {}
+        return "real_path" in time_field.get("option", {})
+
+    @staticmethod
+    def _build_utctime_fallback() -> dict:
+        """
+        用户自定义时间字段解析失败时的兜底配置
+        回退到采集器（GSE）上报的utctime（UTC时间），全部失败再使用当前时间
+        """
         return {
-            "from": {"format": format_config["format"], "zone": format_config["zone"]},
-            "interval_format": None,
-            "to": "millis",
+            "fallback_fields": [
+                {
+                    "field": "utctime",
+                    "time_format": {"format": "%Y-%m-%d %H:%M:%S", "zone": 0},
+                }
+            ],
             "now_if_parse_failed": True,
         }
 
-    def _build_built_in_fields_v4(self, built_in_config: dict) -> list:
+    def _build_utctime_extract_v4(self, built_in_config: dict) -> list:
+        """
+        仅当用户自定义时间字段时，从json_data提取utctime为输出字段，供time_fallback引用
+        默认时间字段路径直接取json_data.utctime，无需额外声明
+        """
+        if not self._has_user_time_field(built_in_config):
+            return []
+        return [
+            {
+                "input_id": "json_data",
+                "output_id": "utctime",
+                "operator": {"type": "get", "key_index": [{"type": "key", "value": "utctime"}]},
+            }
+        ]
+
+    def _build_built_in_fields_v4(self, built_in_config: dict, storage_cluster_type=STORAGE_CLUSTER_TYPE) -> list:
         """
         构建V4版本的内置字段规则
         :param built_in_config: 内置配置，包含fields和time_field
@@ -239,10 +380,11 @@ class EtlStorage:
         for field in built_in_fields:
             field_name = field["field_name"]
             alias_name = field.get("alias_name", field_name)
-            field_type = field["field_type"]
+            # 优先使用es_type确定output_type
+            field_type = field.get("option", {}).get("es_type") or field.get("field_type")
 
-            # 跳过log、iterationIndex字段，它会在后面单独处理
-            if field_name in ["log", "iterationIndex"]:
+            # 跳过 flat_field=True 的字段和 log 字段，会在后面单独处理
+            if field.get("flat_field", False) or field_name in ["log"]:
                 continue
 
             rules.append(
@@ -274,10 +416,38 @@ class EtlStorage:
 
             # 获取V3时间格式并转换为V4格式
             v3_time_format = time_field.get("option", {}).get("time_format", "yyyy-MM-dd HH:mm:ss")
-            v4_time_parsing = self._convert_v3_to_v4_time_format(v3_time_format)
+            v4_time_parsing = self._convert_v3_to_v4_time_format(
+                v3_time_format, storage_cluster_type=storage_cluster_type
+            )
 
-            rules.append(
-                {
+            # 检查是否为纳秒级时间格式，参考transfer清洗的dtEventTimeStampNanos处理逻辑
+            time_fmts = array_group(FieldDateFormatEnum.get_choices_list_dict(), "id", True)
+            time_fmt = time_fmts.get(v3_time_format, {})
+            is_nanos = time_fmt.get("es_format", "epoch_millis") == "strict_date_optional_time_nanos"
+
+            # 判断是否为用户指定的时间字段：有real_path说明时间来源于bk_separator_object而非json_data
+            has_user_time_field = self._has_user_time_field(built_in_config)
+
+            # 读取用户配置的时区偏移
+            user_time_zone = time_field.get("option", {}).get("time_zone")
+            if user_time_zone is not None:
+                user_time_zone = int(user_time_zone)
+
+            if has_user_time_field:
+                # 用户指定了时间字段，dtEventTimeStamp需要从bk_separator_object提取
+                # 与dtEventTimeStampNanos同理，延迟到bk_separator_object之后生成
+                built_in_config["_user_time_field"] = {
+                    "time_field_name": time_field_name,
+                    "time_alias_name": time_alias_name,
+                    "time_field_type": time_field_type,
+                    "description": time_field.get("description"),
+                    "v3_time_format": v3_time_format,
+                    "time_zone": user_time_zone,
+                    "field_index": time_field.get("option", {}).get("field_index"),
+                }
+            else:
+                # 默认：从json_data.utctime提取（GSE上报的采集时间）
+                main_time_rules = {
                     "input_id": "json_data",
                     "output_id": time_field_name,
                     "operator": {
@@ -286,11 +456,94 @@ class EtlStorage:
                         "alias": time_field_name,
                         "desc": time_field.get("description"),
                         "input_type": None,
-                        "output_type": self._get_output_type(time_field_type),
+                        "fixed_value": None,
+                        "default_value": None,
+                    },
+                }
+
+                # doris 采集项自动生成 dtEventTimeStamp 字段, 无需配置
+                if storage_cluster_type == STORAGE_CLUSTER_TYPE:
+                    main_time_rules["operator"]["output_type"] = self._get_output_type(time_field_type)
+                    main_time_rules["operator"]["is_time_field"] = None
+                    main_time_rules["operator"]["time_format"] = None
+                    main_time_rules["operator"]["in_place_time_parsing"] = v4_time_parsing
+                    rules.append(main_time_rules)
+
+                # 从同源生成 time 字段，Legacy 路径下 Transfer 自动生成，V4 需显式声明
+                second_time_rules = {
+                    "input_id": "json_data",
+                    "output_id": "time",
+                    "operator": {
+                        "type": "assign",
+                        "key_index": time_alias_name,
+                        "alias": "time",
+                        "desc": "data timestamp in epoch second",
+                        "input_type": None,
+                        "fixed_value": None,
+                        "default_value": None,
+                    },
+                }
+
+                if storage_cluster_type == STORAGE_CLUSTER_TYPE:
+                    second_time_rules["operator"]["is_time_field"] = None
+                    second_time_rules["operator"]["output_type"] = "long"
+                    second_time_rules["operator"]["time_format"] = None
+                    second_time_rules["operator"]["in_place_time_parsing"] = v4_time_parsing
+                elif storage_cluster_type == DORIS_CLUSTER_TYPE:
+                    second_time_rules["operator"]["is_time_field"] = True
+                    second_time_rules["operator"]["output_type"] = "string"
+                    second_time_rules["operator"]["time_format"] = v4_time_parsing
+                    second_time_rules["operator"]["in_place_time_parsing"] = None
+
+                rules.append(second_time_rules)
+
+            # 如果是纳秒级时间格式，记录需要生成dtEventTimeStampNanos字段
+            # 注意：dtEventTimeStampNanos规则需要在bk_separator_object之后生成，因为用户指定的时间字段在bk_separator_object中
+            # 这里只记录is_nanos状态，实际的规则生成在_build_nanos_time_field_v4方法中
+            if is_nanos:
+                # 将纳秒时间字段信息存储到built_in_config中，供后续使用
+                built_in_config["_nanos_time_field"] = {
+                    "time_alias_name": time_alias_name,
+                    "v3_time_format": v3_time_format,
+                    "time_zone": user_time_zone,
+                    "field_index": time_field.get("option", {}).get("field_index"),
+                }
+
+        return rules
+
+    def _build_flat_built_in_fields_v4(self, built_in_config: dict) -> list:
+        """
+        构建V4版本的 flat_field=True 内置字段规则（从 iter_item 提取）
+        :param built_in_config: 内置配置，包含fields
+        :return: flat_field 字段规则列表
+        """
+        rules = []
+        built_in_fields = built_in_config.get("fields", [])
+
+        for field in built_in_fields:
+            if not field.get("flat_field", False):
+                continue
+
+            field_name = field["field_name"]
+            alias_name = field.get("alias_name", field_name)
+            # 优先使用es_type确定output_type
+            field_type = field.get("option", {}).get("es_type") or field.get("field_type")
+
+            rules.append(
+                {
+                    "input_id": "iter_item",
+                    "output_id": field_name,
+                    "operator": {
+                        "type": "assign",
+                        "key_index": alias_name,
+                        "alias": field_name,
+                        "desc": field.get("description"),
+                        "input_type": None,
+                        "output_type": self._get_output_type(field_type),
                         "fixed_value": None,
                         "is_time_field": None,
                         "time_format": None,
-                        "in_place_time_parsing": v4_time_parsing,
+                        "in_place_time_parsing": None,
                         "default_value": None,
                     },
                 }
@@ -298,44 +551,140 @@ class EtlStorage:
 
         return rules
 
-    def _build_iteration_index_field_v4(self, built_in_config: dict) -> list:
+    def _build_user_dt_event_time_field_v4(
+        self, built_in_config: dict, storage_cluster_type: str = STORAGE_CLUSTER_TYPE
+    ) -> list:
         """
-        构建V4版本的iterationIndex字段规则（从iter_item提取）
-        :param built_in_config: 内置配置，包含fields
-        :return: iterationIndex字段规则列表
+        构建V4版本的dtEventTimeStamp字段规则（当用户指定了时间字段时，从bk_separator_object提取）
+        :param built_in_config: 内置配置，包含_user_time_field信息
+        :return: dtEventTimeStamp字段规则列表；若无用户时间字段则返回空列表
         """
         rules = []
-        built_in_fields = built_in_config.get("fields", [])
-        
-        # 查找iterationIndex字段（flat_field为True的字段）
-        for field in built_in_fields:
-            if field.get("field_name") == "iterationIndex" and field.get("flat_field", False):
-                alias_name = field.get("alias_name", "iterationindex")
-                
-                # 优先使用es_type确定output_type
-                # iterationIndex的field_type可能是float，但es_type是integer，需映射为long
-                field_type = field.get("option", {}).get("es_type") or field.get("field_type")
-                output_type = self._get_output_type(field_type)
-                
-                rules.append({
-                    "input_id": "iter_item",
-                    "output_id": "iterationIndex",
-                    "operator": {
-                        "type": "assign",
-                        "key_index": alias_name,
-                        "alias": "iterationIndex",
-                        "desc": field.get("description"),
-                        "input_type": None,
-                        "output_type": output_type,
-                        "fixed_value": None,
-                        "is_time_field": None,
-                        "time_format": None,
-                        "in_place_time_parsing": None,
-                        "default_value": None,
-                    },
-                })
-                break
-        
+        user_time_field = built_in_config.get("_user_time_field")
+        if user_time_field:
+            v4_time_parsing = self._convert_v3_to_v4_time_format(
+                user_time_field["v3_time_format"],
+                time_zone=user_time_field.get("time_zone"),
+                storage_cluster_type=storage_cluster_type,
+            )
+
+            # 用户自定义时间字段：解析失败按序回退到采集器上报的utctime，全部失败再由now_if_parse_failed收口
+            time_fallback = self._build_utctime_fallback()
+
+            field_index = user_time_field.get("field_index")
+            if self.separator_key_is_index and field_index is not None:
+                key_index = str(field_index - 1)
+            else:
+                key_index = user_time_field["time_alias_name"]
+
+            user_time_rules = {
+                "input_id": self.separator_node_name,
+                "output_id": user_time_field["time_field_name"],
+                "operator": {
+                    "type": "assign",
+                    "key_index": key_index,
+                    "alias": user_time_field["time_field_name"],
+                    "desc": user_time_field.get("description"),
+                    "input_type": None,
+                    "fixed_value": None,
+                    "default_value": None,
+                    "time_fallback": time_fallback,
+                },
+            }
+
+            # doris 采集项自动生成 dtEventTimeStamp 字段, 无需配置
+            if storage_cluster_type == STORAGE_CLUSTER_TYPE:
+                user_time_rules["operator"]["output_type"] = self._get_output_type(user_time_field["time_field_type"])
+                user_time_rules["operator"]["is_time_field"] = None
+                user_time_rules["operator"]["time_format"] = None
+                user_time_rules["operator"]["in_place_time_parsing"] = v4_time_parsing
+                rules.append(user_time_rules)
+
+            # 从同源生成time字段，Legacy路径下Transfer自动生成，V4需显式声明
+            second_time_rules = {
+                "input_id": self.separator_node_name,
+                "output_id": "time",
+                "operator": {
+                    "type": "assign",
+                    "key_index": key_index,
+                    "alias": "time",
+                    "desc": "data timestamp in epoch second",
+                    "input_type": None,
+                    "fixed_value": None,
+                    "default_value": None,
+                    "time_fallback": time_fallback,
+                },
+            }
+
+            if storage_cluster_type == STORAGE_CLUSTER_TYPE:
+                second_time_rules["operator"]["output_type"] = "long"
+                second_time_rules["operator"]["is_time_field"] = None
+                second_time_rules["operator"]["time_format"] = None
+                second_time_rules["operator"]["in_place_time_parsing"] = v4_time_parsing
+            elif storage_cluster_type == DORIS_CLUSTER_TYPE:
+                second_time_rules["operator"]["output_type"] = "string"
+                second_time_rules["operator"]["is_time_field"] = True
+                second_time_rules["operator"]["time_format"] = v4_time_parsing
+                second_time_rules["operator"]["in_place_time_parsing"] = None
+
+            rules.append(second_time_rules)
+        return rules
+
+    def _build_nanos_time_field_v4(
+        self, built_in_config: dict, storage_cluster_type: str = STORAGE_CLUSTER_TYPE
+    ) -> list:
+        """
+        构建V4版本的dtEventTimeStampNanos字段规则（从bk_separator_object提取用户指定的时间字段）
+        :param built_in_config: 内置配置，包含_nanos_time_field信息
+        :return: dtEventTimeStampNanos字段规则列表
+        """
+        rules = []
+        nanos_time_field = built_in_config.get("_nanos_time_field")
+        if nanos_time_field:
+            time_alias_name = nanos_time_field["time_alias_name"]
+            v3_time_format = nanos_time_field["v3_time_format"]
+
+            # 获取纳秒级时间格式的V4配置
+            nanos_v4_time_parsing = self._convert_v3_to_v4_time_format(
+                v3_time_format, time_zone=nanos_time_field.get("time_zone"), storage_cluster_type=storage_cluster_type
+            )
+            # 纳秒级时间解析的输出应为strict_date_optional_time_nanos格式字符串，与ES mapping保持一致
+            nanos_v4_time_parsing["to"] = "strict_date_optional_time_nanos"
+
+            # 用户自定义时间字段（纳秒级）解析失败时，同样按序回退到采集器utctime
+            time_fallback = self._build_utctime_fallback()
+
+            field_index = nanos_time_field.get("field_index")
+            if self.separator_key_is_index and field_index is not None:
+                key_index = str(field_index - 1)
+            else:
+                key_index = time_alias_name
+
+            nanos_time_rules = {
+                "input_id": self.separator_node_name,
+                "output_id": "dtEventTimeStampNanos",
+                "operator": {
+                    "type": "assign",
+                    "key_index": key_index,
+                    "alias": "dtEventTimeStampNanos",
+                    "desc": "纳秒级时间戳",
+                    "input_type": None,
+                    "output_type": "string",
+                    "fixed_value": None,
+                    "is_time_field": None,
+                    "default_value": None,
+                    "time_fallback": time_fallback,
+                },
+            }
+
+            if storage_cluster_type == STORAGE_CLUSTER_TYPE:
+                nanos_time_rules["operator"]["time_format"] = None
+                nanos_time_rules["operator"]["in_place_time_parsing"] = nanos_v4_time_parsing
+            elif storage_cluster_type == DORIS_CLUSTER_TYPE:
+                nanos_time_rules["operator"]["time_format"] = nanos_v4_time_parsing
+                nanos_time_rules["operator"]["in_place_time_parsing"] = None
+
+            rules.append(nanos_time_rules)
         return rules
 
     def _build_extra_json_field_v4(self, etl_params: dict, fields: list) -> list:
@@ -756,6 +1105,8 @@ class EtlStorage:
         sort_fields: list = None,
         target_fields: list = None,
         total_shards_per_node: int = None,
+        labels: dict = None,
+        storage_cluster_type=STORAGE_CLUSTER_TYPE,
     ):
         """
         创建或更新结果表
@@ -774,6 +1125,7 @@ class EtlStorage:
         :param sort_fields: 排序字段
         :param target_fields: 定位字段
         :param total_shards_per_node: 每个节点的分片总数
+        :param storage_cluster_type: 存储集群类型
         """
         from apps.log_databus.handlers.collector import CollectorHandler
 
@@ -821,7 +1173,7 @@ class EtlStorage:
             "table_name_zh": instance.get_name(),
             "is_custom_table": True,
             "schema_type": "free",
-            "default_storage": "elasticsearch",
+            "default_storage": storage_cluster_type,
             "default_storage_config": {
                 "cluster_id": storage_cluster_id,
                 "storage_cluster_id": storage_cluster_id,
@@ -839,6 +1191,7 @@ class EtlStorage:
             "is_time_field_only": True,
             "bk_biz_id": instance.get_bk_biz_id(),
             "label": instance.category_id,
+            "labels": labels or {},
             "option": {},
             "field_list": [],
             "warm_phase_days": 0,
@@ -859,7 +1212,10 @@ class EtlStorage:
         except ApiResultError:
             pass
 
-        if not table_id and FeatureToggleObject.switch("log_v4_data_link", instance.get_bk_biz_id()):
+        if not table_id and (
+            storage_cluster_type == DORIS_CLUSTER_TYPE
+            or FeatureToggleObject.switch("log_v4_data_link", instance.get_bk_biz_id())
+        ):
             if hasattr(instance, "enable_v4"):
                 instance.enable_v4 = True
                 instance.save()
@@ -869,12 +1225,25 @@ class EtlStorage:
         built_in_config = collector_scenario.get_built_in_config(
             es_version,
             self.etl_config,
+            storage_cluster_type=storage_cluster_type,
             sort_fields=sort_fields,
             target_fields=target_fields,
         )
         enable_v4 = getattr(instance, "enable_v4", False)
+
+        if not enable_v4:
+            # 如果将 doris 作为存储集群, 则强制开启 v4 清洗
+            if storage_cluster_type == DORIS_CLUSTER_TYPE:
+                enable_v4 = True
+
+        etl_params["bk_biz_id"] = instance.get_bk_biz_id()
         result_table_config = self.get_result_table_config(
-            fields, etl_params, built_in_config, es_version=es_version, enable_v4=enable_v4
+            fields,
+            etl_params,
+            built_in_config,
+            es_version=es_version,
+            enable_v4=enable_v4,
+            storage_cluster_type=storage_cluster_type,
         )
         is_nanos = False
         for rt_field in result_table_config["field_list"]:
@@ -887,6 +1256,42 @@ class EtlStorage:
         self.add_metadata_path_configs(etl_path_regexp, result_table_config)
 
         params.update(result_table_config)
+
+        # 用户清洗字段可能与内置 scenario 字段同名（如 Windows 事件采集的 winEventProviderName），
+        # field_list 重复会导致下发 metadata 时 table_id+field_name 唯一键冲突，modify_result_table 整体失败。
+        # built_in 字段在 field_list 中位于用户字段之前，按出现顺序去重即可保证内置定义优先生效。
+        seen_field_names = set()
+        deduped_field_list = []
+        for rt_field in params["field_list"]:
+            field_name = rt_field.get("field_name")
+            if field_name in seen_field_names:
+                continue
+            seen_field_names.add(field_name)
+            deduped_field_list.append(rt_field)
+        params["field_list"] = deduped_field_list
+
+        # IaaS 兼容：创建/修改 RT 时传入与 router 一致的 index_set 和查询选项
+        params["default_storage_config"]["index_set"] = params["table_id"].replace(".", "_")
+
+        index_set_obj = None
+        if hasattr(instance, "index_set_id") and instance.index_set_id:
+            from apps.log_search.models import LogIndexSet
+
+            index_set_obj = LogIndexSet.objects.filter(index_set_id=instance.index_set_id).first()
+
+        tf_name = index_set_obj.time_field if index_set_obj and index_set_obj.time_field else DEFAULT_TIME_FIELD
+        tf_type = (
+            index_set_obj.time_field_type
+            if index_set_obj and index_set_obj.time_field_type
+            else TimeFieldTypeEnum.DATE.value
+        )
+        tf_unit = (
+            index_set_obj.time_field_unit
+            if index_set_obj and index_set_obj.time_field_unit
+            else TimeFieldUnitEnum.MILLISECOND.value
+        )
+        params["option"]["need_add_time"] = instance.collector_scenario_id != Scenario.ES
+        params["option"]["time_field"] = {"name": tf_name, "type": tf_type, "unit": tf_unit}
 
         # 字段mapping优化
         for field in params["field_list"]:
@@ -913,7 +1318,6 @@ class EtlStorage:
             from apps.log_databus.tasks.collector import modify_result_table
 
             modify_result_table.delay(params)
-            cache.delete(CACHE_KEY_CLUSTER_INFO.format(table_id))
 
         if not instance.table_id:
             instance.table_id = table_id
@@ -1015,10 +1419,8 @@ class EtlStorage:
         collector_config = {"etl_params": result_table_config.get("option", {})}
         if result_table_storage:
             collector_config["storage_cluster_id"] = result_table_storage["cluster_config"]["cluster_id"]
-            collector_config["storage_cluster_name"] = (
-                result_table_storage["cluster_config"].get("display_name")
-                or result_table_storage["cluster_config"]["cluster_name"]
-            )
+            collector_config["storage_cluster_name"] = result_table_storage["cluster_config"].get("cluster_name", "")
+            collector_config["storage_display_name"] = result_table_storage["cluster_config"].get("display_name", "")
             collector_config["retention"] = result_table_storage["storage_config"].get("retention")
             collector_config["allocation_min_days"] = result_table_storage["storage_config"].get("warm_phase_days")
 
@@ -1153,7 +1555,7 @@ class EtlStorage:
     def _to_bkdata_conf(self, time_field):
         return {
             "output_field_name": "timestamp",
-            "time_format": time_field["option"]["time_format"],
+            "time_format": time_field["option"]["time_format"].replace("YY", "yy").replace("DD", "dd"),
             "timezone": time_field["option"]["time_zone"],
             "encoding": "UTF-8",
             "timestamp_len": 0,
@@ -1304,6 +1706,7 @@ class EtlStorage:
         index_settings: dict = None,
         total_shards_per_node: int = None,
         retention: int = 180,
+        storage_cluster_type=STORAGE_CLUSTER_TYPE,
     ):
         """
         创建或更新 Pattern 结果表
@@ -1318,6 +1721,7 @@ class EtlStorage:
         :param es_shards: es分片数
         :param index_settings: 索引配置
         :param total_shards_per_node: 每个节点的分片总数
+        :param storage_cluster_type 存储集群类型
         """
 
         # ES 配置
@@ -1355,7 +1759,7 @@ class EtlStorage:
             "table_name_zh": f"{instance.get_name()}_Pattern",
             "is_custom_table": True,
             "schema_type": "free",
-            "default_storage": "elasticsearch",
+            "default_storage": storage_cluster_type,
             "default_storage_config": {
                 "cluster_id": storage_cluster_id,
                 "storage_cluster_id": storage_cluster_id,
@@ -1451,6 +1855,5 @@ class EtlStorage:
             from apps.log_databus.tasks.collector import modify_result_table
 
             modify_result_table.delay(params)
-            cache.delete(CACHE_KEY_CLUSTER_INFO.format(table_id))
 
         return {"table_id": table_id, "params": params}

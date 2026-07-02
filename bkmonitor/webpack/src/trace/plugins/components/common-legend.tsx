@@ -53,7 +53,7 @@ export default defineComponent({
   name: 'CommonLegend',
   props: commonLegendProps,
   emits: commonLegendEmits,
-  setup(props, { emit }) {
+  setup(_, { emit }) {
     const { handleLegendEvent } = useCommonLegend(emit);
     return {
       handleLegendEvent,
@@ -67,15 +67,21 @@ export default defineComponent({
           return (
             <div
               key={index}
-              class='common-legend-item'
+              class={['common-legend-item', legend.disabled ? 'is-disabled' : '']}
               onClick={e => this.handleLegendEvent(e, 'click', legend)}
-              // onMouseenter={e => this.handleLegendEvent(e, 'highlight', legend)}
-              // onMouseleave={e => this.handleLegendEvent(e, 'downplay', legend)}
             >
-              <span
-                style={{ backgroundColor: legend.show ? legend.color : '#ccc' }}
-                class='legend-icon'
-              />
+              {legend.icon ? (
+                <div
+                  style={{ '--legend-color': legend.show ? legend.color : '#ccc' }}
+                  class={legend.icon}
+                />
+              ) : (
+                <span
+                  style={{ backgroundColor: legend.show ? legend.color : '#ccc' }}
+                  class='legend-icon'
+                />
+              )}
+
               <div
                 style={{ color: legend.show ? '#63656e' : '#ccc' }}
                 class='legend-name'

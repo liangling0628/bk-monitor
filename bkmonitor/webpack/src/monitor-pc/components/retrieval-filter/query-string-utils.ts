@@ -24,7 +24,7 @@
  * IN THE SOFTWARE.
  */
 
-import { Debounce } from 'monitor-common/utils';
+import { Debounce, xssFilter } from 'monitor-common/utils';
 
 import { EFieldType, EQueryStringTokenType } from './utils';
 
@@ -389,7 +389,7 @@ export class QueryStringEditor {
         (item, index) =>
           `<span token-type="${item.type}" token-index="${index}" style="color: ${
             queryStringColorMap[item.type]?.color || defaultColor
-          };" class="str-item">${item.value}</span>`
+          };" class="str-item">${xssFilter(item.value)}</span>`
       )
       .join('');
     replaceContent(this.editorEl, content, isLast);
@@ -398,6 +398,34 @@ export class QueryStringEditor {
       this.options?.onChange?.(this.queryString.replace(/^\s+|\s+$/g, ''));
     }
   }
+}
+
+// 获取光标全局字符偏移量
+export function getGlobalOffset(editor) {
+  const selection = window.getSelection();
+  if (!selection.rangeCount) return 0;
+  const range = selection.getRangeAt(0);
+  let offset = 0;
+  const nodeStack = [editor];
+  let found = false;
+  // 前序遍历所有文本节点
+  while (nodeStack.length > 0 && !found) {
+    const node = nodeStack.pop();
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node === range.startContainer) {
+        offset += range.startOffset;
+        found = true;
+      } else {
+        offset += node.textContent.length;
+      }
+    } else {
+      // 逆序压栈保证遍历顺序
+      for (let i = node.childNodes.length - 1; i >= 0; i--) {
+        nodeStack.push(node.childNodes[i]);
+      }
+    }
+  }
+  return offset;
 }
 
 export function getQueryStringMethods(fieldType: EFieldType) {
@@ -530,36 +558,8 @@ export function replaceContent(editor, content: string, isLast = false) {
   // 保持聚焦
   editor.focus();
 }
-
-// 获取光标全局字符偏移量
-function getGlobalOffset(editor) {
-  const selection = window.getSelection();
-  if (!selection.rangeCount) return 0;
-  const range = selection.getRangeAt(0);
-  let offset = 0;
-  const nodeStack = [editor];
-  let found = false;
-  // 前序遍历所有文本节点
-  while (nodeStack.length > 0 && !found) {
-    const node = nodeStack.pop();
-    if (node.nodeType === Node.TEXT_NODE) {
-      if (node === range.startContainer) {
-        offset += range.startOffset;
-        found = true;
-      } else {
-        offset += node.textContent.length;
-      }
-    } else {
-      // 逆序压栈保证遍历顺序
-      for (let i = node.childNodes.length - 1; i >= 0; i--) {
-        nodeStack.push(node.childNodes[i]);
-      }
-    }
-  }
-  return offset;
-}
 // 设置光标到指定偏移量
-function setGlobalOffset(editor, targetOffset) {
+export function setGlobalOffset(editor, targetOffset) {
   let currentOffset = 0;
   let targetNode = editor;
   let targetNodeOffset = 0;
@@ -576,7 +576,7 @@ function setGlobalOffset(editor, targetOffset) {
     currentOffset += nodeLength;
   }
   // 处理越界情况（放置到最后一个位置）
-  if (!targetNode || targetNode.nodeType !== Node.TEXT_NODE) {
+  if (targetNode?.nodeType !== Node.TEXT_NODE) {
     const allChildren = editor.childNodes;
     targetNode = editor;
     targetNodeOffset = allChildren.length;

@@ -9,6 +9,7 @@
   min-height: 400px;
   margin-top: 6px;
   overflow: hidden;
+  overscroll-behavior-x: contain;
   border-top: solid 1px #dfe0e5;
 
   .bklog-requsting-loading {
@@ -79,6 +80,8 @@
 
         mark {
           background-color: rgb(250, 238, 177);
+          border-radius: 4px;
+          padding: 1px 2px;
         }
 
         .bklog-v3-column-placeholder {
@@ -118,40 +121,6 @@
           }
         }
 
-        &.right {
-          position: sticky;
-          right: 0;
-          z-index: 2;
-          display: flex;
-          align-items: stretch;
-          padding: 0px 12px;
-          background-color: #fff;
-
-          .handle-content {
-            position: relative;
-            display: flex;
-            justify-content: space-around;
-            padding: 4px 0;
-
-            .handle-card {
-              margin-left: 0;
-            }
-          }
-
-          &::before {
-            position: absolute;
-            top: 0;
-            right: 100%;
-            bottom: 0px;
-            left: -8px;
-            z-index: 2;
-            min-width: 8px;
-            pointer-events: none;
-            content: '';
-            background-image: linear-gradient(270deg, #0000000f 0%, #00000000 100%);
-          }
-        }
-
         &.header-cell {
           position: relative;
           display: inline-flex;
@@ -167,15 +136,6 @@
           vertical-align: middle;
           cursor: pointer;
           background-color: #fafbfd;
-
-          &.right {
-            position: sticky;
-            right: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 12px;
-          }
 
           .bklog-header-cell {
             display: flex;
@@ -244,7 +204,8 @@
             position: absolute;
             top: 12px;
             right: 12px;
-            display: none;
+            display: inline-block;
+            visibility: hidden;
             color: #c4c6cc;
             cursor: pointer;
 
@@ -270,7 +231,7 @@
             background-color: #f0f1f5;
 
             .toggle-display {
-              display: inline-block;
+              visibility: visible;
             }
           }
         }
@@ -322,6 +283,7 @@
       position: sticky;
       top: 0;
       z-index: 2;
+      pointer-events: none;
       box-sizing: content-box;
       display: none;
       width: fit-content;
@@ -337,6 +299,7 @@
         z-index: 1;
         width: 100%;
         padding: 0;
+        pointer-events: auto;
       }
 
       &::before {
@@ -353,8 +316,9 @@
       position: relative;
 
       &:hover,
-      &.ai-active {
-        background-color: #fafbfd;
+      &.ai-active,
+      &.is-hover-operator-active {
+        background-color: #F5F7FA;
 
         .bklog-row-ai {
           img {
@@ -519,6 +483,73 @@
         .segment-span-tag {
           color: #3a84ff;
           cursor: pointer;
+        }
+      }
+    }
+  }
+
+  > .bklog-row-hover-operator {
+    position: fixed;
+    z-index: 200;
+    width: max-content;
+    min-width: 0;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateX(12px);
+    transition: opacity 0.16s ease-out, transform 0.16s ease-out;
+
+    &.is-show {
+      pointer-events: auto;
+      opacity: 1;
+      transform: translate(0, -32px);
+    }
+
+    .handle-content {
+      box-sizing: border-box;
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
+      justify-content: flex-start;
+      width: max-content;
+      min-width: 0;
+      max-width: none;
+      height: 28px;
+      padding: 3px 5px;
+      overflow: visible;
+      background: #fff;
+      border: 1px solid #c4cee3;
+      border-radius: 4px;
+      box-shadow: 0 2px 6px 0 #0000001f;
+
+      .handle-card {
+        flex: 0 0 20px;
+        width: 20px;
+        min-width: 20px;
+        height: 20px;
+        margin-left: 0;
+        font-size: 16px;
+        line-height: 20px;
+        border-radius: 3px;
+
+        &:hover,
+        &:focus {
+          color: #3a84ff;
+          background-color: #edf4ff;
+        }
+
+        .bklog-icon,
+        .icon {
+          font-size: 16px;
+          line-height: 20px;
+        }
+
+        &.ai-assistant {
+          img {
+            top: 0;
+            left: 0;
+            width: 20px;
+            height: 20px;
+          }
         }
       }
     }

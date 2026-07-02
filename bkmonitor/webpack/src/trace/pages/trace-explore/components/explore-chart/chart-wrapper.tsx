@@ -23,16 +23,20 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-import { defineComponent, shallowRef, watch } from 'vue';
+import { computed, defineComponent, inject, provide, shallowRef, watch } from 'vue';
 
 import { traceChats } from 'monitor-api/modules/apm_trace';
 import { random } from 'monitor-common/utils';
 import { PanelModel } from 'monitor-ui/chart-plugins/typings';
 import { echartsConnect } from 'monitor-ui/monitor-echarts/utils';
+import { storeToRefs } from 'pinia';
 
 import ChartCollapse from './chart-collapse';
 import ExploreChart from './explore-chart';
 import { useTraceExploreStore } from '@/store/modules/explore';
+import { BRIDGE_PROPS_KEY } from '../../trace-explore-apm';
+
+import type { IViewOptions } from './types';
 
 import './chart-wrapper.scss';
 export default defineComponent({
@@ -65,15 +69,36 @@ export default defineComponent({
   },
   setup() {
     const store = useTraceExploreStore();
+    const bridgeProps = inject(BRIDGE_PROPS_KEY, {} as Record<string, any>);
     const panelModels = shallowRef<PanelModel[]>([]);
     const dashboardId = random(10);
+    const params = computed<IViewOptions>(() => {
+      return {
+        app_name: store.appName,
+      };
+    });
+
+    const { timeRange, refreshImmediate } = storeToRefs(store);
+    provide('timeRange', timeRange);
+    provide('refreshImmediate', refreshImmediate);
+
+    const handleExploreChartZoomChange = inject(
+      'handleExploreChartZoomChange',
+      (_: [number, number]) => {}
+    );
 
     const getChartPanels = async () => {
+      const params = {
+        app_name: store.appName,
+      };
+      if (window.source_app === 'apm') {
+        Object.assign(params, {
+          service_name: bridgeProps.viewOptions.filters.service_name,
+        });
+      }
       const list =
         store.appName && store.mode
-          ? await traceChats({
-              app_name: store.appName,
-            }).catch(() => [])
+          ? await traceChats(params).catch(() => [])
           : [];
       panelModels.value = list.map(
         item =>
@@ -86,6 +111,11 @@ export default defineComponent({
       echartsConnect(dashboardId);
     };
 
+    const handleDataZoomChange = val => {
+      handleExploreChartZoomChange(val);
+      store.updateTimeRange(val);
+    };
+
     watch(
       [() => store.appName, () => store.mode],
       () => {
@@ -95,6 +125,8 @@ export default defineComponent({
     );
     return {
       panelModels,
+      params,
+      handleDataZoomChange,
     };
   },
   render() {
@@ -113,7 +145,10 @@ export default defineComponent({
             {this.panelModels.map(panel => (
               <ExploreChart
                 key={panel.id}
+                hoverAllTooltips={true}
                 panel={panel}
+                params={this.params}
+                onDataZoomChange={this.handleDataZoomChange}
               />
             ))}
           </div>

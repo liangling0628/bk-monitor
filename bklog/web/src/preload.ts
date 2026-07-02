@@ -41,6 +41,8 @@ export const getExternalMenuListBySpace = (space) => {
       list.push('retrieve');
     } else if (permission === 'log_extract') {
       list.push('manage');
+    } else if (permission === 'client_log') {
+      list.push('client-log-search');
     }
   }
   return list;
@@ -79,12 +81,18 @@ export const getAllSpaceList = (http, store) => {
  * 预加载
  * @param http
  * @param store
- * @returns Promise<[spaceRequest, userInfoRequest, globalsRequest, getUserGuideRequest]>
+ * @returns Promise<[spaceRequest, userInfoRequest, globalsRequest]>
  * spaceRequest: 空间请求
  * userInfoRequest: 用户信息请求
  * globalsRequest: 全局配置请求
- * getUserGuideRequest: 用户引导数据请求
  */
+export const requestUserGuideData = ({ http, store }) => {
+  return http.request('meta/getUserGuide').then((res) => {
+    store.commit('updateState', { userGuideData: res.data });
+    return res.data;
+  });
+};
+
 export default ({
   http,
   store,
@@ -100,7 +108,7 @@ export default ({
    * @returns
    */
   const getSpaceByIndexId = () => {
-    if (urlArgs.index_id && !urlArgs.spaceUid) {
+    if (urlArgs.index_id && !urlArgs.spaceUid && !urlArgs.bizId) {
       return http
         .request(
           'indexSet/getSpaceByIndexId',
@@ -213,7 +221,8 @@ export default ({
    */
   const spaceRequest = getSpaceByIndexId().then(() => {
     return getDefaultSpaceList().then((resp) => {
-      const spaceList = resp.data;
+      // 兜底 resp 为 null (catch 分支) 或 resp.data 为 undefined 的情况，避免抛 TypeError
+      const spaceList = Array.isArray(resp?.data) ? resp.data : [];
       for (const item of spaceList) {
         item.bk_biz_id = `${item.bk_biz_id}`;
         item.space_uid = `${item.space_uid}`;
@@ -300,13 +309,5 @@ export default ({
     return res.data;
   });
 
-  /**
-   * 获取用户引导数据
-   */
-  const getUserGuideRequest = http.request('meta/getUserGuide').then((res) => {
-    store.commit('updateState', { userGuideData: res.data });
-    return res.data;
-  });
-
-  return Promise.allSettled([spaceRequest, userInfoRequest, globalsRequest, getUserGuideRequest]);
+  return Promise.allSettled([spaceRequest, userInfoRequest, globalsRequest]);
 };

@@ -23,7 +23,7 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-import { computed, defineComponent, h, nextTick, onBeforeUnmount, ref, watch, type Ref } from 'vue';
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, reactive, ref, watch, type Ref } from 'vue';
 
 import { getRowFieldValue, setDefaultTableWidth, TABLE_LOG_FIELDS_SORT_REGULAR, xssFilter } from '@/common/util';
 // import { perfStart, perfEnd } from '@/utils/performance-monitor';
@@ -40,6 +40,7 @@ import { BK_LOG_STORAGE } from '@/store/store.type';
 import RetrieveHelper, { RetrieveEvent } from '../../../retrieve-helper';
 import ExpandView from '../../components/result-cell-element/expand-view.vue';
 import OperatorTools from '../../components/result-cell-element/operator-tools.vue';
+import RetrieveLoader from '@/skeleton/retrieve-loader.vue';
 import ScrollTop from '../../components/scroll-top/index';
 import useTextAction from '../../hooks/use-text-action';
 import LogCell from './log-cell';
@@ -48,7 +49,6 @@ import {
   LOG_SOURCE_F,
   ROW_EXPAND,
   ROW_F_ORIGIN_CTX,
-  ROW_F_ORIGIN_OPT,
   ROW_F_ORIGIN_TIME,
   ROW_INDEX,
   ROW_KEY,
@@ -93,6 +93,18 @@ export default defineComponent({
     const { handleOperation, getObjectValue } = useTextAction(emit, 'origin');
 
     let savedSelection: Range = null;
+    let mousedownOnRow = false;
+    let hoverOperatorHideTimer: ReturnType<typeof setTimeout> = null;
+    const layoutTimers: ReturnType<typeof setTimeout>[] = [];
+
+    const hoverOperatorState = reactive({
+      visible: false,
+      interacting: false,
+      row: null,
+      rowIndex: -1,
+      top: 0,
+      right: 12,
+    });
 
     const popInstanceUtil = new PopInstanceUtil({
       refContent: () => refSegmentContent.value,
@@ -133,6 +145,7 @@ export default defineComponent({
 
     const tableRowConfig = new WeakMap();
     const isPageLoading = ref(RetrieveHelper.isSearching);
+    const isPaginationLoading = ref(false);
     // 前端本地分页loadmore触发器
     // renderList 没有使用响应式，这里需要手动触发更新，所以这里使用一个计数器来触发更新
     const localUpdateCounter = ref(0);
@@ -157,9 +170,6 @@ export default defineComponent({
     const indexSetType = computed(() => store.state.indexItem.isUnionIndex);
     const limitRow = computed(() => store.state.storage[BK_LOG_STORAGE.RESULT_DISPLAY_LINES]);
 
-    // 检索第一页数据时，loading状态
-    const isFirstPageLoading = computed(() => isLoading.value && !isRequesting.value);
-
     const exceptionMsg = computed(() => {
       if (/^cancel$/gi.test(indexSetQueryResult.value?.exception_msg)) {
         return $t('检索结果为空');
@@ -170,31 +180,61 @@ export default defineComponent({
     const isShowSourceField = computed(() => store.state.storage[BK_LOG_STORAGE.TABLE_SHOW_SOURCE_FIELD]);
     const fullColumns = ref([]);
     const showCtxType = ref(props.contentType);
+    const columnLayoutVersion = ref(0);
+    const isFirstPageLayoutPending = ref(false);
+    let firstPageLayoutToken = 0;
 
     /**
      * 重置分页状态
+     * 新查询首屏需要先展示骨架屏，等待列宽布局稳定后再渲染真实行，避免 monitor 包外部挂载时首帧列宽抖动。
      */
     const resetPageState = () => {
       pageIndex.value = 1;
       hasMoreList.value = true;
+      isFirstPageLayoutPending.value = true;
+      firstPageLayoutToken += 1;
     };
 
     const { addEvent } = useRetrieveEvent();
     addEvent(RetrieveEvent.SEARCHING_CHANGE, (isSearching) => {
       isPageLoading.value = isSearching;
+      if (isSearching && tableDataSize.value === 0 && !isPaginationLoading.value) {
+        resetPageState();
+      }
     });
 
     addEvent([
       RetrieveEvent.SEARCH_VALUE_CHANGE,
       RetrieveEvent.SEARCH_TIME_CHANGE,
       RetrieveEvent.TREND_GRAPH_SEARCH,
-      RetrieveEvent.SORT_LIST_CHANGED,
     ], () => {
       resetPageState();
     });
 
-    addEvent(RetrieveEvent.AUTO_REFRESH, () => {
+    addEvent(RetrieveEvent.SORT_LIST_CHANGED, () => {
+      /**
+       * SORT_LIST_CHANGED may be fired after the sort query has finished.
+       * In that case tableDataSize has already changed and first-page reveal has already been scheduled/finished.
+       * Resetting first-page layout again here would leave the skeleton pending forever because no new data-size
+       * change will arrive to call scheduleFirstPageTableReveal().
+       *
+       * New sort queries already clear list and set loading in requestIndexSetQuery(), which drives the skeleton
+       * through tableDataSize/isLoading watchers. Therefore this event only needs to force reset while the request
+       * is still in-flight or before any result rows are available.
+       */
+      if (isLoading.value || isPageLoading.value || isRequesting.value || tableDataSize.value === 0) {
+        resetPageState();
+      }
+    });
+
+    addEvent(RetrieveEvent.AUTO_REFRESH, async () => {
       resetPageState();
+      // 场景化检索模式下条件为空时跳过
+      if (store.getters.isSceneMode && store.getters.isSceneFilterEmpty) return;
+      // 检索条件有变更时先加载字段信息
+      if (store.state.indexItem.isSceneFilterChanged) {
+        await store.dispatch('requestIndexSetFieldInfo');
+      }
       store.dispatch('requestIndexSetQuery', { from: 'auto_refresh' });
     });
 
@@ -216,10 +256,6 @@ export default defineComponent({
     const resultContainerId = ref(RetrieveHelper.logRowsContainerId);
     const resultContainerIdSelector = `#${resultContainerId.value}`;
 
-    const operatorToolsWidth = computed(() => {
-      const w = indexSetOperatorConfig.value?.bcsWebConsole?.is_active ? 84 : 58;
-      return store.getters.isAiAssistantActive ? w + 26 : w;
-    });
 
     const originalColumns = computed(() => {
       return [
@@ -231,12 +267,16 @@ export default defineComponent({
           resize: false,
           minWidth: timeFieldType.value === 'date_nanos' ? 250 : 200,
           renderBodyCell: ({ row }) => {
+            const timezone = store.state.indexItem.timezone;
+            const fieldType = timeFieldType.value;
+            const formatValue = RetrieveHelper.formatTimeZoneValue(row[timeField.value], fieldType, timezone);
+
             return h(
               'span',
               {
                 class: 'time-field',
                 domProps: {
-                  innerHTML: xssFilter(RetrieveHelper.formatDateValue(row[timeField.value], timeFieldType.value)),
+                  innerHTML: xssFilter(formatValue),
                 },
               },
               [],
@@ -273,6 +313,7 @@ export default defineComponent({
         title: field.field_name,
         width: field.width,
         minWidth: field.minWidth,
+        field_type: field.field_type,
         align: 'top',
         resize: true,
         renderBodyCell: ({ row }) => {
@@ -312,17 +353,82 @@ export default defineComponent({
       };
     };
 
-    const setColWidth = (col) => {
-      col.minWidth = col.width - 4;
-      col.width = '100%';
+    const getNumericWidth = (width, fallback = 0) => {
+      if (typeof width === 'number') {
+        return width;
+      }
+
+      if (typeof width === 'string' && width.includes('%')) {
+        return fallback;
+      }
+
+      const parsedWidth = Number.parseFloat(width);
+      return Number.isNaN(parsedWidth) ? fallback : parsedWidth;
+    };
+
+    const TABLE_WIDTH_SAFE_GAP = 4;
+
+    const getFixedColumnsWidth = () => {
+      const expandColumnWidth = 36;
+      const rowIndexColumnWidth = tableShowRowIndex.value ? 50 : 0;
+      const sourceColumnWidth = isShowSourceField.value && indexSetType.value ? 230 : 0;
+
+      return expandColumnWidth + rowIndexColumnWidth + sourceColumnWidth;
+    };
+
+    const getFieldsAvailableWidth = () => offsetWidth.value - getFixedColumnsWidth() - TABLE_WIDTH_SAFE_GAP;
+
+    const getColumnWidthTotal = (columnList: Record<string, any>[]) => {
+      return columnList.reduce((total, item) => total + getNumericWidth(item.width, item.minWidth), 0);
+    };
+
+    const getExtraWidthTargetColumns = (columnList: Record<string, any>[]) => {
+      const longTextColumns = columnList.filter((item) => {
+        return item.field === 'log' || item.field_type === 'text' || getNumericWidth(item.width) >= 800;
+      });
+
+      return longTextColumns;
+    };
+
+    const distributeExtraWidthToLongTextColumns = (columnList: Record<string, any>[]) => {
+      const availableWidth = getFieldsAvailableWidth();
+      if (availableWidth <= 0 || columnList.length === 0) {
+        return;
+      }
+
+      const columnWidth = getColumnWidthTotal(columnList);
+      if (columnWidth >= availableWidth) {
+        return;
+      }
+
+      const targetColumns = getExtraWidthTargetColumns(columnList);
+      if (targetColumns.length === 0) {
+        return;
+      }
+
+      const extraWidth = availableWidth - columnWidth;
+      const addWidth = Math.floor(extraWidth / targetColumns.length);
+      let restWidth = extraWidth - addWidth * targetColumns.length;
+
+      targetColumns.forEach((item) => {
+        const nextWidth = getNumericWidth(item.width, item.minWidth) + addWidth + (restWidth > 0 ? 1 : 0);
+        restWidth -= 1;
+        item.width = nextWidth;
+      });
+    };
+
+    const triggerColumnLayoutReflow = () => {
+      columnLayoutVersion.value += 1;
     };
 
     // 性能优化：使用 computed 缓存列配置，避免每次渲染都重新计算
     const getFieldColumns = computed(() => {
+      columnLayoutVersion.value;
+
       if (showCtxType.value === 'table') {
         const columnList: Record<string, any>[] = [];
         const columns = visibleFields.value.length > 0 ? visibleFields.value : fullColumns.value;
-        let maxColWidth = operatorToolsWidth.value + 40;
+        let maxColWidth = 40;
         let logField: Record<string, any> | null = null;
 
         // 性能优化：当字段数量很大时，使用 for 循环比 forEach 性能更好
@@ -342,8 +448,10 @@ export default defineComponent({
         }
 
         if (logField && offsetWidth.value > maxColWidth) {
-          setColWidth(logField);
+          logField.width = getNumericWidth(logField.width, logField.minWidth);
         }
+
+        distributeExtraWidthToLongTextColumns(columnList);
 
         return columnList;
       }
@@ -371,8 +479,8 @@ export default defineComponent({
         align: 'center',
         resize: false,
         fixed: 'left',
-        renderBodyCell: ({ row }) => {
-          const config: RowConfig = tableRowConfig.get(row).value;
+        renderBodyCell: ({ row, rowIndex }) => {
+          const config: RowConfig = ensureTableRowConfig(row, rowIndex).value;
           return (
             <span class={['bklog-expand-icon', { 'is-expaned': config.expand }]}>
               <i
@@ -392,8 +500,8 @@ export default defineComponent({
         align: 'center',
         resize: false,
         class: tableShowRowIndex.value ? 'is-show' : 'is-hidden',
-        renderBodyCell: ({ row }) => {
-          return tableRowConfig.get(row).value[ROW_INDEX] + 1;
+        renderBodyCell: ({ row, rowIndex }) => {
+          return ensureTableRowConfig(row, rowIndex).value[ROW_INDEX] + 1;
         },
       },
       {
@@ -420,54 +528,16 @@ export default defineComponent({
       },
     ]);
 
-    const handleRowAIClcik = (e: MouseEvent, row: any) => {
-      const rowIndex = tableRowConfig.get(row).value[ROW_INDEX] + 1;
+    const handleRowAIClcik = (e: MouseEvent, row: any, rowIndex: number) => {
+      const displayRowIndex = ensureTableRowConfig(row, rowIndex).value[ROW_INDEX] + 1;
       const targetRow = (e.target as HTMLElement).closest('.bklog-row-container');
       const oldRow = targetRow?.parentElement.querySelector('.bklog-row-container.ai-active');
 
       oldRow?.classList.remove('ai-active');
       targetRow?.classList.add('ai-active');
 
-      props.handleClickTools('ai', row, indexSetOperatorConfig.value, rowIndex);
+      props.handleClickTools('ai', row, indexSetOperatorConfig.value, displayRowIndex);
     };
-
-    const rightColumns = computed(() => {
-      if (window?.__IS_MONITOR_TRACE__) {
-        return [];
-      }
-      return [
-        {
-          field: ROW_F_ORIGIN_OPT,
-          key: ROW_F_ORIGIN_OPT,
-          title: $t('操作'),
-          width: operatorToolsWidth.value,
-          fixed: 'right',
-          resize: false,
-          renderBodyCell: ({ row }) => {
-            return (
-              // @ts-expect-error
-              <OperatorTools
-                handle-click={(type, event) => {
-                  if (type === 'ai') {
-                    handleRowAIClcik(event, row);
-                    return;
-                  }
-                  props.handleClickTools(
-                    type,
-                    row,
-                    indexSetOperatorConfig.value,
-                    tableRowConfig.get(row).value[ROW_INDEX] + 1,
-                  );
-                }}
-                index={row[ROW_INDEX]}
-                operator-config={indexSetOperatorConfig.value}
-                row-data={row}
-              />
-            );
-          },
-        },
-      ];
-    });
 
     // 替换原有的handleIconClick
     const handleIconClick = (type, content, field, row, isLink, depth, isNestedField) => {
@@ -535,34 +605,35 @@ export default defineComponent({
       }, {});
     };
 
-    const updateTableRowConfig = (nextIdx = 0) => {
-      if (nextIdx >= 0) {
-        for (let index = nextIdx; index < tableDataSize.value; index++) {
-          const nextRow = tableList.value[index];
-          if (!tableRowConfig.has(nextRow)) {
-            const rowKey = `${ROW_KEY}_${index}`;
-            tableRowConfig.set(
-              nextRow,
-              ref({
-                [ROW_KEY]: rowKey,
-                [ROW_INDEX]: index,
-                ...getRowConfigWithCache(),
-              }),
-            );
-          }
-        }
+    const createRowConfigRef = (index: number) => {
+      const rowIndex = index >= 0 ? index : -1;
+      const rowKey = `${ROW_KEY}_${rowIndex}`;
+      return ref({
+        [ROW_KEY]: rowKey,
+        [ROW_INDEX]: rowIndex,
+        ...getRowConfigWithCache(),
+      });
+    };
+
+    const ensureTableRowConfig = (row, index: number) => {
+      if (!row) {
+        return createRowConfigRef(index);
       }
 
-      if (nextIdx === -1) {
-        for (let index = 0; index < tableDataSize.value; index++) {
-          const nextRow = tableList.value[index];
-          tableRowConfig.delete(nextRow);
-        }
+      let config = tableRowConfig.get(row);
+      if (!config) {
+        config = createRowConfigRef(index);
+        tableRowConfig.set(row, config);
+      } else if (index >= 0 && config.value[ROW_INDEX] !== index) {
+        config.value[ROW_INDEX] = index;
       }
+
+      return config;
     };
 
     const isRequesting = ref(false);
     let requestingTimer: any = null;
+    let skipNextLoadingEndReset = false;
 
     const debounceSetLoading = (delay = 120) => {
       requestingTimer && clearTimeout(requestingTimer);
@@ -572,9 +643,9 @@ export default defineComponent({
     };
 
     const expandOption = {
-      render: ({ row }) => {
-        const config = tableRowConfig.get(row);
-        const rowIndex = config.value[ROW_INDEX];
+      render: ({ row, rowIndex }) => {
+        const config = ensureTableRowConfig(row, rowIndex);
+        const realRowIndex = config.value[ROW_INDEX];
 
         // // 性能监控：记录展开渲染耗时
         // perfStart('log-rows:expand-render', {
@@ -595,7 +666,7 @@ export default defineComponent({
             data={row}
             kv-show-fields-list={kvShowFieldsList.value}
             list-data={row}
-            row-index={rowIndex}
+            row-index={realRowIndex}
             onValue-click={(type, content, isLink, field, depth, isNestedField) => {
               return handleIconClick(type, content, field, row, isLink, depth, isNestedField);
             }}
@@ -604,13 +675,26 @@ export default defineComponent({
       },
     };
 
-    const resetRowListState = (oldValSize?) => {
+    let syncResultBoxRectBeforeRender = () => {};
+    let scheduleFirstPageTableReveal = () => {};
+
+    const resetRowListState = () => {
+      const shouldWaitFirstPageLayout = isFirstPageLayoutPending.value && tableDataSize.value > 0;
+
+      if (shouldWaitFirstPageLayout) {
+        syncResultBoxRectBeforeRender();
+      }
+
       setRenderList(null);
       debounceSetLoading();
-      updateTableRowConfig(oldValSize ?? 0);
+      localUpdateCounter.value += 1;
 
-      if (tableDataSize.value <= 50) {
+      if (tableDataSize.value <= pageSize.value) {
         nextTick(RetrieveHelper.updateMarkElement.bind(RetrieveHelper));
+      }
+
+      if (shouldWaitFirstPageLayout) {
+        scheduleFirstPageTableReveal();
       }
     };
 
@@ -648,7 +732,7 @@ export default defineComponent({
 
 
     watch(
-      () => [tableShowRowIndex.value],
+      () => [tableShowRowIndex.value, isShowSourceField.value, indexSetType.value],
       () => {
         computeRect();
       },
@@ -692,8 +776,15 @@ export default defineComponent({
 
     watch(
       () => [tableDataSize.value],
-      (_, oldVal) => {
-        resetRowListState(oldVal?.[0]);
+      ([size]) => {
+        if (size === 0) {
+          resetPageState();
+          if (!isLoading.value) {
+            isFirstPageLayoutPending.value = false;
+          }
+        }
+
+        resetRowListState();
       },
       {
         immediate: true,
@@ -703,7 +794,7 @@ export default defineComponent({
     useResizeObserve(
       () => refResultRowBox.value,
       () => {
-        handleResultBoxResize();
+        handleResultBoxResize(!isColumnWidthChanging);
         RetrieveHelper.fire(RetrieveEvent.RESULT_ROW_BOX_RESIZE);
       },
       60,
@@ -712,9 +803,7 @@ export default defineComponent({
     addEvent(
       [
         RetrieveEvent.FAVORITE_WIDTH_CHANGE,
-        RetrieveEvent.LEFT_FIELD_SETTING_WIDTH_CHANGE,
         RetrieveEvent.FAVORITE_SHOWN_CHANGE,
-        RetrieveEvent.LEFT_FIELD_SETTING_SHOWN_CHANGE,
       ],
       handleResultBoxResize,
     );
@@ -723,7 +812,33 @@ export default defineComponent({
       refResultRowBox.value?.querySelector('.ai-active')?.classList.remove('ai-active');
     });
 
+    let isColumnWidthChanging = false;
+    let columnWidthChangeTimer: number;
+
+    const markColumnWidthChanging = () => {
+      isColumnWidthChanging = true;
+      window.clearTimeout(columnWidthChangeTimer);
+      columnWidthChangeTimer = window.setTimeout(() => {
+        isColumnWidthChanging = false;
+      }, 300);
+    };
+
+    const preserveHorizontalScrollAfterColumnResize = (preferredScrollLeft: number) => {
+      nextTick(() => {
+        requestAnimationFrame(() => {
+          computeRectSync(refResultRowBox.value);
+          const maxOffset = Math.max(0, scrollWidth.value - offsetWidth.value);
+          scrollXOffsetLeft = Math.min(preferredScrollLeft, maxOffset);
+          refScrollXBar.value?.scrollLeft(scrollXOffsetLeft);
+          setRowboxTransform();
+        });
+      });
+    };
+
     const handleColumnWidthChange = (w, col) => {
+      const prevScrollLeft = scrollXOffsetLeft;
+      markColumnWidthChanging();
+
       const width = w > 40 ? w : 40;
       const longFiels = visibleFields.value.filter(
         item => item.width >= 800 || item.field_name === 'log' || item.field_type === 'text',
@@ -761,6 +876,27 @@ export default defineComponent({
       });
 
       store.commit('updateVisibleFields', visibleFields.value);
+      preserveHorizontalScrollAfterColumnResize(prevScrollLeft);
+    };
+
+    const getPaginationResponseSize = (resp) => {
+      if (typeof resp?.length === 'number') {
+        return resp.length;
+      }
+
+      if (typeof resp?.size === 'number') {
+        return resp.size;
+      }
+
+      if (Array.isArray(resp)) {
+        return resp.length;
+      }
+
+      if (Array.isArray(resp?.data?.list)) {
+        return resp.data.list.length;
+      }
+
+      return null;
     };
 
     const loadMoreTableData = () => {
@@ -784,17 +920,21 @@ export default defineComponent({
 
       if (hasMoreList.value) {
         isRequesting.value = true;
+        isPaginationLoading.value = true;
+        skipNextLoadingEndReset = true;
         return store
           .dispatch('requestIndexSetQuery', { isPagination: true })
           .then((resp) => {
+            const responseSize = getPaginationResponseSize(resp);
             pageIndex.value += 1;
             handleResultBoxResize(false);
 
-            if (resp?.length !== pageSize.value) {
+            if (responseSize !== null && responseSize < pageSize.value) {
               hasMoreList.value = false;
             }
           })
           .finally(() => {
+            isPaginationLoading.value = false;
             debounceSetLoading(0);
             nextTick(RetrieveHelper.updateMarkElement.bind(RetrieveHelper));
           });
@@ -819,12 +959,46 @@ export default defineComponent({
 
     // 监听滚动条滚动位置
     // 判定是否需要拉取更多数据
-    const { offsetWidth, scrollWidth, computeRect, getScrollElement } = useLazyRender({
+    const { offsetWidth, scrollWidth, computeRect, computeRectSync, getScrollElement } = useLazyRender({
       loadMoreFn: loadMoreTableData,
       container: resultContainerIdSelector,
       rootElement: refRootElement,
       refLoadMoreElement,
     });
+
+    syncResultBoxRectBeforeRender = () => {
+      computeRectSync(refResultRowBox.value);
+      triggerColumnLayoutReflow();
+    };
+
+    scheduleFirstPageTableReveal = () => {
+      const token = firstPageLayoutToken;
+      nextTick(() => {
+        requestAnimationFrame(() => {
+          if (token !== firstPageLayoutToken || tableDataSize.value === 0) {
+            return;
+          }
+
+          computeRectSync(refResultRowBox.value);
+          triggerColumnLayoutReflow();
+
+          nextTick(() => {
+            requestAnimationFrame(() => {
+              if (token !== firstPageLayoutToken || tableDataSize.value === 0) {
+                return;
+              }
+
+              computeRectSync(refResultRowBox.value);
+              isFirstPageLayoutPending.value = false;
+              nextTick(() => {
+                computeRectSync(refResultRowBox.value);
+                setRowboxTransform();
+              });
+            });
+          });
+        });
+      });
+    };
 
     const setRowboxTransform = () => {
       if (refResultRowBox.value && refRootElement.value) {
@@ -832,12 +1006,6 @@ export default defineComponent({
         if (refTableHead.value) {
           refTableHead.value.style.setProperty('width', `${scrollWidth.value}px`);
           refTableHead.value.style.transform = `translateX(-${scrollXOffsetLeft}px)`;
-          const fixedRight = refTableHead.value?.querySelector(
-            '.bklog-list-row .bklog-row-cell.header-cell.right',
-          ) as HTMLElement;
-          if (fixedRight) {
-            fixedRight.style.transform = `translateX(${scrollXOffsetLeft}px)`;
-          }
         }
       }
     };
@@ -846,13 +1014,57 @@ export default defineComponent({
       return showCtxType.value === 'table' && scrollWidth.value > offsetWidth.value;
     });
 
+    const syncResultBoxLayout = () => {
+      nextTick(() => {
+        requestAnimationFrame(() => {
+          triggerColumnLayoutReflow();
+
+          nextTick(() => {
+            requestAnimationFrame(() => {
+              computeRectSync(refResultRowBox.value);
+              if (scrollWidth.value <= offsetWidth.value && scrollXOffsetLeft !== 0) {
+                scrollXOffsetLeft = 0;
+                refScrollXBar.value?.scrollLeft(0);
+              }
+              setRowboxTransform();
+            });
+          });
+        });
+      });
+    };
+
+    const handleFieldSettingLayoutChange = () => {
+      scrollXOffsetLeft = 0;
+      refScrollXBar.value?.scrollLeft(0);
+      computeRectSync(refResultRowBox.value);
+      syncResultBoxLayout();
+      layoutTimers.push(window.setTimeout(syncResultBoxLayout, 120));
+      layoutTimers.push(window.setTimeout(syncResultBoxLayout, 320));
+    };
+
+    addEvent(
+      [
+        RetrieveEvent.LEFT_FIELD_SETTING_WIDTH_CHANGE,
+        RetrieveEvent.LEFT_FIELD_SETTING_SHOWN_CHANGE,
+      ],
+      handleFieldSettingLayoutChange,
+    );
+
+    watch(
+      () => [offsetWidth.value, showCtxType.value],
+      ([width], [oldWidth]) => {
+        if (width !== oldWidth) {
+          syncResultBoxLayout();
+        }
+      },
+    );
+
     const isPreloading = ref(false);     // 是否正在预加载
     const preloadThreshold = 32 * 50;        // 距离底部多少 px 开始预加载
     let lastPreloadTime = 0;
     const preloadCooldown = 300;         // ms
 
     const shouldPreloadOnScrollDown = (event: WheelEvent) => {
-
       if (!hasMoreList.value) return false;
       if (isPreloading.value) return false;
 
@@ -868,14 +1080,19 @@ export default defineComponent({
       const clientHeight = scrollElement?.clientHeight ?? 0;
       const scrollHeight = scrollElement?.scrollHeight ?? 0;
       const distanceToBottom = scrollHeight - (scrollTop + clientHeight);
+      const shouldPreload = distanceToBottom <= preloadThreshold;
+      if (shouldPreload) {
+        lastPreloadTime = now;
+      }
 
-      return distanceToBottom <= preloadThreshold;
-    }
+      return shouldPreload;
+    };
 
     let isAnimating = false;
 
     useWheel({
       target: refRootElement,
+      options: { passive: false },
       callback: (event: WheelEvent) => {
         if (shouldPreloadOnScrollDown(event)) {
           isPreloading.value = true;
@@ -886,15 +1103,12 @@ export default defineComponent({
 
         const maxOffset = scrollWidth.value - offsetWidth.value;
 
-        // 检查是否按住 shift 键
         if (event.shiftKey) {
-          // 当按住 shift 键时，让 refScrollXBar 执行系统默认的横向滚动能力
           if (hasScrollX.value && refScrollXBar.value) {
+            event.preventDefault();
             event.stopPropagation();
             event.stopImmediatePropagation();
-            event.preventDefault();
 
-            // 使用系统默认的滚动行为，通过 refScrollXBar 执行横向滚动
             const currentScrollLeft = refScrollXBar.value.getScrollLeft?.() || 0;
             const scrollStep = event.deltaY || event.deltaX;
             const newScrollLeft = Math.max(0, Math.min(maxOffset, currentScrollLeft + scrollStep));
@@ -907,16 +1121,16 @@ export default defineComponent({
         }
 
         if (event.deltaX !== 0 && hasScrollX.value) {
+          event.preventDefault();
           event.stopPropagation();
           event.stopImmediatePropagation();
-          event.preventDefault();
           if (!isAnimating) {
             isAnimating = true;
             requestAnimationFrame(() => {
               isAnimating = false;
-              const nextOffset = scrollXOffsetLeft + event.deltaX;
-              if (nextOffset <= maxOffset && nextOffset >= 0) {
-                scrollXOffsetLeft += event.deltaX;
+              const nextOffset = Math.max(0, Math.min(maxOffset, scrollXOffsetLeft + event.deltaX));
+              if (nextOffset !== scrollXOffsetLeft) {
+                scrollXOffsetLeft = nextOffset;
                 setRowboxTransform();
                 refScrollXBar.value?.scrollLeft(nextOffset);
               }
@@ -926,31 +1140,52 @@ export default defineComponent({
       },
     });
 
-    const operatorFixRightWidth = computed(() => {
-      const operatorWidth = operatorToolsWidth.value;
-      const diff = scrollWidth.value - scrollXOffsetLeft - offsetWidth.value;
-
-      return operatorWidth + (diff > 0 ? diff : 0);
-    });
-
-    watch(
-      () => [operatorFixRightWidth.value, offsetWidth.value, scrollWidth.value],
-      () => {
-        setRowboxTransform();
-      },
-      { immediate: true },
-    );
 
     const showHeader = computed(() => {
       return showCtxType.value === 'table' && tableList.value.length > 0;
     });
 
+    const hasResultException = computed(() => {
+      const rawExceptionMsg = indexSetQueryResult.value?.exception_msg ?? '';
+      return indexSetQueryResult.value?.is_error || (!!rawExceptionMsg && !/^cancel$/gi.test(rawExceptionMsg));
+    });
+
+    /**
+     * 字段信息重新加载期间 visibleFields 会被清空。
+     * monitor 独立包切换 timeRange 时，字段接口返回前如果继续渲染旧 renderList，
+     * 表格会只剩固定列（序号/操作列），形成错误中间态。这里仅在字段加载中接管为首屏骨架屏，
+     * 字段加载完成后的错误/空态仍交给 LogResultException 渲染。
+     */
+    const isFieldLoadingForFirstPage = computed(() => {
+      return indexFieldInfo.value.is_loading && visibleFields.value.length === 0;
+    });
+
+    const shouldEnterFirstPageSkeleton = computed(() => {
+      return (
+        !hasResultException.value
+        && !isPaginationLoading.value
+        && tableDataSize.value === 0
+        && (isLoading.value || isPageLoading.value || isRequesting.value)
+      );
+    });
+
+    const shouldShowFirstPageSkeleton = computed(() => {
+      if (hasResultException.value || isPaginationLoading.value) {
+        return false;
+      }
+
+      return shouldEnterFirstPageSkeleton.value || isFieldLoadingForFirstPage.value || isFirstPageLayoutPending.value;
+    });
+
+    const shouldBlockTableRender = computed(() => {
+      return shouldShowFirstPageSkeleton.value;
+    });
+
     const renderHeadVNode = () => {
-      if (isFirstPageLoading.value) {
+      if (shouldBlockTableRender.value) {
         return null;
       }
 
-      const columnLength = allColumns.value.length;
       let hasFullWidth = false;
 
       return (
@@ -959,12 +1194,10 @@ export default defineComponent({
           class={['bklog-row-container row-header']}
         >
           <div class='bklog-list-row'>
-            {allColumns.value.map((column, index) => {
-              const cellStyle = getColumnWidth(
-                column,
-                !hasFullWidth && (column.width === '100%' || index === columnLength - 2),
-              );
-              hasFullWidth = hasFullWidth || column.width === '100%' || index === columnLength - 2;
+            {allColumns.value.map((column) => {
+              const isFullWidthColumn = !hasFullWidth && column.width === '100%';
+              const cellStyle = getColumnWidth(column, isFullWidthColumn);
+              hasFullWidth = hasFullWidth || column.width === '100%';
 
               return (
                 <LogCell
@@ -1011,14 +1244,119 @@ export default defineComponent({
     };
 
     const allColumns = computed(() => {
-      return [...leftColumns.value, ...getFieldColumns.value, ...rightColumns.value].filter(
+      return [...leftColumns.value, ...getFieldColumns.value].filter(
         item => !(item as any).disabled,
       );
     });
 
+    const clearHoverOperatorHideTimer = () => {
+      if (hoverOperatorHideTimer) {
+        clearTimeout(hoverOperatorHideTimer);
+        hoverOperatorHideTimer = null;
+      }
+    };
+
+    const scheduleHideHoverOperator = () => {
+      clearHoverOperatorHideTimer();
+      hoverOperatorHideTimer = setTimeout(() => {
+        if (hoverOperatorState.interacting) {
+          return;
+        }
+        hoverOperatorState.visible = false;
+      }, 80);
+    };
+
+    const activateHoverOperator = () => {
+      hoverOperatorState.interacting = true;
+      clearHoverOperatorHideTimer();
+    };
+
+    const deactivateHoverOperator = () => {
+      hoverOperatorState.interacting = false;
+      scheduleHideHoverOperator();
+    };
+
+    const updateHoverOperatorPosition = (rowEl: HTMLElement) => {
+      const rootEl = refRootElement.value;
+      if (!rootEl || !rowEl) {
+        return;
+      }
+
+      const rootRect = rootEl.getBoundingClientRect();
+      const rowRect = rowEl.getBoundingClientRect();
+      const rowPaddingTop = 4;
+      const rowPaddingRight = 12;
+
+      /**
+       * Keep the product motion translate(0, -32px) unchanged.
+       * Render the operator as a fixed overlay so it can move above the first row without being clipped by
+       * .bklog-result-container overflow hidden. Do not clamp the anchor downward: that would make the
+       * floating actions cover the row text and steal text click/selection interactions.
+       */
+      hoverOperatorState.top = rowRect.top + rowPaddingTop;
+      hoverOperatorState.right = Math.max(
+        rowPaddingRight,
+        window.innerWidth - Math.min(rootRect.right, window.innerWidth) + rowPaddingRight,
+      );
+    };
+
+    const handleRowMouseenter = (event: MouseEvent, row, rowIndex: number) => {
+      clearHoverOperatorHideTimer();
+      hoverOperatorState.interacting = false;
+      hoverOperatorState.row = row;
+      hoverOperatorState.rowIndex = rowIndex;
+      hoverOperatorState.visible = !window?.__IS_MONITOR_TRACE__;
+      updateHoverOperatorPosition(event.currentTarget as HTMLElement);
+    };
+
+    const handleRowMouseleave = () => {
+      scheduleHideHoverOperator();
+    };
+
+    const renderHoverOperatorOverlay = () => {
+      if (!hoverOperatorState.row || window?.__IS_MONITOR_TRACE__) {
+        return null;
+      }
+
+      return (
+        <div
+          class={{
+            'bklog-row-hover-operator': true,
+            'is-show': hoverOperatorState.visible,
+          }}
+          style={{
+            top: `${hoverOperatorState.top}px`,
+            right: `${hoverOperatorState.right}px`,
+          }}
+          onFocusin={activateHoverOperator}
+          onFocusout={deactivateHoverOperator}
+          onMouseenter={activateHoverOperator}
+          onMouseleave={deactivateHoverOperator}
+        >
+          {/** @ts-expect-error */}
+          <OperatorTools
+            handle-click={(type, event) => {
+              if (type === 'ai') {
+                handleRowAIClcik(event, hoverOperatorState.row, hoverOperatorState.rowIndex);
+                return;
+              }
+              props.handleClickTools(
+                type,
+                hoverOperatorState.row,
+                indexSetOperatorConfig.value,
+                ensureTableRowConfig(hoverOperatorState.row, hoverOperatorState.rowIndex).value[ROW_INDEX] + 1,
+              );
+            }}
+            index={hoverOperatorState.row[ROW_INDEX]}
+            operator-config={indexSetOperatorConfig.value}
+            row-data={hoverOperatorState.row}
+          />
+        </div>
+      );
+    };
+
     const renderRowCells = (row, rowIndex) => {
-      const { expand } = tableRowConfig.get(row).value;
-      const columnLength = allColumns.value.length;
+      const { expand } = ensureTableRowConfig(row, rowIndex).value;
       let hasFullWidth = false;
 
       return [
@@ -1028,12 +1366,10 @@ export default defineComponent({
           data-row-index={rowIndex}
           data-row-click
         >
-          {allColumns.value.map((column, index) => {
-            const cellStyle = getColumnWidth(
-              column,
-              !hasFullWidth && (column.width === '100%' || index === columnLength - 2),
-            );
-            hasFullWidth = hasFullWidth || column.width === '100%' || index === columnLength - 2;
+          {allColumns.value.map((column) => {
+            const isFullWidthColumn = !hasFullWidth && column.width === '100%';
+            const cellStyle = getColumnWidth(column, isFullWidthColumn);
+            hasFullWidth = hasFullWidth || column.width === '100%';
 
             return (
               <div
@@ -1046,11 +1382,13 @@ export default defineComponent({
             );
           })}
         </div>,
-        expand ? expandOption.render({ row }) : '',
+        expand ? expandOption.render({ row, rowIndex }) : '',
       ];
     };
 
     const handleRowMousedown = (e: MouseEvent) => {
+      mousedownOnRow = true;
+
       if (RetrieveHelper.isClickOnSelection(e, 2)) {
         RetrieveHelper.stopEventPropagation(e);
         return;
@@ -1060,7 +1398,19 @@ export default defineComponent({
       savedSelection = null;
     };
 
-    const handleRowMouseup = (e: MouseEvent, item: any) => {
+    const handleRowMouseup = (e: MouseEvent, item: any, rowIndex: number) => {
+      if (!mousedownOnRow) {
+        RetrieveHelper.setMousedownEvent(null);
+        return;
+      }
+      // 选中文本不弹出复制等选项框
+      if (window.__IS_MONITOR_TRACE__ && window.getSelection().toString().length > 1) {
+        RetrieveHelper.setMousedownEvent(null);
+        return;
+      }
+
+      mousedownOnRow = false;
+
       if (RetrieveHelper.isClickOnSelection(e, 2) || RetrieveHelper.isMouseSelectionUpEvent(e)) {
         RetrieveHelper.stopEventPropagation(e);
         RetrieveHelper.setMousedownEvent(null);
@@ -1076,12 +1426,14 @@ export default defineComponent({
       const expandCell = target.closest('.bklog-row-observe')?.querySelector('.expand-view-wrapper');
 
       if (target.classList.contains('valid-text') || expandCell?.contains(target)) {
+        RetrieveHelper.setMousedownEvent(null);
         return;
       }
 
-      const config: RowConfig = tableRowConfig.get(item).value;
+      const config: RowConfig = ensureTableRowConfig(item, rowIndex).value;
       const isExpanding = !config.expand;
       config.expand = isExpanding;
+      RetrieveHelper.setMousedownEvent(null);
 
       // 性能监控：记录展开/收起操作的耗时
       // if (isExpanding) {
@@ -1104,7 +1456,7 @@ export default defineComponent({
     };
 
     const renderRowVNode = () => {
-      if (isFirstPageLoading.value) {
+      if (shouldBlockTableRender.value) {
         return null;
       }
 
@@ -1114,10 +1466,18 @@ export default defineComponent({
         return [
           <RowRender
             key={row[ROW_KEY]}
-            class={['bklog-row-container', logLevel ?? 'normal']}
+            class={[
+              'bklog-row-container',
+              logLevel ?? 'normal',
+              {
+                'is-hover-operator-active': hoverOperatorState.visible && hoverOperatorState.rowIndex === rowIndex,
+              },
+            ]}
             row-index={rowIndex}
             on-row-mousedown={handleRowMousedown}
-            on-row-mouseup={e => handleRowMouseup(e, row.item)}
+            on-row-mouseenter={e => handleRowMouseenter(e, row.item, rowIndex)}
+            on-row-mouseleave={handleRowMouseleave}
+            on-row-mouseup={e => handleRowMouseup(e, row.item, rowIndex)}
           >
             {renderRowCells(row.item, rowIndex)}
           </RowRender>,
@@ -1142,11 +1502,11 @@ export default defineComponent({
     };
 
     const loadingText = computed(() => {
-      if (isLoading.value && !isRequesting.value) {
+      if (isLoading.value && !isRequesting.value && !isPaginationLoading.value) {
         return '';
       }
 
-      if (hasMoreList.value && (isLoading.value || isRending.value)) {
+      if (hasMoreList.value && (isLoading.value || isRending.value || isPaginationLoading.value)) {
         return 'Loading ...';
       }
 
@@ -1188,6 +1548,30 @@ export default defineComponent({
       },
     );
 
+    watch(
+      () => indexSetQueryResult.value.is_loading,
+      (newVal, oldVal) => {
+        if (oldVal && !newVal) {
+          if (tableDataSize.value === 0) {
+            isFirstPageLayoutPending.value = false;
+          }
+
+          if (skipNextLoadingEndReset) {
+            skipNextLoadingEndReset = false;
+            return;
+          }
+
+          if (!isRequesting.value) {
+            nextTick(() => {
+              scrollXOffsetLeft = 0;
+              refScrollXBar.value?.scrollLeft(0);
+              computeRect(refResultRowBox.value);
+            });
+          }
+        }
+      },
+    );
+
     const renderLoader = () => {
       return (
         <div
@@ -1199,26 +1583,22 @@ export default defineComponent({
       );
     };
 
-    const renderFixRightShadow = () => {
-      if (window?.__IS_MONITOR_TRACE__) {
-        return null;
-      }
-      if (tableDataSize.value > 0 && showCtxType.value === 'table') {
-        return <div class='fixed-right-shadown' />;
-      }
-
-      return null;
-    };
 
     const isTableLoading = computed(() => {
       return (
-        tableDataSize.value === 0 && (isRequesting.value || isRending.value || isPageLoading.value || isLoading.value)
+        !shouldShowFirstPageSkeleton.value
+        && tableDataSize.value === 0
+        && (isRequesting.value || isRending.value || isPageLoading.value || isLoading.value)
       );
     });
 
     // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: reason
     const exceptionType = computed(() => {
       if (tableDataSize.value === 0 || indexFieldInfo.value.is_loading) {
+        if (shouldShowFirstPageSkeleton.value) {
+          return 'hidden';
+        }
+
         if (isRequesting.value || isLoading.value || isPageLoading.value) {
           return 'loading';
         }
@@ -1242,10 +1622,31 @@ export default defineComponent({
     });
 
     const getExceptionRender = () => {
+      if (shouldShowFirstPageSkeleton.value) {
+        return null;
+      }
+
       return (
         <LogResultException
           message={exceptionMsg.value}
           type={exceptionType.value}
+        />
+      );
+    };
+
+    const renderFirstPageSkeleton = () => {
+      if (!shouldShowFirstPageSkeleton.value) {
+        return null;
+      }
+
+      return (
+        <RetrieveLoader
+          class='bklog-first-page-skeleton'
+          isLoading={true}
+          isOriginalField={showCtxType.value !== 'table'}
+          maxLength={12}
+          static={true}
+          visibleFields={visibleFields.value.length ? visibleFields.value : fullColumns.value}
         />
       );
     };
@@ -1255,8 +1656,16 @@ export default defineComponent({
     };
 
     onBeforeUnmount(() => {
+      clearHoverOperatorHideTimer();
       popInstanceUtil.uninstallInstance();
-      resetRowListState(-1);
+      window.clearTimeout(columnWidthChangeTimer);
+      requestingTimer && clearTimeout(requestingTimer);
+      while (layoutTimers.length) {
+        clearTimeout(layoutTimers.pop());
+      }
+      hoverOperatorState.visible = false;
+      hoverOperatorState.row = null;
+      renderList = Object.freeze([]);
     });
 
     return {
@@ -1265,11 +1674,12 @@ export default defineComponent({
       isTableLoading,
       renderDelineatePopContent,
       renderRowVNode,
-      renderFixRightShadow,
       renderScrollTop,
       renderScrollXBar,
       renderLoader,
       renderHeadVNode,
+      renderHoverOperatorOverlay,
+      renderFirstPageSkeleton,
       getExceptionRender,
       tableDataSize,
       resultContainerId,
@@ -1295,8 +1705,9 @@ export default defineComponent({
         >
           {this.renderRowVNode()}
         </div>
+        {this.renderHoverOperatorOverlay()}
+        {this.renderFirstPageSkeleton()}
         {this.getExceptionRender()}
-        {this.renderFixRightShadow()}
         {this.renderScrollXBar()}
         {this.renderLoader()}
         {this.renderScrollTop()}

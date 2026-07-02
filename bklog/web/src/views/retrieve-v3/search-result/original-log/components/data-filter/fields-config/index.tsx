@@ -31,6 +31,8 @@ import useLocale from '@/hooks/use-locale';
 import useStore from '@/hooks/use-store';
 import VueDraggable from 'vuedraggable';
 
+import { getDefaultDisplayFields } from './default-display-fields';
+
 import './index.scss';
 
 export default defineComponent({
@@ -44,13 +46,13 @@ export default defineComponent({
 
     const fieldConfigRef = ref();
     const displayFieldNames = ref<string[]>([]); // 展示的字段名
+    let cachedDisplayFieldNames: string[] = []; // 缓存的字段名，用于取消时恢复
     const confirmLoading = ref(false);
 
     const totalFiels = computed(() => store.state.indexFieldInfo.fields);
-    const totalFieldNames = computed(() => totalFiels.value.map(item => item.field_name));
-    const restFieldNames = computed(() => totalFieldNames.value.filter((field) => {
-      return !displayFieldNames.value.includes(field);
-    }),
+    const restFieldNames = computed(() => totalFiels.value
+      .map(item => item.field_name)
+      .filter(field => !displayFieldNames.value.includes(field)),
     );
     const disabledRemove = computed(() => displayFieldNames.value.length <= 1);
 
@@ -64,10 +66,8 @@ export default defineComponent({
     watch(
       () => store.state.retrieve.catchFieldCustomConfig,
       (config) => {
-        const fields = config.contextDisplayFields;
-        if (fields?.length > 0) {
-          displayFieldNames.value = fields.filter(f => totalFieldNames.value.includes(f));
-        }
+        displayFieldNames.value = getDefaultDisplayFields(store, config.contextDisplayFields);
+        cachedDisplayFieldNames = [...displayFieldNames.value];
 
         setTimeout(() => {
           emit('success', displayFieldNames.value);
@@ -100,6 +100,7 @@ export default defineComponent({
         })
         .then(() => {
           messageSuccess(t('设置成功'));
+          cachedDisplayFieldNames = [...displayFieldNames.value];
           emit('success', displayFieldNames.value);
         })
         .finally(() => {
@@ -108,6 +109,7 @@ export default defineComponent({
     };
 
     const handleCancel = () => {
+      displayFieldNames.value = [...cachedDisplayFieldNames];
       emit('cancel');
     };
 

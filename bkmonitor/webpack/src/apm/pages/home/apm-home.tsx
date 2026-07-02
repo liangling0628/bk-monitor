@@ -102,6 +102,8 @@ export default class AppList extends tsc<undefined> {
 
   // 用于接入服务抽屉的appName
   serviceAddSideAppName = '';
+  // 用于接入服务抽屉的applicationId
+  serviceAddSideApplicationId: number | string = '';
 
   get appData() {
     return this.originalAppList?.find(item => item.app_name === this.appName);
@@ -248,8 +250,8 @@ export default class AppList extends tsc<undefined> {
     try {
       const queryString = item.url.split('?')[1];
       const params = new URLSearchParams(queryString);
-      // 获取 filter-app_name 的值
-      const appName = params.get('filter-app_name');
+      // 获取 app_name 的值
+      const appName = params.get('app_name');
       const app = this.appList.find(app => app.app_name === appName);
       // 新版首页最近使用埋点
       addAccessRecord({
@@ -281,16 +283,23 @@ export default class AppList extends tsc<undefined> {
   }
 
   // 新建应用成功
-  handleAddAppSuccess(appName: string) {
+  handleAddAppSuccess(appName: string, appId: number | string) {
     this.appName = appName;
     this.serviceAddSideAppName = appName;
+    this.serviceAddSideApplicationId = appId;
     this.getAppList();
     this.isShowServiceAdd = true;
   }
 
   // 接入服务抽屉显隐
   handleServiceAddSideShow(v: boolean) {
-    this.serviceAddSideAppName = this.appName;
+    if (v) {
+      this.serviceAddSideAppName = this.appName;
+      this.serviceAddSideApplicationId = this.appData?.application_id || '';
+    } else {
+      this.serviceAddSideAppName = '';
+      this.serviceAddSideApplicationId = '';
+    }
     this.isShowServiceAdd = v;
   }
 
@@ -360,6 +369,7 @@ export default class AppList extends tsc<undefined> {
 
     if (id === 'accessService') {
       this.serviceAddSideAppName = row.app_name;
+      this.serviceAddSideApplicationId = row.application_id;
       this.isShowServiceAdd = true;
       return;
     }
@@ -444,7 +454,7 @@ export default class AppList extends tsc<undefined> {
                 onSuccess={this.handleAddAppSuccess}
               />
               <ServiceAddSide
-                applicationId={this.serviceAddSideAppData?.application_id}
+                applicationId={this.serviceAddSideApplicationId}
                 appName={this.serviceAddSideAppName?.toString()}
                 isShow={this.isShowServiceAdd}
                 onSidesliderShow={v => this.handleServiceAddSideShow(v)}

@@ -29,6 +29,7 @@ import { Component as tsc } from 'vue-tsx-support';
 
 import { TABLE_LOG_FIELDS_SORT_REGULAR, getRegExp } from '@/common/util';
 import { builtInInitHiddenList } from '@/const/index.js';
+import { isFeatureToggleOn } from '@/hooks/use-feature-toggle';
 import VueDraggable from 'vuedraggable';
 
 import EmptyStatus from '../../../components/empty-status/index.vue';
@@ -72,7 +73,8 @@ export default class FieldFilterComp extends tsc<object> {
 
   isShowErrInfo = false;
   get errInfo() {
-    const key = 'retrieve/getLogTableHead';
+    const isScene = this.$store.getters.isSceneMode;
+    const key = isScene ? 'retrieve/getSceneFields' : 'retrieve/getLogTableHead';
     return this.$store.state.apiErrorInfo[key] || '';
   }
   /** 可选字段 */
@@ -300,10 +302,9 @@ export default class FieldFilterComp extends tsc<object> {
         isFront = true;
         break;
       default: {
-        const { scenario_id_white_list: scenarioIdWhiteList } = (window as any).FIELD_ANALYSIS_CONFIG;
-        const { field_analysis_config: fieldAnalysisConfig } = (window as any).FEATURE_TOGGLE_WHITE_LIST;
+        const { scenario_id_white_list: scenarioIdWhiteList } = (window as any).FIELD_ANALYSIS_CONFIG || {};
         const scenarioID = this.indexSetItem.items?.[0]?.scenario_id;
-        isFront = !(scenarioIdWhiteList?.includes(scenarioID) && fieldAnalysisConfig?.includes(Number(this.bkBizId)));
+        isFront = !(scenarioIdWhiteList?.includes(scenarioID) && isFeatureToggleOn('field_analysis_config', this.bkBizId));
         break;
       }
     }

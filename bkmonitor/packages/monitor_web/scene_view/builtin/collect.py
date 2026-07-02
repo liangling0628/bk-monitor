@@ -26,6 +26,7 @@ from monitor_web.plugin.constant import PluginType
 from monitor_web.plugin.manager import PluginManagerFactory
 from monitor_web.scene_view.builtin import BuiltinProcessor
 from monitor_web.scene_view.builtin.utils import get_variable_filter_dict, sort_panels
+from monitor_web.strategies.metric_cache.process_dimensions import get_process_extra_dimensions
 
 
 def get_order_config(view: SceneViewModel) -> list:
@@ -119,6 +120,11 @@ def get_panels(view: SceneViewModel) -> list[dict]:
         if metric_cache:
             dimensions = [dimension["id"] for dimension in metric_cache.dimensions]
             data_label = metric_cache.data_label
+            # 进程采集：补全用户「维度提取」(extract_pattern) 出的、不在静态指标缓存里的维度（如 process）
+            extra_dims = get_process_extra_dimensions(bk_tenant_id, view.bk_biz_id, {table_id}).get(table_id)
+            if extra_dims:
+                existing = set(dimensions)
+                dimensions += [d["id"] for d in extra_dims if d["id"] not in existing]
         else:
             dimensions = []
             data_label = table_id.split(".")[0]
@@ -237,6 +243,48 @@ def get_panels(view: SceneViewModel) -> list[dict]:
                     }
                 )
     return panels
+
+
+def get_simple_panel_count(view: SceneViewModel) -> int:
+    """
+    获取简化场景下的图表数量。
+
+    用于 SceneViewList 仅请求基础信息时，避免为计算 panel_count
+    触发完整面板渲染和 MetricListCache 查询。
+
+    仅支持 collect_* 和 plugin_* 场景的精确计数；其他场景类型（如
+    custom_event_*、custom_metric_* 等）不展示 panel_count，直接返回 0。
+    """
+    bk_tenant_id = get_request_tenant_id()
+    if view.scene_id.startswith("collect_"):
+        collect_config_id = int(view.scene_id.lstrip("collect_"))
+        collect_config = CollectConfigMeta.objects.get(bk_biz_id=view.bk_biz_id, id=collect_config_id)
+        plugin = collect_config.plugin
+    elif view.scene_id.startswith("plugin_"):
+        plugin_id = view.scene_id.split("plugin_", 1)[-1]
+        plugin = CollectorPluginMeta.objects.get(
+            bk_tenant_id=bk_tenant_id, plugin_id=plugin_id, bk_biz_id__in=[0, view.bk_biz_id]
+        )
+        collect_config = CollectConfigMeta.objects.filter(plugin_id=plugin_id, bk_biz_id=view.bk_biz_id).first()
+    else:
+        return 0
+
+    if not collect_config:
+        return 0
+
+    if plugin.plugin_type == CollectorPluginMeta.PluginType.PROCESS:
+        metric_json = PluginManagerFactory.get_manager(
+            bk_tenant_id=bk_tenant_id, plugin=plugin.plugin_id, plugin_type=plugin.plugin_type
+        ).gen_metric_info()
+    else:
+        metric_json = collect_config.deployment_config.metrics
+
+    return sum(
+        1
+        for table in metric_json
+        for field in table["fields"]
+        if field["is_active"] and field["monitor_type"] == "metric"
+    )
 
 
 class CollectBuiltinProcessor(BuiltinProcessor):
@@ -438,8 +486,24 @@ class CollectBuiltinProcessor(BuiltinProcessor):
         return view
 
     @classmethod
-    def get_view_config(cls, view: SceneViewModel, *args, **kwargs) -> dict:
+    def get_view_config(cls, view: SceneViewModel, params: dict = None, *args, **kwargs) -> dict:
+        params = params or {}
         default_config = cls.get_default_view_config(view.bk_biz_id, view.scene_id)
+
+        if params.get("only_simple_info"):
+            options = default_config["options"]
+            options.update({key: value for key, value in view.options.items() if key in cls.OptionFields})
+            return {
+                "id": view.id,
+                "name": view.name,
+                "mode": default_config["mode"],
+                "variables": view.variables,
+                "order": [],
+                "panels": [{"type": "graph"} for _ in range(get_simple_panel_count(view))],
+                "list": [],
+                "options": options,
+            }
+
         panels, order = cls.get_auto_view_panels(view)
 
         # 如果插件视角的视图，则需要添加采集配置变量

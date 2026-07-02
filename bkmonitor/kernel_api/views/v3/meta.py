@@ -179,6 +179,26 @@ class QueryTimeSeriesGroupViewSet(MetaViewSet):
     resource_routes = [ResourceRoute("GET", resource.QueryTimeSeriesGroupResource)]
 
 
+class QueryTimeSeriesMetricViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("POST", resource.QueryTimeSeriesMetricResource)]
+
+
+class CreateOrUpdateTimeSeriesMetricViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("POST", resource.CreateOrUpdateTimeSeriesMetricResource)]
+
+
+class CreateOrUpdateTimeSeriesScopeViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("POST", resource.CreateOrUpdateTimeSeriesScopeResource)]
+
+
+class DeleteTimeSeriesScopeViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("POST", resource.DeleteTimeSeriesScopeResource)]
+
+
+class QueryTimeSeriesScopeViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("POST", resource.QueryTimeSeriesScopeResource)]
+
+
 class QueryTagValuesViewSet(MetaViewSet):
     resource_routes = [ResourceRoute("GET", resource.QueryTagValuesResource)]
 
@@ -247,8 +267,16 @@ class CreateResultTableSnapshotViewSet(MetaViewSet):
     resource_routes = [ResourceRoute("POST", resource.CreateResultTableSnapshotResource)]
 
 
+class BulkCreateResultTableSnapshotViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("POST", resource.BulkCreateResultTableSnapshotResource)]
+
+
 class ModifyResultTableSnapshotViewSet(MetaViewSet):
     resource_routes = [ResourceRoute("POST", resource.ModifyResultTableSnapshotResource)]
+
+
+class BulkModifyResultTableSnapshotViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("POST", resource.BulkModifyResultTableSnapshotResource)]
 
 
 class DeleteResultTableSnapshotViewSet(MetaViewSet):
@@ -402,6 +430,10 @@ class QueryDataLinkMetadataViewSet(MetaViewSet):
     resource_routes = [ResourceRoute("GET", resource.QueryDataLinkMetadataResource)]
 
 
+class GetDataLinkMetadataViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("GET", resource.GetDataLinkMetadataResource)]
+
+
 class SpaceDataLinkMetaReportViewSet(MetaViewSet):
     resource_routes = [ResourceRoute("GET", resource.SpaceDataLinkMetaReport)]
 
@@ -412,6 +444,10 @@ class IntelligentDiagnosisMetadataViewSet(MetaViewSet):
 
 class QueryDataIdsByBizIdViewSet(MetaViewSet):
     resource_routes = [ResourceRoute("GET", resource.QueryDataIdsByBizIdResource)]
+
+
+class BizHasDataIdViewSet(MetaViewSet):
+    resource_routes = [ResourceRoute("GET", resource.BizHasDataIdResource)]
 
 
 class GetBCSClusterRelatedDataLinkViewSet(MetaViewSet):

@@ -23,10 +23,9 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-window.__IS_MONITOR_COMPONENT__ = true;
-window.__IS_MONITOR_TRACE__ = false;
-window.__IS_MONITOR_APM__ = true;
+
 import Vue from 'vue';
+import LogIcon from '@/components/log-icon';
 
 import i18n from '@/language/i18n';
 if (!window.mainComponent?.$t) {
@@ -47,5 +46,11 @@ const initMonitorState = payload => {
 };
 const initGlobalComponents = () => {
   Vue.component('JsonFormatWrapper', JsonFormatWrapper);
+  Vue.component('LogIcon', LogIcon);
 };
-export { MonitorApmLog, logStore, i18n, initMonitorState, initGlobalComponents };
+const initWindowState = () => {
+  window.__IS_MONITOR_COMPONENT__ = true;
+  window.__IS_MONITOR_TRACE__ = false;
+  window.__IS_MONITOR_APM__ = true;
+}
+export { MonitorApmLog, logStore, i18n, initMonitorState, initGlobalComponents, initWindowState };

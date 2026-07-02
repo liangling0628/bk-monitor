@@ -17,6 +17,7 @@ from django.conf import settings
 from django.db.models import Q
 from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
+from bkm_space.api import SpaceApi
 from bkmonitor.utils.tenant import get_tenant_datalink_biz_id, get_tenant_default_biz_id
 from constants.data_source import DATA_LINK_V3_VERSION_NAME, DATA_LINK_V4_VERSION_NAME
 from core.drf_resource import api
@@ -25,6 +26,7 @@ from metadata.models import (
     AccessVMRecord,
     BCSClusterInfo,
     BcsFederalClusterInfo,
+    BkBaseResultTable,
     ClusterInfo,
     DataSource,
     DataSourceOption,
@@ -35,7 +37,7 @@ from metadata.models.data_link.utils import (
     compose_bkdata_data_id_name,
     compose_bkdata_table_id,
 )
-from metadata.models.space.constants import EtlConfigs
+from metadata.models.space.constants import EtlConfigs, SpaceTypes
 from metadata.models.vm.bk_data import BkDataAccessor, access_vm
 from metadata.models.vm.config import BkDataStorageWithDataID
 from metadata.models.vm.constants import (
@@ -46,6 +48,61 @@ from metadata.models.vm.constants import (
 )
 
 logger = logging.getLogger("metadata")
+
+
+def _get_configured_bkbase_result_table(
+    bk_tenant_id: str,
+    monitor_table_id: str,
+    data_link_strategy: str,
+) -> BkBaseResultTable | None:
+    """
+    从 BkBaseResultTable 查找当前 RT 已配置的 DataLink 关联。
+
+    同一个 monitor_table_id 可能同时存在标准链路和联邦链路记录，因此优先选择
+    DataLink 策略匹配的记录；若只有孤立 BkBaseResultTable 记录，则允许上层复用
+    该 data_link_name 补齐 DataLink。
+    """
+    candidates = list(
+        BkBaseResultTable.objects.filter(
+            bk_tenant_id=bk_tenant_id,
+            monitor_table_id=monitor_table_id,
+        )
+        .exclude(data_link_name="")
+        .order_by("-last_modify_time", "-create_time")
+    )
+    if not candidates:
+        return None
+
+    data_link_names = [candidate.data_link_name for candidate in candidates]
+    data_link_strategies = {
+        data_link_name: strategy
+        for data_link_name, strategy in DataLink.objects.filter(
+            bk_tenant_id=bk_tenant_id,
+            data_link_name__in=data_link_names,
+        ).values_list("data_link_name", "data_link_strategy")
+    }
+    for candidate in candidates:
+        if data_link_strategies.get(candidate.data_link_name) == data_link_strategy:
+            return candidate
+
+    orphan_candidates = [candidate for candidate in candidates if candidate.data_link_name not in data_link_strategies]
+    if len(orphan_candidates) == 1:
+        return orphan_candidates[0]
+
+    logger.warning(
+        "get_configured_bkbase_result_table: table_id->[%s] has BkBaseResultTable records but no safe "
+        "data_link_strategy match, strategy->[%s], candidates->[%s]",
+        monitor_table_id,
+        data_link_strategy,
+        [
+            {
+                "data_link_name": candidate.data_link_name,
+                "data_link_strategy": data_link_strategies.get(candidate.data_link_name),
+            }
+            for candidate in candidates
+        ],
+    )
+    return None
 
 
 def refine_bkdata_kafka_info(bk_tenant_id: str):
@@ -385,9 +442,13 @@ def get_vm_cluster_id_name(
 
     # vm 集群名称存在
     if vm_cluster_name:
-        cluster = ClusterInfo.objects.filter(
-            bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_VM, cluster_name=vm_cluster_name
-        ).first()
+        cluster = (
+            ClusterInfo.objects.filter(
+                bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_VM, cluster_name=vm_cluster_name
+            )
+            .only("cluster_id", "cluster_name")
+            .first()
+        )
         if not cluster:
             logger.error(
                 "query vm cluster error, vm_cluster_name: %s not found, please register to clusterinfo", vm_cluster_name
@@ -395,12 +456,46 @@ def get_vm_cluster_id_name(
             raise ValueError(f"vm_cluster_name: {vm_cluster_name} not found")
         return {"cluster_id": cluster.cluster_id, "cluster_name": cluster.cluster_name}
     elif space_type and space_id:
-        space_vm_info = SpaceVMInfo.objects.filter(space_type=space_type, space_id=space_id).first()
+        # 业务ID或关联业务ID
+        bk_biz_id: str | None = None
+        if space_type == SpaceTypes.BKCC.value:
+            bk_biz_id = str(space_id)
+        else:
+            space = SpaceApi.get_related_space(
+                space_uid=f"{space_type}__{space_id}", related_space_type=SpaceTypes.BKCC.value
+            )
+            if space:
+                bk_biz_id = str(space.bk_biz_id)
+
+        # 优先选择default_settings中配置了对应业务ID的VM集群
+        if bk_biz_id:
+            vm_clusters = (
+                ClusterInfo.objects.filter(bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_VM)
+                .only("cluster_id", "cluster_name", "default_settings")
+                .order_by("-cluster_id")
+            )
+            for cluster in vm_clusters:
+                default_settings = cluster.default_settings or {}
+                if not isinstance(default_settings, dict):
+                    continue
+
+                cluster_bk_biz_id = default_settings.get("bk_biz_id")
+                if not cluster_bk_biz_id or str(cluster_bk_biz_id) != bk_biz_id:
+                    continue
+
+                return {"cluster_id": cluster.cluster_id, "cluster_name": cluster.cluster_name}
+
+        # 通过SpaceVMInfo查询对应的VM集群
+        space_vm_info = (
+            SpaceVMInfo.objects.filter(space_type=space_type, space_id=space_id).only("vm_cluster_id").first()
+        )
         if not space_vm_info:
             logger.warning("space_type: %s, space_id: %s not access vm", space_type, space_id)
         else:
             try:
-                cluster = ClusterInfo.objects.get(bk_tenant_id=bk_tenant_id, cluster_id=space_vm_info.vm_cluster_id)
+                cluster = ClusterInfo.objects.only("cluster_id", "cluster_name").get(
+                    bk_tenant_id=bk_tenant_id, cluster_id=space_vm_info.vm_cluster_id
+                )
             except Exception:
                 logger.error(
                     "space_type: %s, space_id: %s, cluster_id: %s not found",
@@ -412,12 +507,21 @@ def get_vm_cluster_id_name(
             return {"cluster_id": cluster.cluster_id, "cluster_name": cluster.cluster_name}
 
     # 获取默认 VM 集群
-    cluster = ClusterInfo.objects.filter(
-        bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_VM, is_default_cluster=True
-    ).first()
-    if not cluster:
+    default_clusters = list(
+        ClusterInfo.objects.filter(bk_tenant_id=bk_tenant_id, cluster_type=ClusterInfo.TYPE_VM, is_default_cluster=True)
+        .only("cluster_id", "cluster_name")
+        .order_by("-cluster_id")[:2]
+    )
+    if not default_clusters:
         logger.error("not found vm default cluster")
         raise ValueError("not found vm default cluster")
+    if len(default_clusters) > 1:
+        logger.warning(
+            "multiple vm default clusters found, cluster_ids: %s, selected: %s",
+            [cluster.cluster_id for cluster in default_clusters],
+            default_clusters[0].cluster_id,
+        )
+    cluster = default_clusters[0]
     return {"cluster_id": cluster.cluster_id, "cluster_name": cluster.cluster_name}
 
 
@@ -486,7 +590,14 @@ def get_data_source(data_id):
     return DataSource.objects.get(bk_data_id=data_id)
 
 
-def access_v2_bkdata_vm(bk_tenant_id: str, bk_biz_id: int, table_id: str, data_id: int, force_update: bool = False):
+def access_v2_bkdata_vm(
+    bk_tenant_id: str,
+    bk_biz_id: int,
+    table_id: str,
+    data_id: int,
+    force_update: bool = False,
+    consumer_group: str | None = None,
+):
     """接入计算平台V4链路
 
     Args:
@@ -547,8 +658,19 @@ def access_v2_bkdata_vm(bk_tenant_id: str, bk_biz_id: int, table_id: str, data_i
     # 3. 获取数据源对应的集群 ID
     data_type_cluster = get_data_type_cluster(data_id=data_id)
     # 4. 检查是否已经接入过VM，若已经接入过VM，尝试进行联邦集群检查和创建联邦汇聚链路操作
-    if AccessVMRecord.objects.filter(result_table_id=table_id).exists():
+    access_vm_record = AccessVMRecord.objects.filter(
+        bk_tenant_id=bk_tenant_id,
+        result_table_id=table_id,
+    ).last()
+    if access_vm_record:
         logger.info("table_id: %s has already been created,now try to create fed vm data link", table_id)
+
+        # 如果已经接入过 VM，则后续重入/强制更新继续使用已接入的 VM 集群。
+        exists_vm_cluster = ClusterInfo.objects.filter(
+            bk_tenant_id=bk_tenant_id, cluster_id=access_vm_record.vm_cluster_id
+        ).first()
+        if exists_vm_cluster:
+            vm_cluster_name = exists_vm_cluster.cluster_name
 
         create_fed_bkbase_data_link(
             bk_biz_id=bk_biz_id,
@@ -578,6 +700,7 @@ def access_v2_bkdata_vm(bk_tenant_id: str, bk_biz_id: int, table_id: str, data_i
             monitor_table_id=table_id,
             storage_cluster_name=vm_cluster_name,
             bcs_cluster_id=bcs_cluster_id,
+            consumer_group=consumer_group,
         )
 
         report_metadata_data_link_access_metric(
@@ -644,6 +767,7 @@ def create_bkbase_data_link(
     data_link_strategy: str = DataLink.BK_STANDARD_V2_TIME_SERIES,
     namespace: str | None = settings.DEFAULT_VM_DATA_LINK_NAMESPACE,
     bcs_cluster_id: str | None = None,
+    consumer_group: str | None = None,
 ):
     """
     申请计算平台链路
@@ -663,16 +787,6 @@ def create_bkbase_data_link(
         data_link_strategy,
         namespace,
     )
-    # 0. 组装生成计算平台侧需要的data_name和rt_name
-    bkbase_data_name = compose_bkdata_data_id_name(data_name=data_source.data_name)
-    bkbase_rt_name = compose_bkdata_table_id(table_id=monitor_table_id)
-    logger.info(
-        "create_bkbase_data_link:try to access bkbase , data_id->[%s],bkbase_data_name->[%s],bkbase_vmrt_name->[%s]",
-        data_source.bk_data_id,
-        bkbase_data_name,
-        bkbase_rt_name,
-    )
-
     # 1. 判断是否是联邦代理集群链路
     if BcsFederalClusterInfo.objects.filter(fed_cluster_id=bcs_cluster_id, is_deleted=False).exists():
         logger.info("create_bkbase_data_link: bcs_cluster_id->[%s] is a federal proxy cluster!", bcs_cluster_id)
@@ -684,13 +798,42 @@ def create_bkbase_data_link(
     elif data_source.etl_config == EtlConfigs.BK_STANDARD.value:
         data_link_strategy = DataLink.BK_STANDARD_TIME_SERIES
 
+    # 组装计算平台侧的 data_name，作为新链路场景下的默认 DataLink / AccessVMRecord 查询键。
+    bkbase_data_name = compose_bkdata_data_id_name(data_name=data_source.data_name, strategy=data_link_strategy)
+    data_link_name = bkbase_data_name
+    configured_bkbase_rt = _get_configured_bkbase_result_table(
+        bk_tenant_id=data_source.bk_tenant_id,
+        monitor_table_id=monitor_table_id,
+        data_link_strategy=data_link_strategy,
+    )
+    if configured_bkbase_rt:
+        data_link_name = configured_bkbase_rt.data_link_name
+        bkbase_data_name = configured_bkbase_rt.bkbase_data_name or bkbase_data_name
+        logger.info(
+            "create_bkbase_data_link: use configured BkBaseResultTable relation, data_id->[%s],"
+            "monitor_table_id->[%s],data_link_name->[%s],bkbase_data_name->[%s]",
+            data_source.bk_data_id,
+            monitor_table_id,
+            data_link_name,
+            bkbase_data_name,
+        )
+    else:
+        logger.info(
+            "create_bkbase_data_link:try to access bkbase, data_id->[%s],bkbase_data_name->[%s]",
+            data_source.bk_data_id,
+            bkbase_data_name,
+        )
+
     # 2. 创建链路资源对象
     data_link_ins, _ = DataLink.objects.update_or_create(
         bk_tenant_id=data_source.bk_tenant_id,
-        data_link_name=bkbase_data_name,
+        data_link_name=data_link_name,
         namespace=namespace,
         data_link_strategy=data_link_strategy,
-        defaults={"bk_data_id": data_source.bk_data_id, "table_ids": [monitor_table_id]},
+        defaults={
+            "bk_data_id": data_source.bk_data_id,
+            "table_ids": [monitor_table_id],
+        },
     )
     try:
         # 2. 尝试根据套餐，申请创建链路
@@ -709,6 +852,7 @@ def create_bkbase_data_link(
             data_source=data_source,
             table_id=monitor_table_id,
             storage_cluster_name=storage_cluster_name,
+            consumer_group=consumer_group,
         )
         # 2.1 上报链路接入指标
     except Exception as e:  # pylint: disable=broad-except
@@ -736,7 +880,6 @@ def create_bkbase_data_link(
     )
     # 3. 同步更新元数据
     data_link_ins.sync_metadata(
-        data_source=data_source,
         table_id=monitor_table_id,
         storage_cluster_name=storage_cluster_name,
     )
@@ -752,18 +895,53 @@ def create_bkbase_data_link(
         storage_cluster_id,
         data_link_strategy,
     )
-    datalink_biz_id = get_tenant_datalink_biz_id(bk_tenant_id=data_source.bk_tenant_id, bk_biz_id=bk_biz_id)
-    AccessVMRecord.objects.update_or_create(
+    # vm_result_table_id 来自 sync_metadata 刚写入的 BkBaseResultTable；读取失败则按 tenant
+    # data_biz_id + compose 生成名兜底，并打 error log 方便排查。
+    try:
+        bkbase_rt = BkBaseResultTable.objects.get(
+            bk_tenant_id=data_source.bk_tenant_id,
+            data_link_name=data_link_ins.data_link_name,
+        )
+        vm_result_table_id = bkbase_rt.bkbase_table_id
+        bkbase_data_name = bkbase_rt.bkbase_data_name or bkbase_data_name
+        if not vm_result_table_id:
+            raise BkBaseResultTable.DoesNotExist
+    except BkBaseResultTable.DoesNotExist:
+        datalink_biz_id = get_tenant_datalink_biz_id(bk_tenant_id=data_source.bk_tenant_id, bk_biz_id=bk_biz_id)
+        fallback_rt_name = compose_bkdata_table_id(table_id=monitor_table_id, strategy=data_link_strategy)
+        vm_result_table_id = f"{datalink_biz_id.data_biz_id}_{fallback_rt_name}"
+        logger.error(
+            "create_bkbase_data_link: BkBaseResultTable for data_link_name->[%s] not found after sync_metadata, "
+            "fallback vm_result_table_id->[%s]",
+            data_link_ins.data_link_name,
+            vm_result_table_id,
+        )
+
+    # 查询AccessVMRecord记录，这里为了兼容可能存在的多条记录脏数据，默认取最新一条
+    vm_record = AccessVMRecord.objects.filter(
         bk_tenant_id=data_source.bk_tenant_id,
         result_table_id=monitor_table_id,
-        bk_base_data_id=data_source.bk_data_id,
-        bk_base_data_name=bkbase_data_name,
-        defaults={
-            "vm_cluster_id": storage_cluster_id,
-            "vm_result_table_id": f"{datalink_biz_id.data_biz_id}_{bkbase_rt_name}",
-            "bcs_cluster_id": bcs_cluster_id,
-        },
-    )
+    ).last()
+
+    # 更新AccessVMRecord记录
+    if vm_record:
+        # NOTE: v3->v4迁移场景中存在双dataid的问题，这里默认先不更新bk_base_data_id，暂时还保留原有信息
+        vm_record.bk_base_data_name = bkbase_data_name
+        vm_record.vm_result_table_id = vm_result_table_id
+        vm_record.bcs_cluster_id = bcs_cluster_id
+        vm_record.vm_cluster_id = storage_cluster_id
+        vm_record.save()
+    else:
+        AccessVMRecord.objects.create(
+            bk_tenant_id=data_source.bk_tenant_id,
+            result_table_id=monitor_table_id,
+            bk_base_data_id=data_source.bk_data_id,
+            bk_base_data_name=bkbase_data_name,
+            vm_cluster_id=storage_cluster_id,
+            vm_result_table_id=vm_result_table_id,
+            bcs_cluster_id=bcs_cluster_id,
+        )
+
     logger.info(
         "create_bkbase_data_link:access bkbase success,data_id->[%s],storage_cluster_name->[%s],data_link_strategy->["
         "%s]",
@@ -807,7 +985,6 @@ def create_fed_bkbase_data_link(
     bkbase_data_name = compose_bkdata_data_id_name(
         data_name=data_source.data_name, strategy=DataLink.BCS_FEDERAL_SUBSET_TIME_SERIES
     )
-    # bkbase_rt_name = compose_bkdata_table_id(table_id=monitor_table_id)
 
     logger.info(
         "create_fed_bkbase_data_link: bcs_cluster_id->[%s],data_id->[%s],data_link_name->[%s] try to create "
@@ -854,7 +1031,6 @@ def create_fed_bkbase_data_link(
         raise e
 
     data_link_ins.sync_metadata(
-        data_source=data_source,
         table_id=monitor_table_id,
         storage_cluster_name=storage_cluster_name,
     )

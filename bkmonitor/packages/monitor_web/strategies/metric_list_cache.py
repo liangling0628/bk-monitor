@@ -366,7 +366,7 @@ class BaseMetricCacheManager:
             for metrics in chunks(to_be_update, 500):
                 init_md5_metrics = []
                 for metric in metrics:
-                    _metric = MetricListCache(**metric)
+                    _metric = MetricListCache(bk_tenant_id=self.bk_tenant_id, **metric)
                     init_md5_metrics.append(_metric)
                 fields = [
                     field.name
@@ -1085,20 +1085,53 @@ class CustomEventCacheManager(BaseMetricCacheManager):
         )
         event_group_ids = [
             custom_event.bk_event_group_id
-            for custom_event in CustomEventGroup.objects.filter(type="custom_event").only("bk_event_group_id")
+            for custom_event in CustomEventGroup.objects.filter(
+                bk_tenant_id=self.bk_tenant_id, type="custom_event"
+            ).only("bk_event_group_id")
+        ]
+        # 平台级（is_platform=True）自定义事件分组的缓存行统一挂到 bk_biz_id=0，
+        # 复用 bk_biz_id__in=[0, bk_biz_id] 的平台数据可见性通道，保证全业务可见
+        platform_groups = dict(
+            CustomEventGroup.objects.filter(
+                bk_tenant_id=self.bk_tenant_id, type="custom_event", is_platform=True
+            ).values_list("bk_event_group_id", "bk_data_id")
+        )
+        # 平台级分组仅由 bk_biz_id=0 的缓存任务产出：归属业务任务从当前业务查询结果中整体剔除
+        # （主循环与 k8s 集群事件名称匹配均不再产出），避免在归属业务下产生重复缓存行
+        custom_event_result = [
+            result
+            for result in custom_event_result
+            if result["event_group_id"] not in platform_groups or result["bk_biz_id"] == 0
         ]
         # 增加自定义事件筛选，不在监控创建的策略配置时不展示
         for result in custom_event_result:
             if result["event_group_id"] in event_group_ids:
+                yield result
+        if self.bk_biz_id == 0 and platform_groups:
+            # 平台级分组的 EventGroup 挂在归属业务下（metadata 侧无平台标志），按 bk_data_id 补拉，
+            # 缓存行业务改写为 0 后单独产出，不并入 custom_event_result；
+            # EventGroup 本身挂 0 的存量平台分组已在上面产出，此处跳过去重。
+            # 注意：platform_groups 为空时不能发起补拉，空 bk_data_ids 会被 metadata 视为不过滤
+            platform_event_result = api.metadata.query_event_group.request.refresh(
+                bk_tenant_id=self.bk_tenant_id, bk_data_ids=list(platform_groups.values())
+            )
+            for result in platform_event_result:
+                if result["event_group_id"] not in platform_groups or result["bk_biz_id"] == 0:
+                    continue
+                result["bk_biz_id"] = 0
                 yield result
         if self.bk_biz_id < 0:
             space_uid = bk_biz_id_to_space_uid(self.bk_biz_id)
             if space_uid.startswith(SpaceTypeEnum.BKCI.value):
                 space = SpaceApi.get_related_space(space_uid, SpaceTypeEnum.BKCC.value)
                 if space:
-                    custom_event_result += api.metadata.query_event_group.request.refresh(
+                    related_event_result = api.metadata.query_event_group.request.refresh(
                         bk_tenant_id=self.bk_tenant_id, bk_biz_id=space.bk_biz_id
                     )
+                    # 关联业务的平台级分组同样剔除，避免经下方 k8s 名称匹配以负业务身份重复产出
+                    custom_event_result += [
+                        result for result in related_event_result if result["event_group_id"] not in platform_groups
+                    ]
         # 3.k8s 事件
         # 1. 先拿业务下的集群列表
         # 区分 custom_event 和 k8s_event (来自metadata的设计)
@@ -1413,18 +1446,10 @@ class BaseAlarmMetricCacheManager(BaseMetricCacheManager):
             yield metric
 
     def get_tables(self):
-        # 多租户模式下暂时不内置系统事件
-        if settings.ENABLE_MULTI_TENANT_MODE:
-            return
-
         yield {}
 
     def get_metrics_by_table(self, table):
         result_table_label = "os"
-        metric_list = BaseAlarm.objects.filter(is_enable=True)
-        if Platform.te:
-            # te平台不展示ping不可达告警， 同时也不内置
-            metric_list = metric_list.exclude(title="ping-gse")
         base_dict = {
             "bk_biz_id": 0,
             "result_table_id": SYSTEM_EVENT_RT_TABLE_ID,
@@ -1440,20 +1465,33 @@ class BaseAlarmMetricCacheManager(BaseMetricCacheManager):
             "collect_config_ids": [],
         }
 
-        for metric in metric_list:
-            metric_dict = copy.deepcopy(base_dict)
-            metric_dict["metric_field"] = metric.title
-            metric_dict["metric_field_name"] = metric.description
+        # 多租户下 gse 系统事件（AgentLost/DiskReadonly/CoreFile/OOM）及 gse 进程托管事件已改由 V4 custom
+        # 分业务链路内置（CustomEventCacheManager + os/v2，结果表 base_{tenant}_{biz}_event）；此处在多租户
+        # 仅保留下方 extend_metrics 的 proc_port/os_restart（以及按 ENABLE_PING_ALARM 追加的 ping-gse）这几个
+        # bk_monitor 源伪事件——它们的底层时序表 system.proc_port / system.env / pingserver.base 在多租户同样
+        # 产出，仍按 bk_monitor 源 event 内置为目录项，供 os/v3（主机重启/进程端口，多租户专用）、os/v4
+        # （PING，多租户专用）、os/v1（单租户）命中，经 os_loader 的 EVENT_QUERY_CONFIG_MAP 重定向到底层
+        # 时序表后创建。
+        if not settings.ENABLE_MULTI_TENANT_MODE:
+            metric_list = BaseAlarm.objects.filter(is_enable=True)
+            if Platform.te:
+                # te平台不展示ping不可达告警， 同时也不内置
+                metric_list = metric_list.exclude(title="ping-gse")
+            for metric in metric_list:
+                metric_dict = copy.deepcopy(base_dict)
+                metric_dict["metric_field"] = metric.title
+                metric_dict["metric_field_name"] = metric.description
 
-            dimensions = metric.dimensions
-            # 调整oom维度，后续系统事件直接使用json文件记录
-            if metric.title == "oom-gse":
-                dimensions = ["oom_memcg", "task_memcg", "task", "constraint", "process", "message"]
+                dimensions = metric.dimensions
+                # 调整oom维度，后续系统事件直接使用json文件记录
+                if metric.title == "oom-gse":
+                    dimensions = ["oom_memcg", "task_memcg", "task", "constraint", "process", "message"]
 
-            metric_dict["dimensions"] = [{"id": dimension, "name": dimension} for dimension in dimensions]
-            yield metric_dict
+                metric_dict["dimensions"] = [{"id": dimension, "name": dimension} for dimension in dimensions]
+                yield metric_dict
 
-        # 增加额外的系统事件指标
+        # 增加额外的系统事件指标（proc_port/os_restart：底层为 system.proc_port/system.env 时序表，
+        # 单租户与多租户都内置；os_loader 经 EVENT_QUERY_CONFIG_MAP 把查询重定向到底层时序表并套检测算法）
         extend_metrics = [
             # deprecated
             # {
@@ -1475,22 +1513,31 @@ class BaseAlarmMetricCacheManager(BaseMetricCacheManager):
             {"metric_field": "os_restart", "metric_field_name": _("主机重启"), "dimensions": DefaultDimensions.host},
         ]
 
+        # 多租户 PING 不可达：单租户由上方 BaseAlarm(is_enable=True) 内置 ping-gse 目录项（且 te 平台排除）；
+        # 多租户改由全局开关 ENABLE_PING_ALARM 运行时单点治理（而非部署平台 Platform.te），与 os_loader
+        # 创建 PING 策略时的门控口径一致。内置 bk_monitor 源 ping-gse 伪事件目录项，供 os/v4（多租户专用）
+        # 命中、经 EVENT_QUERY_CONFIG_MAP 重定向到底层时序 pingserver.base/loss_percent + PingUnreachable 算法建出。
+        if settings.ENABLE_MULTI_TENANT_MODE and getattr(settings, "ENABLE_PING_ALARM", True):
+            extend_metrics.append(
+                {"metric_field": "ping-gse", "metric_field_name": _("PING不可达"), "dimensions": DefaultDimensions.host}
+            )
+
         for metric in extend_metrics:
             metric_dict = copy.deepcopy(base_dict)
             metric_dict.update(metric)
             yield metric_dict
 
-        # gse进程托管事件指标
-        for metric in self.add_gse_process_event_metrics(result_table_label):
-            yield metric
+        # gse进程托管事件指标（多租户暂走 custom 链路，不在此内置）
+        if not settings.ENABLE_MULTI_TENANT_MODE:
+            for metric in self.add_gse_process_event_metrics(result_table_label):
+                yield metric
 
     @classmethod
     def get_available_biz_ids(cls, bk_tenant_id: str) -> list[int]:
         """获取系统事件相关的业务ID列表"""
-        # 多租户模式下暂时不内置系统事件
-        if settings.ENABLE_MULTI_TENANT_MODE:
-            return []
-        # 系统事件只在业务ID为0的情况下处理
+        # 系统事件只在业务ID为0的情况下处理。多租户同样内置：仅 proc_port/os_restart 两个伪事件走
+        # bk_monitor 源（底层 system.proc_port/system.env 时序在多租户同样产出），其余 gse 系统事件
+        # 改由 custom 链路内置（见 get_metrics_by_table）。
         return [0]
 
 
@@ -1524,6 +1571,92 @@ class BkmonitorMetricCacheManager(BaseMetricCacheManager):
             data_type_label=DataTypeLabel.TIME_SERIES,
             bk_tenant_id=self.bk_tenant_id,
         ).exclude(result_table_id="")
+
+    @staticmethod
+    def get_plugin_db_name(plugin: CollectorPluginMeta) -> str:
+        """获取插件对应的 TimeSeriesGroup 名称。"""
+        return f"{plugin.plugin_type}_{plugin.plugin_id}".lower()
+
+    @staticmethod
+    def merge_plugin_time_series_groups(
+        group_list: list[dict[str, Any]], target_bk_biz_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """将 TimeSeriesGroup 返回的单指标表结构合并为 __default__ 结果表。
+
+        `query_time_series_group` 返回的数据中，每个元素通常只携带一个指标，但这些指标属于同一个
+        `time_series_group_id`。指标缓存侧仍然需要按一个 `xxx.__default__` 结果表来消费，因此这里按
+        group 维度进行合并，并把所有指标合并到同一条记录的 `metric_info_list` 中。
+
+        Args:
+            group_list: metadata 查询返回的原始列表。
+            target_bk_biz_id: 需要回填的业务 ID。
+
+        Returns:
+            归一化后的 TimeSeriesGroup 列表。
+        """
+        merged_group_map: dict[tuple[str, str, str], dict[str, Any]] = {}
+        metric_name_map: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+
+        for group in group_list:
+            group_name = group.get("time_series_group_name", "")
+            group_id = str(group.get("time_series_group_id") or "")
+            bk_data_id = str(group.get("bk_data_id") or "")
+            group_key = (group_id, group_name, bk_data_id)
+
+            merged_group = merged_group_map.get(group_key)
+            if merged_group is None:
+                merged_group = copy.deepcopy(group)
+                merged_group["table_id"] = f"{group_name}.__default__"
+                merged_group["metric_info_list"] = []
+                if target_bk_biz_id is not None:
+                    merged_group["bk_biz_id"] = target_bk_biz_id
+                merged_group_map[group_key] = merged_group
+
+            for metric_info in group.get("metric_info_list") or []:
+                metric_name = metric_info.get("field_name", "")
+                if metric_name in metric_name_map[group_key]:
+                    continue
+
+                normalized_metric_info = copy.deepcopy(metric_info)
+                normalized_metric_info["table_id"] = merged_group["table_id"]
+                merged_group["metric_info_list"].append(normalized_metric_info)
+                metric_name_map[group_key].add(metric_name)
+
+        return list(merged_group_map.values())
+
+    def get_plugin_time_series_groups(self, plugin: CollectorPluginMeta) -> list[dict[str, Any]]:
+        """查询插件对应的 TimeSeriesGroup 信息。
+
+        自动发现模式下，指标和维度都以 TimeSeriesGroup 中的最新数据为准。
+
+        Args:
+            plugin: 插件模型。
+
+        Returns:
+            去重并补齐业务 ID 后的 TimeSeriesGroup 列表。
+        """
+        db_name = self.get_plugin_db_name(plugin)
+        target_bk_biz_id = self.bk_biz_id if self.bk_biz_id is not None else plugin.bk_biz_id
+        biz_ids = [0]
+        if target_bk_biz_id not in biz_ids:
+            biz_ids.append(target_bk_biz_id)
+
+        group_list: list[dict[str, Any]] = []
+        for biz_id in biz_ids:
+            group_list.extend(
+                api.metadata.query_time_series_group.request.refresh(
+                    bk_tenant_id=self.bk_tenant_id,
+                    bk_biz_id=biz_id,
+                    time_series_group_name=db_name,
+                )
+            )
+
+        deduplicated_groups = self.merge_plugin_time_series_groups(group_list, target_bk_biz_id=target_bk_biz_id)
+
+        if deduplicated_groups and db_name not in self.ts_db_name:
+            self.ts_db_name.append(db_name)
+
+        return deduplicated_groups
 
     def get_tables(self):
         """
@@ -1855,56 +1988,13 @@ class BkmonitorMetricCacheManager(BaseMetricCacheManager):
 
         # 插件采集
         plugins = CollectorPluginMeta.objects.filter(bk_tenant_id=self.bk_tenant_id, bk_biz_id=self.bk_biz_id).exclude(
-            plugin_type__in=CollectorPluginMeta.VIRTUAL_PLUGIN_TYPE
+            plugin_type__in=set(CollectorPluginMeta.VIRTUAL_PLUGIN_TYPE) - {PluginType.K8S}
         )
         for plugin in plugins:
-            # 刷新插件的metric_json
-            plugin.refresh_metric_json()
-            for table in plugin.current_version.info.metric_json:
-                metric_infos: list[dict[str, Any]] = []
-                dimension_infos: list[dict[str, Any]] = []
-                for field in table["fields"]:
-                    # 字段分类
-                    if field["monitor_type"] == "metric":
-                        # 跳过非活跃字段
-                        if field["is_active"]:
-                            metric_infos.append(field)
-                    else:
-                        dimension_infos.append(field)
-
-                # 维度列表
-                dimensions = [
-                    {"id": dimension_info["name"], "name": dimension_info["description"] or dimension_info["name"]}
-                    for dimension_info in dimension_infos
-                ]
-
-                # 判断目标类型
-                data_target = DataTargetMapping.get_data_target(
-                    result_table_label=plugin.label,
-                    data_source_label=DataSourceLabel.BK_MONITOR_COLLECTOR,
-                    data_type_label=DataTypeLabel.TIME_SERIES,
-                )
-
-                for metric_info in metric_infos:
-                    yield {
-                        "bk_biz_id": self.bk_biz_id,
-                        "result_table_id": PluginVersionHistory.get_result_table_id(
-                            plugin, table["table_name"]
-                        ).lower(),
-                        "result_table_name": table["table_desc"],
-                        "metric_field": metric_info["name"],
-                        "metric_field_name": metric_info["description"] or metric_info["name"],
-                        "unit": metric_info["unit"],
-                        "dimensions": dimensions,
-                        "default_dimensions": [],
-                        "default_condition": [],
-                        "result_table_label": plugin.label,
-                        "result_table_label_name": self.get_label_name(plugin.label),
-                        "data_source_label": DataSourceLabel.BK_MONITOR_COLLECTOR,
-                        "data_type_label": DataTypeLabel.TIME_SERIES,
-                        "data_target": data_target,
-                        "data_label": plugin.plugin_id,
-                    }
+            group_list = self.get_plugin_time_series_groups(plugin)
+            if group_list:
+                for group in group_list:
+                    yield from self.get_plugin_ts_metric(group)
 
     def get_metrics_by_table(self, table):
         """

@@ -1,0 +1,71 @@
+.alarm-center-detail-panel-trace {
+  padding: 16px 0;
+
+  .alarm-center-detail-panel-trace-wrapper {
+    padding: 16px;
+    background: #fff;
+    border: 1px solid #e4e9f2;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px 0 #1919290a;
+  }
+
+  .panel-trace-table {
+    &.trace-explore-table {
+      .explore-col {
+        &.explore-text-col {
+          &:has([data-col-id='error_msg']) {
+            color: #c12626;
+          }
+        }
+      }
+
+      .explore-text-ellipsis {
+        &:has(> .explore-table-condition-menu) {
+          &:hover {
+            color: unset;
+          }
+        }
+      }
+
+      .explore-table-condition-menu {
+        cursor: unset;
+
+        &:hover {
+          color: unset;
+        }
+      }
+
+      .t-table {
+        min-height: unset;
+
+        /* stylelint-disable-next-line selector-class-pattern */
+        .t-table__header {
+          th {
+            background-color: #f5f6fa;
+
+            .explore-header-col {
+              color: #313238;
+            }
+          }
+        }
+      }
+
+      /* stylelint-disable-next-line selector-class-pattern */
+      .t-table__last-full-row {
+        display: none;
+      }
+
+      .explore-table-skeleton {
+        position: relative;
+        top: -5px;
+        display: none;
+        visibility: visible;
+
+        &.explore-skeleton-show-all,
+        &.explore-skeleton-show-body {
+          display: block;
+        }
+      }
+    }
+  }
+}

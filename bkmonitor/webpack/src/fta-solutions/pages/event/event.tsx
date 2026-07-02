@@ -49,7 +49,13 @@ import {
   incidentValidateQueryString,
 } from 'monitor-api/modules/incident';
 import { promqlToQueryConfig } from 'monitor-api/modules/strategies';
-import { commonPageSizeGet, commonPageSizeSet, docCookies, LANGUAGE_COOKIE_KEY } from 'monitor-common/utils';
+import {
+  commonPageSizeGet,
+  commonPageSizeSet,
+  docCookies,
+  LANGUAGE_COOKIE_KEY,
+  tryURLDecodeParse,
+} from 'monitor-common/utils';
 import { random } from 'monitor-common/utils/utils';
 // 20231205 代码还原，先保留原有部分
 import SpaceSelect from 'monitor-pc/components/space-select/space-select';
@@ -488,7 +494,7 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
   noDataString: any = '';
   bussinessTips: TranslateResult = '';
 
-  // 统计 未恢复告警的通知人 栏为空的人数。
+  // 统计 未恢复告警的告警接收人 栏为空的人数。
   numOfEmptyAssignee = 0;
 
   // 缓存topn概览数据（用于添加字段是无需调用接口）
@@ -496,6 +502,8 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
     fieldList: [],
     count: 0,
   };
+  analyzeTopNRequestSeq = 0;
+  detailTopNRequestSeq = 0;
   listOpenId = '';
 
   get panelList(): IPanelItem[] {
@@ -661,11 +669,11 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
     (contentWrap as HTMLDivElement).removeEventListener('scroll', this.handleDisableHover, false);
     window.clearInterval(this.refleshInstance);
   }
-  // 拼一个查询语句，然后查询 未恢复的且处理阶段都不满足 的异常通知人数据（显示是通知人为空）
+  // 拼一个查询语句，然后查询 未恢复的且处理阶段都不满足 的异常告警接收人数据（显示是告警接收人为空）
   setQueryStringForCheckingEmptyAssignee() {
-    let queryString = `${this.$t('通知人')} : "" AND ${this.$t('状态')} : 未恢复`;
-    // 通过点击查看空通知人按钮进来的查询语句需要拼接到原先查询语句的后方
-    // 需要判断原查询语句是否已经带有 查询通知人为空 的语句，防止重复拼接
+    let queryString = `${this.$t('告警接收人')} : "" AND ${this.$t('状态')} : 未恢复`;
+    // 通过点击查看空告警接收人按钮进来的查询语句需要拼接到原先查询语句的后方
+    // 需要判断原查询语句是否已经带有 查询告警接收人为空 的语句，防止重复拼接
     if (!this.queryString.includes(queryString)) {
       if (this.queryString.length) {
         queryString = `${this.queryString} AND ${queryString}`;
@@ -726,7 +734,10 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
             query[key] = {};
           }
         } else if (key === 'bizIds') {
-          query[key] = Array.isArray(val) ? val.map(id => +id) : [+(val || this.$store.getters.bizId || -1)];
+          const parsed = Array.isArray(val)
+            ? val.map(id => +id)
+            : tryURLDecodeParse(val, [+(val || this.$store.getters.bizId || -1)]);
+          query[key] = Array.isArray(parsed) ? parsed : [+parsed];
         } else if (['from', 'to'].includes(key)) {
           key === 'from' && this.$set(this.timeRange, 0, val);
           key === 'to' && this.$set(this.timeRange, 1, val);
@@ -752,7 +763,7 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
         : `action_id : ${defaultData.actionId}`;
       const time = +defaultData.actionId.toString().slice(0, 10) * 1000;
       defaultData.timeRange = [
-        dayjs.tz(time).add(-30, 'd').format('YYYY-MM-DD HH:mm:ssZZ'),
+        dayjs.tz(time).add(-7, 'd').format('YYYY-MM-DD HH:mm:ssZZ'),
         dayjs.tz(time).format('YYYY-MM-DD HH:mm:ssZZ'),
       ];
     }
@@ -761,8 +772,7 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
       defaultData.queryString = defaultData.queryString
         ? `${defaultData.queryString} AND action_id : ${defaultData.collectId}`
         : `action_id : ${defaultData.collectId}`;
-      /* 带collectId是事件范围设为近15天 */
-      defaultData.timeRange = ['now-30d', 'now'];
+      defaultData.timeRange = ['now-7d', 'now'];
     }
 
     /** 新版首页带alertId跳转事件中心 */
@@ -779,6 +789,17 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
     }
     return defaultData;
   }
+
+  handleGotoNew() {
+    this.$router.push({
+      name: 'alarm-center',
+      query: {
+        ...this.$route.query,
+        filterMode: this.$route.query.queryString ? 'queryString' : 'ui',
+      },
+    });
+  }
+
   /**
    * @description: popstate事件触发 用于记录用户搜索操作历史
    * @param {*} event
@@ -842,7 +863,7 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
             )
             .filter(item => item.value?.length)
         : [], // 过滤条件，二维数组
-      // 在查询前，将 queryString 中查询 通知人 为空的语句进行替换。
+      // 在查询前，将 queryString 中查询 告警接收人 为空的语句进行替换。
       // 为什么不在 input 框（queryString）上替换，会有意料之外的bug，也符合操作直觉。
       query_string: queryString, // 查询字符串
       start_time: startTime, // 开始时间
@@ -1125,9 +1146,15 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
    * @return {*}
    */
   async handleGetSearchTopNList(isDetail = false, isInit = true) {
+    const requestSeq = isDetail ? ++this.detailTopNRequestSeq : ++this.analyzeTopNRequestSeq;
+    const isLatestRequest = () =>
+      isDetail ? requestSeq === this.detailTopNRequestSeq : requestSeq === this.analyzeTopNRequestSeq;
     // 告警分析才需要tags topn
     if (this.searchType === 'alert' && isInit && !isDetail) {
       await this.handleGetAlertTagList();
+      if (!isLatestRequest()) {
+        return;
+      }
     }
     let allFieldList = [];
     // 告警分析
@@ -1160,6 +1187,9 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
     //   size: isDetail ? 100 : 10
     // }, { needCancel: true }).catch(() => ({ doc_count: 0, fields: [] }));
     const setTopnDataFn = (fieldList, count) => {
+      if (!isLatestRequest()) {
+        return;
+      }
       if (!isDetail) {
         this.topNOverviewData.fieldList = fieldList;
         this.topNOverviewData.count = count;
@@ -1187,8 +1217,8 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
           });
         }
       });
-      // 特殊添加一个空选项给 通知人 ，注意：仅仅加个 空 值还不够，之后查询之前还要执行一次 replaceSpecialCondition
-      // 去替换这里添加的 空值 ，使之最后替换成这样 'NOT 通知人 : *'
+      // 特殊添加一个空选项给 告警接收人 ，注意：仅仅加个 空 值还不够，之后查询之前还要执行一次 replaceSpecialCondition
+      // 去替换这里添加的 空值 ，使之最后替换成这样 'NOT 告警接收人 : *'
       if (valueMap.assignee) {
         valueMap.assignee.unshift({
           id: '""',
@@ -1212,11 +1242,14 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
       return;
     }
     /*
-      alertTopN接口分为两部分请求 (固定字段及带tags前缀的字段(带前缀的字段只取20个) )
+      alertTopN接口分为两部分请求：
+        1. 固定字段（allFieldList）：一次请求
+        2. tags.* 字段：按后端 MAX_NESTED_TOP_N_FIELDS=20 分批并发请求，全部完成后合并
     */
+    // 需与后端 AlertTopNResource.MAX_NESTED_TOP_N_FIELDS 及 use-analysis.ts TAG_FIELD_BATCH_SIZE 保持同步
+    const TAG_FIELD_BATCH_SIZE = 20;
     const topNParams = {
       ...this.handleGetSearchParams(false, true),
-      fields: !isDetail ? [...allFieldList, ...(tagList || []).map(item => item.id)] : [this.detailField],
       size: isDetail ? 100 : 10,
     };
     let fieldList = [];
@@ -1231,33 +1264,55 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
       ).catch(() => ({ doc_count: 0, fields: [] }));
       fieldList = fields;
       count = doc_count;
+      if (!isLatestRequest()) {
+        return;
+      }
       if (!isDetail) {
-        alertTopN(
-          {
-            ...topNParams,
-            fields: (!isDetail ? [...(tagList || []).map(item => item.id)] : [this.detailField]).slice(0, 20),
-          },
-          { needCancel: true }
-        )
-          .then(({ fields, doc_count }) => {
-            fieldList = [...fieldList, ...fields];
-            count = doc_count;
-            setTopnDataFn(fieldList, count);
-          })
-          .catch(err => console.error(err));
+        const allTagIds = (tagList || []).map(item => item.id);
+        const tagBatches: string[][] = [];
+        for (let i = 0; i < allTagIds.length; i += TAG_FIELD_BATCH_SIZE) {
+          tagBatches.push(allTagIds.slice(i, i + TAG_FIELD_BATCH_SIZE));
+        }
+        if (tagBatches.length) {
+          const results = await Promise.all(
+            tagBatches.map(batchFields =>
+              // 同一路径的并发批次不能启用 needCancel，否则会按 method + url 互相取消。
+              alertTopN({ ...topNParams, fields: batchFields }).catch(() => ({
+                doc_count: 0,
+                fields: [],
+              }))
+            )
+          );
+          if (!isLatestRequest()) {
+            return;
+          }
+          for (const { fields: batchFields, doc_count: batchCount } of results) {
+            fieldList = [...fieldList, ...batchFields];
+            if (batchCount) count = batchCount;
+          }
+        } else {
+          setTopnDataFn(fieldList, count);
+          return;
+        }
       }
     } else if (this.searchType === 'incident') {
-      const { fields, doc_count } = await incidentTopN({ ...topNParams }, { needCancel: true }).catch(() => ({
-        doc_count: 0,
-        fields: [],
-      }));
+      const { fields, doc_count } = await incidentTopN(
+        {
+          ...topNParams,
+          fields: !isDetail ? [...allFieldList] : [this.detailField],
+        },
+        { needCancel: true }
+      ).catch(() => ({ doc_count: 0, fields: [] }));
       fieldList = fields;
       count = doc_count;
     } else {
-      const { fields, doc_count } = await actionTopN({ ...topNParams }, { needCancel: true }).catch(() => ({
-        doc_count: 0,
-        fields: [],
-      }));
+      const { fields, doc_count } = await actionTopN(
+        {
+          ...topNParams,
+          fields: !isDetail ? [...allFieldList] : [this.detailField],
+        },
+        { needCancel: true }
+      ).catch(() => ({ doc_count: 0, fields: [] }));
       fieldList = fields;
       count = doc_count;
     }
@@ -1376,8 +1431,8 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
   // 在验证 queryString 和 告警列表 查询时会使用
   replaceSpecialCondition(qs: string) {
     // 由于验证 queryString 不允许使用单引号，为提升体验，这里单双引号的空串都会进行替换。
-    const regExp = new RegExp(`${this.$t('通知人')}\\s*:\\s*(""|'')`, 'gi');
-    return qs.replace(regExp, `NOT ${this.$t('通知人')} : *`);
+    const regExp = new RegExp(`${this.$t('告警接收人')}\\s*:\\s*(""|'')`, 'gi');
+    return qs.replace(regExp, `NOT ${this.$t('告警接收人')} : *`);
   }
   /**
    * @description: 获取表格数据
@@ -1438,7 +1493,7 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
         followerDisabled: this.searchType === 'alert' ? getOperatorDisabled(item.follower, item.assignee) : false,
       })) || [];
 
-    // 查找当前表格的 告警 标签是否有 通知人 为空的情况。BugID: 1010158081103484871
+    // 查找当前表格的 告警 标签是否有 告警接收人 为空的情况。BugID: 1010158081103484871
     this.numOfEmptyAssignee = this.tableData.filter(
       (item: IEventItem) => this.searchType === 'alert' && !item.assignee?.length && item.status === 'ABNORMAL'
     ).length;
@@ -1704,8 +1759,15 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
           activeTab,
           from: this.timeRange[0],
           to: this.timeRange[1],
+          fromPage: 'event',
         },
       });
+      // 同步更新地址栏中的bizId为故障对应的bk_biz_id
+      const url = new URL(window.location.href);
+      url.searchParams.set('bizId', String(bizId));
+      window.history.replaceState({}, '', url.toString());
+      window.bk_biz_id = +bizId;
+      window.cc_biz_id = +bizId;
     } else {
       this.detailInfo.id = id;
       this.detailInfo.type = type;
@@ -2632,10 +2694,12 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
               class='header-tools'
               isSplitPanel={this.isSplitPanel}
               refreshInterval={this.refreshInterval}
+              showGotoNew={true}
               showListMenu={false}
               timeRange={this.timeRange}
               timezone={this.timezone}
               onFullscreenChange={this.handleFullscreen}
+              onGotoNew={this.handleGotoNew}
               onImmediateRefresh={this.handleImmediateRefresh}
               onRefreshChange={this.handleRefreshChange}
               onSplitPanelChange={this.handleSplitPanel}
@@ -2760,7 +2824,7 @@ class Event extends Mixins(authorityMixinCreate(eventAuth)) {
               >
                 <template slot='title'>
                   <span class='alert-text'>
-                    {this.$t('当前有 {0} 个未恢复告警的通知人是空的', [this.numOfEmptyAssignee])} ,
+                    {this.$t('当前有 {0} 个未恢复告警的告警接收人是空的', [this.numOfEmptyAssignee])} ,
                   </span>
 
                   <bk-button

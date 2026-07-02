@@ -14,8 +14,16 @@ from unittest.mock import patch
 import pytest
 
 from metadata import models
+from metadata.models.data_link.constants import DataLinkKind
+from metadata.models.data_link.data_link_configs import SurrealDBBindingConfig
 from metadata.resources import ListBkBaseRtInfoByBizIdResource
-from metadata.task.bkbase import sync_all_bkbase_cluster_info, sync_bkbase_rt_meta_info_all
+from metadata.task.bkbase import (
+    _sync_bkbase_v4_datalink_components,
+    sync_all_bkbase_cluster_info,
+    sync_bkbase_cluster_info,
+    sync_bkbase_rt_meta_info_all,
+)
+from metadata.task.constants import BKBASE_V4_KIND_STORAGE_CONFIGS
 from metadata.task.tasks import sync_bkbase_v4_metadata
 from metadata.tests.common_utils import consul_client
 
@@ -257,7 +265,6 @@ def test_sync_bkbase_v4_metadata_for_metric(create_or_delete_records, mocker):
     Case2. Kafka集群变更 + Topic变更 + VM集群变更
     """
 
-    mocker.patch("django.conf.settings.ENABLE_SYNC_HISTORY_ES_CLUSTER_RECORD_FROM_BKBASE", True)
     mocker.patch("django.conf.settings.ENABLE_SYNC_BKBASE_METADATA_TO_DB", True)
 
     # Case1. Kafka集群不存在 + VM集群不存在
@@ -277,7 +284,7 @@ def test_sync_bkbase_v4_metadata_for_metric(create_or_delete_records, mocker):
         vm_record = models.AccessVMRecord.objects.get(result_table_id="1001_bkmonitor_time_series_50010.__default__")
 
         assert ds.mq_cluster_id == kafka_cluster_new.cluster_id
-        assert ds.mq_config_id == mq_config.id
+        assert ds.mq_config_id == mq_config.pk
         assert vm_record.vm_cluster_id == vm_cluster_new.cluster_id
 
     with patch("redis.StrictRedis.hgetall", return_value=redis_value_for_metric_when_cluster_exists) as mock_hgetall:  # noqa
@@ -293,7 +300,7 @@ def test_sync_bkbase_v4_metadata_for_metric(create_or_delete_records, mocker):
         vm_record = models.AccessVMRecord.objects.get(result_table_id="1001_bkmonitor_time_series_50011.__default__")
 
         assert ds.mq_cluster_id == kafka_cluster_new.cluster_id
-        assert ds.mq_config_id == mq_config.id
+        assert ds.mq_config_id == mq_config.pk
         assert vm_record.vm_cluster_id == vm_cluster_new.cluster_id
         assert mq_config.partition == 3
         assert mq_config.topic == "bkm_test2_metric_topic"
@@ -311,7 +318,6 @@ def test_sync_bkbase_v4_metadata_for_log(create_or_delete_records, mocker):
         key = "databus_v4_dataid:60010"
         table_id = "1001_bkmonitor_log_60010.__default__"
 
-        mocker.patch("django.conf.settings.ENABLE_SYNC_HISTORY_ES_CLUSTER_RECORD_FROM_BKBASE", True)
         mocker.patch("django.conf.settings.ENABLE_SYNC_BKBASE_METADATA_TO_DB", True)
 
         # 调用测试函数
@@ -319,29 +325,211 @@ def test_sync_bkbase_v4_metadata_for_log(create_or_delete_records, mocker):
 
         ds = models.DataSource.objects.get(bk_data_id=60010)
         kafka_cluster = models.ClusterInfo.objects.get(domain_name="test2.kafka.db")
-        es_cluster = models.ClusterInfo.objects.get(domain_name="test.es.db")
         es_cluster2 = models.ClusterInfo.objects.get(domain_name="test2.es.db")
         mq_config = models.KafkaTopicInfo.objects.get(bk_data_id=60010)
         es_storage = models.ESStorage.objects.get(table_id=table_id)
 
         assert ds.mq_cluster_id == kafka_cluster.cluster_id
-        assert ds.mq_config_id == mq_config.id
+        assert ds.mq_config_id == mq_config.pk
         assert es_storage.storage_cluster_id == es_cluster2.cluster_id
         assert mq_config.partition == 6
         assert mq_config.topic == "bkm_test_log_topic"
 
-        # 验证StorageClusterRecord记录是否被正确同步
-        cluster_records = models.StorageClusterRecord.objects.filter(table_id=table_id, is_deleted=False)
-        assert cluster_records.count() == 2  # 确保有2个集群记录
 
-        current_record = models.StorageClusterRecord.objects.get(is_current=True, table_id=table_id)
-        assert current_record.cluster_id == es_cluster2.cluster_id
+@pytest.mark.django_db(databases="__all__")
+def test_sync_bkbase_v4_components_updates_empty_surrealdb_definitions(mocker):
+    SurrealDBBindingConfig.objects.create(
+        name="graph_rt",
+        namespace="bkmonitor",
+        bk_tenant_id="system",
+        data_link_name="graph_link",
+        bk_biz_id=1001,
+        surrealdb_cluster_name="surreal-default",
+        bkbase_result_table_name="graph_rt",
+        table_type="normal",
+        vertices=[{"name": "pod", "id_fields": ["pod_name"]}],
+        relations=[{"name": "pod_node", "from": "pod", "to": "node"}],
+    )
+    mocker.patch(
+        "metadata.task.bkbase.api.bkdata.list_data_link",
+        return_value=[
+            {
+                "metadata": {
+                    "name": "graph_rt",
+                    "labels": {"bk_biz_id": "1001"},
+                    "annotations": {},
+                },
+                "spec": {
+                    "storage": {"name": "surreal-default"},
+                    "data": {"name": "graph_rt"},
+                    "table_type": "normal",
+                    "vertices": [],
+                    "relations": [],
+                },
+                "status": {"phase": "OK"},
+            }
+        ],
+    )
 
-        old_record = models.StorageClusterRecord.objects.get(table_id=table_id, cluster_id=es_cluster.cluster_id)
-        assert not old_record.is_current
+    _sync_bkbase_v4_datalink_components(
+        bk_tenant_id="system",
+        namespace="bkmonitor",
+        kind=DataLinkKind.SURREALDBBINDING.value,
+    )
 
-        deleted_record = models.StorageClusterRecord.objects.get(cluster_id=1000)
-        assert deleted_record.is_deleted
+    binding = SurrealDBBindingConfig.objects.get(name="graph_rt")
+    assert binding.vertices == []
+    assert binding.relations == []
+
+
+@pytest.mark.django_db(databases="__all__")
+def test_sync_bkbase_v4_components_clears_empty_databus_strategy(mocker):
+    models.DataBusConfig.objects.create(
+        name="graph_databus",
+        namespace="bkmonitor",
+        bk_tenant_id="system",
+        data_link_name="graph_link",
+        bk_biz_id=1001,
+        status="OK",
+        data_id_name="graph_data_id",
+        sink_names=[f"{DataLinkKind.VMSTORAGEBINDING.value}:graph_vm_binding"],
+        data_link_strategy=models.DataLink.GRAPH_RELATION_TIME_SERIES,
+    )
+
+    mocker.patch(
+        "metadata.task.bkbase.api.bkdata.list_data_link",
+        return_value=[
+            {
+                "metadata": {
+                    "name": "graph_databus",
+                    "labels": {"bk_biz_id": "1001"},
+                    "annotations": {},
+                },
+                "spec": {
+                    "sources": [{"kind": DataLinkKind.DATAID.value, "name": "graph_data_id"}],
+                    "sinks": [{"kind": DataLinkKind.VMSTORAGEBINDING.value, "name": "graph_vm_binding"}],
+                },
+                "status": {"phase": "OK"},
+            }
+        ],
+    )
+
+    _sync_bkbase_v4_datalink_components(
+        bk_tenant_id="system",
+        namespace="bkmonitor",
+        kind=DataLinkKind.DATABUS.value,
+    )
+
+    databus = models.DataBusConfig.objects.get(name="graph_databus")
+    assert databus.data_link_strategy == ""
+
+
+@pytest.mark.django_db(databases="__all__")
+def test_sync_bkbase_v4_storage_bindings_fill_table_id_from_result_table(mocker):
+    models.ResultTableConfig.objects.create(
+        name="graph_vm_rt",
+        namespace="bkmonitor",
+        bk_tenant_id="system",
+        bk_biz_id=1001,
+        table_id="1001_bkmonitor_time_series_60010.__default__",
+    )
+    models.ResultTableConfig.objects.create(
+        name="graph_vm_rt_graph",
+        namespace="bkmonitor",
+        bk_tenant_id="system",
+        bk_biz_id=1001,
+        table_id="1001_bkmonitor_time_series_60010.__default__",
+    )
+    mocker.patch(
+        "metadata.task.bkbase.api.bkdata.list_data_link",
+        return_value=[
+            {
+                "metadata": {
+                    "name": "graph_vm_rt",
+                    "labels": {"bk_biz_id": "1001"},
+                    "annotations": {},
+                },
+                "spec": {
+                    "storage": {"name": "vm-default"},
+                    "data": {"name": "graph_vm_rt"},
+                },
+                "status": {"phase": "OK"},
+            }
+        ],
+    )
+
+    _sync_bkbase_v4_datalink_components(
+        bk_tenant_id="system",
+        namespace="bkmonitor",
+        kind=DataLinkKind.VMSTORAGEBINDING.value,
+    )
+
+    vm_binding = models.VMStorageBindingConfig.objects.get(name="graph_vm_rt")
+    assert vm_binding.table_id == "1001_bkmonitor_time_series_60010.__default__"
+
+    mocker.patch(
+        "metadata.task.bkbase.api.bkdata.list_data_link",
+        return_value=[
+            {
+                "metadata": {
+                    "name": "graph_vm_rt_graph",
+                    "labels": {"bk_biz_id": "1001"},
+                    "annotations": {},
+                },
+                "spec": {
+                    "storage": {"name": "surreal-default"},
+                    "data": {"name": "graph_vm_rt_graph"},
+                    "table_type": "normal",
+                    "vertices": [{"name": "pod", "id_fields": ["pod_name"]}],
+                    "relations": [{"name": "pod_node", "from": "pod", "to": "node"}],
+                },
+                "status": {"phase": "OK"},
+            }
+        ],
+    )
+
+    _sync_bkbase_v4_datalink_components(
+        bk_tenant_id="system",
+        namespace="bkmonitor",
+        kind=DataLinkKind.SURREALDBBINDING.value,
+    )
+
+    surrealdb_binding = SurrealDBBindingConfig.objects.get(name="graph_vm_rt_graph")
+    assert surrealdb_binding.table_id == "1001_bkmonitor_time_series_60010.__default__"
+
+
+@pytest.mark.django_db(databases="__all__")
+def test_sync_bkbase_v4_components_ignores_falsy_non_surrealdb_fields(mocker):
+    models.DataIdConfig.objects.create(
+        name="metric_data",
+        namespace="bkmonitor",
+        bk_tenant_id="system",
+        data_link_name="metric_link",
+        bk_biz_id=1001,
+        bk_data_id=60010,
+    )
+    mocker.patch(
+        "metadata.task.bkbase.api.bkdata.list_data_link",
+        return_value=[
+            {
+                "metadata": {
+                    "name": "metric_data",
+                    "labels": {"bk_biz_id": "1001"},
+                    "annotations": {},
+                },
+                "spec": {"bizId": 1001, "eventType": "metric", "maintainers": ["admin"]},
+                "status": {"phase": "OK"},
+            }
+        ],
+    )
+
+    _sync_bkbase_v4_datalink_components(
+        bk_tenant_id="system",
+        namespace="bkmonitor",
+        kind=DataLinkKind.DATAID.value,
+    )
+
+    assert models.DataIdConfig.objects.get(name="metric_data").bk_data_id == 60010
 
 
 @pytest.mark.django_db(databases="__all__")
@@ -369,7 +557,13 @@ def test_sync_bkbase_clusters(create_or_delete_records):
                 "namespace": "bkmonitor",
                 "name": "test_vm_cluster",
             },
-            "spec": {"insertHost": "vm.example.com", "insertPort": 8480, "user": "vm_user", "password": "vm_password"},
+            "spec": {
+                "insertHost": "vm.example.com",
+                "insertPort": 8480,
+                "user": "vm_user",
+                "password": "vm_password",
+                "bkBizId": 1001,
+            },
         }
     ]
 
@@ -386,6 +580,7 @@ def test_sync_bkbase_clusters(create_or_delete_records):
                 "table_bucket_num": None,
                 "shard_minutes": 1,
                 "v3_rename": None,
+                "bk_biz_id": 100380,
             },
             "status": {
                 "phase": "Ok",
@@ -395,8 +590,36 @@ def test_sync_bkbase_clusters(create_or_delete_records):
             },
         }
     ]
+    mock_surrealdb_data = [
+        {
+            "kind": "SurrealDB",
+            "metadata": {"namespace": "bkmonitor", "name": "surreal_test", "labels": {}, "annotations": {}},
+            "spec": {
+                "host": "surreal_test.test",
+                "port": 8000,
+                "user": "root",
+                "password": "root",
+                "version": "2.3.2",
+            },
+            "status": {"phase": "Ok"},
+        }
+    ]
+
+    def list_data_link_side_effect(*args, **kwargs):
+        kind = kwargs["kind"]
+        namespace = kwargs["namespace"]
+        if kind == "elasticsearchs" and namespace == "bklog":
+            return mock_es_data
+        if kind == "vmstorages" and namespace == "bkmonitor":
+            return mock_vm_data
+        if kind == "surrealdbs" and namespace == "bkmonitor":
+            return mock_surrealdb_data
+        if kind == "dorises" and namespace == "bklog":
+            return mock_doris_data
+        return []
+
     with patch("core.drf_resource.api.bkdata.list_data_link") as mock_api:
-        mock_api.side_effect = [mock_es_data, mock_vm_data, mock_doris_data]
+        mock_api.side_effect = list_data_link_side_effect
         sync_all_bkbase_cluster_info()
 
         es_cluster = models.ClusterInfo.objects.get(domain_name="es.example.com")
@@ -408,11 +631,70 @@ def test_sync_bkbase_clusters(create_or_delete_records):
         assert vm_cluster.username == "vm_user"
         assert vm_cluster.password == "vm_password"
         assert vm_cluster.cluster_type == models.ClusterInfo.TYPE_VM
+        assert vm_cluster.default_settings["bk_biz_id"] == 1001
 
         doris_cluster = models.ClusterInfo.objects.get(domain_name="doris_test.test")
         assert doris_cluster.username == "testuser"
         assert doris_cluster.password == "testpwd"
         assert doris_cluster.cluster_type == models.ClusterInfo.TYPE_DORIS
+        assert doris_cluster.default_settings["bk_biz_id"] == 100380
+        assert doris_cluster.custom_option == json.dumps({"bk_biz_id": 100380})
+
+        surrealdb_cluster = models.ClusterInfo.objects.get(domain_name="surreal_test.test")
+        assert surrealdb_cluster.username == "root"
+        assert surrealdb_cluster.password == "root"
+        assert surrealdb_cluster.cluster_type == models.ClusterInfo.TYPE_SURREALDB
+        assert surrealdb_cluster.version == "2.3.2"
+
+
+@pytest.mark.django_db(databases="__all__")
+def test_sync_bkbase_doris_cluster_custom_option(create_or_delete_records):
+    doris_config = next(
+        config for config in BKBASE_V4_KIND_STORAGE_CONFIGS if config["cluster_type"] == models.ClusterInfo.TYPE_DORIS
+    )
+    cluster_data = {
+        "kind": "Doris",
+        "metadata": {"namespace": "bklog", "name": "doris_custom_option", "labels": {}, "annotations": {}},
+        "spec": {
+            "host": "doris_custom_option.test",
+            "port": 9030,
+            "user": "testuser",
+            "password": "testpwd",
+            "bk_biz_id": 100380,
+        },
+    }
+
+    models.ClusterInfo.objects.create(
+        bk_tenant_id="system",
+        cluster_type=models.ClusterInfo.TYPE_DORIS,
+        cluster_name="doris_custom_option",
+        display_name="doris_custom_option",
+        domain_name="doris_custom_option.test",
+        port=9030,
+        description="",
+        is_default_cluster=False,
+    )
+    sync_bkbase_cluster_info(
+        bk_tenant_id="system",
+        cluster_data=cluster_data,
+        field_mappings=doris_config["field_mappings"],
+        cluster_type=models.ClusterInfo.TYPE_DORIS,
+        update=True,
+    )
+    cluster = models.ClusterInfo.objects.get(cluster_name="doris_custom_option")
+    assert cluster.custom_option == json.dumps({"bk_biz_id": 100380})
+
+    cluster.custom_option = json.dumps({"source": "manual"})
+    cluster.save(update_fields=["custom_option"])
+    sync_bkbase_cluster_info(
+        bk_tenant_id="system",
+        cluster_data=cluster_data,
+        field_mappings=doris_config["field_mappings"],
+        cluster_type=models.ClusterInfo.TYPE_DORIS,
+        update=True,
+    )
+    cluster.refresh_from_db()
+    assert cluster.custom_option == json.dumps({"source": "manual"})
 
 
 # 计算平台Meta接口的返回值(这里只Mock了监控平台需要关注的部分)

@@ -133,6 +133,8 @@ export default {
     'Generated incident, contains {alert_count} alarms, incident person in charge: {assignees}',
   '故障观察中，剩余观察时间{last_minutes}分钟':
     'Incident under observation, remaining observation time: {last_minutes} minutes',
+  故障观察中: 'Incident under observation',
+  故障在观察期间重新打开: 'Incident reopened during observation',
   '故障通知已发送（接收人：{receivers}）': 'Incident notification sent (recipients: {receivers})',
   故障已恢复: 'Incident restored',
   '故障{merged_incident_name}被合并入当前故障': 'Incident {merged_incident_name} merged into the current incident',
@@ -203,4 +205,20 @@ export default {
   '上升{0}%时触发告警': 'Trigger an alarm when rising {0}%',
   '下降{0}%时触发告警': 'Trigger an alarm when falling {0}%',
   '{0}上升{1}%或下降{2}%': '{0} rises {1}% or falls {2}%',
+  这个告警我有经验: 'I have experience with this alarm',
+  已归档: 'Archived',
+
+  // Issue 拆分合并
+  '误合并，根因不同': 'Merged incorrectly, root cause different',
+  影响范围不同: 'Affected scope different',
+  '责任 Owner 不同': 'Owner different',
+  修复方案不同: 'Fixing solution different',
+  后续复盘需要独立跟踪: 'Needs to be tracked independently for follow-up',
+  '异常类型 / 日志模块相近': 'Similarity of abnormal type / log module',
+  'message 高度相似': 'message highly similar',
+  堆栈顶帧一致: 'Stack top frame consistent',
+  服务或链路维度相关: 'Service or linkage dimension related',
+  时间窗口接近: 'Time window close to each other',
+  日志聚类一致: 'Log clustering consistent',
+  人工确认同根因: 'Manual confirmation same root cause',
 };

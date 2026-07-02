@@ -422,7 +422,9 @@ class DataSource(models.Model):
             # 等待 3s 后查询一次，减少请求次数
             time.sleep(3)
             try:
-                data = get_data_id_v2(data_name=data_name, is_base=is_base, bk_biz_id=bk_biz_id, namespace=namespace)
+                data = get_data_id_v2(
+                    bk_tenant_id=bk_tenant_id, data_name=data_name, is_base=is_base, namespace=namespace
+                )
             except BKAPIError as e:
                 logger.error("get data id from bkdata error: %s", e)
                 continue
@@ -613,7 +615,7 @@ class DataSource(models.Model):
                 is_base = False
 
                 # 如果需要走V4链路，则需要确保Kafka集群已经注册到bkbase平台
-                if not mq_cluster.registered_to_bkbase and settings.ENABLE_DATAID_REGISTER_WITH_CLUSTER_NAME:
+                if not mq_cluster.registered_to_bkbase:
                     raise ValueError(
                         f"kafka cluster {mq_cluster.cluster_name} is not registered to bkbase, please contact administrator to register"
                     )
@@ -1006,6 +1008,30 @@ class DataSource(models.Model):
         result = api.gse.add_route(**params)
         return result.get("channel_id", -1) == self.bk_data_id
 
+    def register_to_gse(self) -> bool:
+        """注册数据源到gse"""
+        logger.info(f"try to register data_id->[{self.bk_data_id}] to gse")
+
+        # 查询
+        try:
+            result = api.gse.query_route(
+                condition={"plat_name": config.DEFAULT_GSE_API_PLAT_NAME, "channel_id": self.bk_data_id},
+                operation={"operator_name": settings.COMMON_USERNAME},
+            )
+            return True
+        except BKAPIError as e:
+            if "not found" not in str(e):
+                logger.error(f"query gse route failed, error:({e})")
+                raise
+
+        params = {
+            "metadata": {"channel_id": self.bk_data_id, "plat_name": config.DEFAULT_GSE_API_PLAT_NAME},
+            "operation": {"operator_name": settings.COMMON_USERNAME},
+            "route": [self.gse_route_config],
+        }
+        result = api.gse.add_route(**params)
+        return result.get("channel_id", -1) == self.bk_data_id
+
     def refresh_gse_config_to_gse(self):
         """同步路由配置到gse"""
         if self.mq_cluster.gse_stream_to_id == -1:
@@ -1312,7 +1338,6 @@ class DataSourceOption(OptionBase):
     OPTION_ALIGN_TIME_UNIT = "align_time_unit"
     # 允许指标为空时，丢弃记录选项, 值为 bool 型
     OPTION_DROP_METRICS_ETL_CONFIGS = "drop_metrics_etl_configs"
-
     # 增加option标记内容
     bk_data_id = models.IntegerField("数据源ID", db_index=True)
     bk_tenant_id = models.CharField("租户ID", max_length=256, null=True, default="system")

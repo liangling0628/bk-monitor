@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
 Copyright (C) 2017-2025 Tencent. All rights reserved.
@@ -8,6 +7,7 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import pytest
 from django.conf import settings
 from django.utils.functional import empty
@@ -21,15 +21,19 @@ def pytest_configure():
     config_dict = {key: getattr(monitor_settings, key) for key in dir(monitor_settings) if key.upper() == key}
 
     # fix database collation
-    config_dict["DATABASES"]["default"]["TEST"] = {
-        "CHARSET": "utf8",
-        "COLLATION": "utf8_general_ci",
-    }
+    config_dict["DATABASES"]["default"].setdefault("TEST", {}).update(
+        {
+            "CHARSET": "utf8",
+            "COLLATION": "utf8_general_ci",
+        }
+    )
 
-    config_dict["DATABASES"]["monitor_api"]["TEST"] = {
-        "CHARSET": "utf8",
-        "COLLATION": "utf8_general_ci",
-    }
+    config_dict["DATABASES"]["monitor_api"].setdefault("TEST", {}).update(
+        {
+            "CHARSET": "utf8",
+            "COLLATION": "utf8_general_ci",
+        }
+    )
 
     if settings._wrapped is empty:
         settings.configure(**config_dict)

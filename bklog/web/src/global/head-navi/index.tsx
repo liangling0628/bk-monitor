@@ -39,6 +39,7 @@ import useStore from '@/hooks/use-store';
 import logoImg from '@/images/log-logo.png';
 import platformConfigStore from '@/store/modules/platform-config';
 import { BK_LOG_STORAGE } from '@/store/store.type';
+import { isFeatureToggleOn } from '@/store/helper';
 import { bkDropdownMenu, bkMessage } from 'bk-magic-vue';
 import jsCookie from 'js-cookie';
 import { useRoute } from 'vue-router/composables';
@@ -164,8 +165,14 @@ export default defineComponent({
     function jumpToHome() {
       store.commit('updateState', { isShowGlobalDialog: false });
       if ((window as any).IS_EXTERNAL) {
+        const externalMenu = store.state.externalMenu as string[] || [];
+        // 外部版优先跳转管理，无管理权限再考虑检索或客户端日志检索
+        let defaultRoute = 'manage';
+        if (externalMenu.includes('manage')) defaultRoute = 'manage';
+        else if (externalMenu.includes('retrieve')) defaultRoute = 'retrieve';
+        else if (externalMenu.includes('client-log-search')) defaultRoute = 'client-log-search';
         router.push({
-          name: 'manage',
+          name: defaultRoute,
           query: {
             spaceUid: store.state.spaceUid,
             bizId: bkBizId.value,
@@ -188,7 +195,12 @@ export default defineComponent({
       // 相同菜单再次点击时的处理策略
       const sameMenuHandlers: Record<string, () => void> = {
         retrieve: () => {
-          router.push({ name: 'retrieve', query: spaceUidQuery });
+          const indexId = route.params?.indexId;
+          router.push({
+            name: 'retrieve',
+            params: indexId ? { indexId } : undefined,
+            query: spaceUidQuery,
+          });
         },
         extract: () => {
           if (currentRoute.query.create) {
@@ -213,13 +225,13 @@ export default defineComponent({
       const navigateHandlers: Record<string, () => void> = {
         monitor: () => {
           const url = `${(window as any).MONITOR_URL}/?bizId=${bkBizId.value}#/strategy-config`;
-          window.open(url, '_blank');
+          window.open(url, '_blank', 'noopener,noreferrer');
         },
         trace: () => {
           router.push({ name: 'trace-list', query: spaceUidQuery });
         },
         dashboard: () => {
-          window.open(`${window.MONITOR_URL}/?bizId=${bkBizId.value}#/grafana`, '_blank');
+          window.open(`${window.MONITOR_URL}/?bizId=${bkBizId.value}#/grafana`, '_blank', 'noopener,noreferrer');
         },
         default: () => {
           router.push({ name: menu.id, query: spaceUidQuery });
@@ -300,7 +312,7 @@ export default defineComponent({
       } else if (type === 'docCenter') {
         handleGotoLink('docCenter');
       } else if (type === 'feedback') {
-        window.open((window as any).BK_FAQ_URL);
+        window.open((window as any).BK_FAQ_URL, '_blank', 'noopener,noreferrer');
       }
     }
 
@@ -419,9 +431,16 @@ export default defineComponent({
 
     // 计算可见菜单（外部版根据 externalMenu 限制）
     const menuList = computed(() => {
-      const list =        (navMenu.topMenu as any).value?.filter((menu: any) => {
-        return menu.feature === 'on' && (isExternal.value ? store.state.externalMenu.includes(menu.id) : true);
-      }) || [];
+      const list =
+        (navMenu.topMenu as any).value?.filter((menu: any) => {
+          const baseFilter = menu.feature === 'on' && (isExternal.value ? store.state.externalMenu.includes(menu.id) : true);
+          if (!baseFilter) return false;
+          // 客户端日志菜单项需要检查 tgpa_task 功能开关
+          if (menu.id === 'client-log-search') {
+            return isFeatureToggleOn('tgpa_task', [String(bkBizId.value), String(store.state.spaceUid)]);
+          }
+          return true;
+        }) || [];
       if (process.env.NODE_ENV === 'development' && (process as any).env.MONITOR_APP === 'apm' && list.length) {
         return [...list, { id: 'monitor-apm-log', name: 'APM Log检索' }];
       }

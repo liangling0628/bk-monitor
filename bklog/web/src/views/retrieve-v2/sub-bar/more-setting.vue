@@ -3,6 +3,7 @@
   import useStore from '@/hooks/use-store';
   import useRouter from '@/hooks/use-router';
   import useLocale from '@/hooks/use-locale';
+  import { isFeatureToggleOn } from '@/hooks/use-feature-toggle';
 
   const emit = defineEmits(['update:is-show-cluster-setting']);
 
@@ -19,6 +20,10 @@
   const indexSetItem = computed(() =>
     store.state.retrieve.flatIndexSetList.find(item => item.index_set_id === `${indexSetId.value}`),
   );
+  /** 判断当前索引集是否是索引组（有子节点） */
+  const isIndexGroup = computed(() => {
+    return (indexSetItem.value?.children?.length ?? 0) > 0;
+  });
   const isPopoverShow = ref(false);
 
   const isUnionSearch = computed(() => store.isUnionSearch);
@@ -29,18 +34,7 @@
   const bkBizId = computed(() => store.state.bkBizId);
 
   const isAiopsToggle = computed(() => {
-    // 日志聚类总开关
-    const { bkdata_aiops_toggle: bkdataAiopsToggle } = window.FEATURE_TOGGLE;
-    const aiopsBizList = window.FEATURE_TOGGLE_WHITE_LIST?.bkdata_aiops_toggle;
-
-    switch (bkdataAiopsToggle) {
-      case 'on':
-        return true;
-      case 'off':
-        return false;
-      default:
-        return aiopsBizList ? aiopsBizList.some(item => item.toString() === bkBizId.value) : false;
-    }
+    return isFeatureToggleOn('bkdata_aiops_toggle', String(bkBizId.value));
   });
 
   const settingMenuList = ref([
@@ -56,13 +50,29 @@
     bkdata: 'bkdata-index-set-masking',
     setIndex: 'log-index-set-masking',
   });
+  const isV2Enabled = computed(() => {
+    return isFeatureToggleOn('log_manage_v2', [String(bkBizId.value), String(spaceUid.value)]);
+  });
+
   /** 路由跳转name */
-  const routeNameList = ref({
-    log: 'manage-collection',
-    custom: 'custom-report-detail',
-    bkdata: 'bkdata-index-set-manage',
-    es: 'es-index-set-manage',
-    indexManage: 'log-index-set-manage',
+  const routeNameList = computed(() => {
+    if (isV2Enabled.value) {
+      return {
+        log: 'manage-collection',
+        custom: 'manage-collection',
+        bkdata: 'manage-collection',
+        es: 'manage-collection',
+        indexManage: 'log-index-set-manage',
+        indexGroup: 'collection-item-list', // 索引组跳转到新版采集列表页
+      };
+    }
+    return {
+      log: 'manage-collection',
+      custom: 'custom-report-detail',
+      bkdata: 'bkdata-index-set-manage',
+      es: 'es-index-set-manage',
+      indexManage: 'log-index-set-manage',
+    };
   });
 
   const accessList = ref([
@@ -82,13 +92,15 @@
    */
   const initJumpRouteList = detailStr => {
     if (!detailStr) return;
-    if (!['log', 'es', 'bkdata', 'custom', 'setIndex'].includes(detailStr)) {
+    if (!['log', 'es', 'bkdata', 'custom', 'setIndex', 'indexGroup'].includes(detailStr)) {
       showSettingMenuList.value = isAiopsToggle.value ? settingMenuList.value : [];
       return;
     }
     // 赋值详情路由的key
     if (detailStr === 'setIndex') {
       detailJumpRouteKey.value = 'indexManage';
+    } else if (detailStr === 'indexGroup') {
+      detailJumpRouteKey.value = 'indexGroup';
     } else {
       detailJumpRouteKey.value = detailStr;
     }
@@ -108,6 +120,11 @@
     if (setItem?.scenario_id === 'log') {
       // 索引集类型为采集项或自定义上报
       if (setItem.collector_scenario_id === null) {
+        // 新版采集页面启用时，判断是否是索引组（有子节点）
+        if (isV2Enabled.value && isIndexGroup.value) {
+          initJumpRouteList('indexGroup');
+          return;
+        }
         // 若无日志类型 则类型为索引集
         initJumpRouteList('setIndex');
         return;
@@ -120,32 +137,54 @@
     initJumpRouteList(setItem?.scenario_id);
   };
 
+  const openRouteWindow = href => {
+    window.open(href, '_blank', 'noopener');
+  };
+
   const handleMenuClick = val => {
     // 不属于新开页面的操作
     if (['index', 'extract', 'clustering'].includes(val)) {
       emit('update:is-show-cluster-setting', true);
       return;
     }
-    const params = {
-      indexSetId: indexSetItem.value?.index_set_id,
-      collectorId: indexSetItem.value?.collector_config_id,
+
+    const currentKey = detailJumpRouteKey.value;
+    const isBkDataOrEs = ['bkdata', 'es'].includes(currentKey);
+    const isCustom = currentKey === 'custom';
+    const isIndexGroupType = currentKey === 'indexGroup';
+
+    let routeName = routeNameList.value[currentKey];
+    if (val === 'logMasking') {
+      routeName = maskingConfigRoute.value[maskingRouteKey.value];
+    }
+
+    const params = {};
+    const query = {
+      spaceUid: spaceUid.value,
+      bizId: bkBizId.value,
     };
-    // 判断当前是否是脱敏配置 分别跳不同的路由
-    const routeName =
-      val === 'logMasking'
-        ? maskingConfigRoute.value[maskingRouteKey.value]
-        : routeNameList.value[detailJumpRouteKey.value];
-    // 不同的路由跳转 传参不同
-    const { href } = router.resolve({
-      name: routeName,
-      params,
-      query: {
-        spaceUid: spaceUid.value,
-        type: val === 'logMasking' ? 'masking' : undefined,
-      },
-    });
+
+    // 索引组跳转时传递 indexSetId 参数
+    if (isIndexGroupType) {
+      query.indexSetId = indexSetItem.value?.index_set_id;
+    } else if (isV2Enabled.value && (isBkDataOrEs || isCustom)) {
+      params.collectorId = isBkDataOrEs
+        ? indexSetItem.value?.index_set_id
+        : indexSetItem.value?.collector_config_id;
+      query.typeKey = isCustom ? 'custom_report' : currentKey;
+    } else {
+      params.indexSetId = indexSetItem.value?.index_set_id;
+      params.collectorId = indexSetItem.value?.collector_config_id;
+    }
+
+    if (val === 'logMasking') {
+      query.type = 'masking';
+    }
+
+
+    const { href } = router.resolve({ name: routeName, params, query });
     refTrigger.value?.click?.();
-    window.open(href, '_blank');
+    openRouteWindow(href);
   };
 
   const handlePopShow = val => {

@@ -191,7 +191,7 @@
             </div>
           </template>
           <div
-            v-if="!isWinEventLog && conditions.type === 'none'"
+            v-if="!isWinEventLog && conditions?.type === 'none'"
             class="content-style"
           >
             <span>{{ $t('过滤内容') }}</span>
@@ -267,9 +267,9 @@
           <span
             v-bk-tooltips.top="{
               content: `${collectorData.storage_cluster_domain_name}:${collectorData.storage_cluster_port}`,
-              disabled: !collectorData.storage_cluster_name,
+              disabled: !collectorData.storage_display_name,
             }"
-            >{{ collectorData.storage_cluster_name || '-' }}</span
+            >{{ collectorData.storage_display_name || '-' }}</span
           >
         </div>
         <!-- 存储索引名 -->
@@ -377,30 +377,34 @@
         return this.params.winlog_name?.join(',') || '';
       },
       isHaveEventValue() {
-        return this.params.winlog_event_id.length || this.params.winlog_level.length;
+        return (this.params.winlog_event_id?.length || 0) || (this.params.winlog_level?.length || 0);
       },
       isContainer() {
         return this.collectorData.environment === 'container';
       },
       // 自定义上报基本信息
       isCustomReport() {
-        return this.$route.name === 'custom-report-detail';
+        return this.$route.name === 'custom-report-detail' || this.collectorData.log_access_type === 'custom_report';
       },
       isWinEventLog() {
         return this.collectorData.collector_scenario_id === 'wineventlog';
       },
       isNotWinAndHaveFilter() {
         if (this.isWinEventLog || this.params.type === 'none') return false;
-        return this.conditions && !!this.conditions?.separator_filters.length;
+        return !!this.conditions.separator_filters.length;
       },
       isMatchType() {
         return this.conditions.type === 'match';
       },
       params() {
-        return this.collectorData.params;
+        return this.collectorData.params || {};
       },
       conditions() {
-        return this.collectorData.params.conditions;
+        return {
+          type: 'none',
+          separator_filters: [],
+          ...(this.params.conditions || {}),
+        };
       },
       filterGroup() {
         const filters = this.conditions?.separator_filters;
@@ -483,9 +487,13 @@
         }
         const params = {};
         params.collectorId = this.$route.params.collectorId;
-        const routeName = this.isCustomReport ? 'custom-report-edit' : 'collectEdit';
+        // 从旧版自定义上报详情页进来的，继续走旧版编辑路由
+        // 从新版详情页（manage-collection + typeKey=custom_report）进来的，走新版 collectEdit
+        const isOldCustomRoute = this.$route.name === 'custom-report-detail';
+        const useOldCustomEdit = this.isCustomReport && isOldCustomRoute;
+        const routeName = useOldCustomEdit ? 'custom-report-edit' : 'collectEdit';
         // 根据当前路由动态设置backRoute
-        const backRoute = this.isCustomReport ? this.$route.name : 'manage-collection';
+        const backRoute = useOldCustomEdit ? this.$route.name : 'manage-collection';
         this.$router.push({
           name: routeName,
           params,
@@ -493,6 +501,8 @@
             spaceUid: this.$store.state.spaceUid,
             backRoute,
             type: 'basicInfo',
+            typeKey: this.collectorData.log_access_type,
+            indexSetId: this.$route.query.indexSetId,
           },
         });
       },

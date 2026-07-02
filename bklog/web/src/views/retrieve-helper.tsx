@@ -27,6 +27,7 @@
 import { Ref } from 'vue';
 
 import { parseTableRowData } from '@/common/util';
+import { getLocationQueryParams } from '@/utils';
 
 import AiAssitantHelper from '@/global/ai-assitant/ai-assitant-helper';
 import RetrieveBase from './retrieve-core/base';
@@ -47,8 +48,11 @@ export enum STORAGE_KEY {
 export { GradeConfiguration, GradeSetting, RetrieveEvent };
 // 滚动条查询条件
 const GLOBAL_SCROLL_SELECTOR = '.retrieve-v2-index.scroll-y';
+
+
 class RetrieveHelper extends RetrieveBase {
   scrollEventAdded = false;
+  scrollTarget: Element | null = null;
   mousedownEvent = null;
   aiAssitantHelper: typeof AiAssitantHelper;
 
@@ -164,6 +168,24 @@ class RetrieveHelper extends RetrieveBase {
    * @param id
    */
   setIndexsetId(idList: string[], type: string, fireEvent = true) {
+    // 监控下的关联日志需要再浏览器本地记住最近一次使用的索引集
+    if (window.__IS_MONITOR_COMPONENT__) {
+      const query = getLocationQueryParams();
+      const bizAppKey = `${query.bizId} ${query['filter-app_name']}`;
+      let memoryObj = {};
+      const storageStr = localStorage.getItem('MONITOR_LOG_RECENT_INDEX_SET_ID');
+      if (storageStr) {
+        // 兼容旧的代码，后期可以去除
+        const parseValue = JSON.parse(storageStr);
+        if (!Array.isArray(parseValue)) {
+          memoryObj = parseValue;
+        }
+      }
+      Object.assign(memoryObj, {
+        [bizAppKey]: idList
+      })
+      localStorage.setItem('MONITOR_LOG_RECENT_INDEX_SET_ID', JSON.stringify(memoryObj));
+    }
     this.indexSetIdList = idList;
     this.indexSetType = type;
     if (fireEvent) {
@@ -207,10 +229,12 @@ class RetrieveHelper extends RetrieveBase {
     const formatRegStr = !regExpMark;
     this.markInstance.highlight(
       (keywords ?? []).map((keyword, index) => {
+        const colorPair = this.RGBA_LIST[index % this.RGBA_LIST.length];
         return {
           text: keyword,
           className: `highlight-${index}`,
-          backgroundColor: this.RGBA_LIST[index % this.RGBA_LIST.length],
+          backgroundColor: colorPair[0],
+          color: colorPair[1],
           textReg: this.getRegExp(keyword, caseSensitive ? '' : 'i', accuracy === 'exactly', formatRegStr),
         };
       }),
@@ -353,6 +377,16 @@ class RetrieveHelper extends RetrieveBase {
   setSearchBarHeight(height: number) {
     this.searchBarHeight = height;
     this.runEvent(RetrieveEvent.SEARCHBAR_HEIGHT_CHANGE, height);
+  }
+
+  /**
+   * 设置场景筛选面板高度
+   * 场景模式下用于计算吸顶状态
+   * @param height
+   */
+  setSceneFilterPanelHeight(height: number) {
+    this.sceneFilterPanelHeight = height;
+    this.runEvent(RetrieveEvent.SCENE_FILTER_PANEL_HEIGHT_CHANGE, height);
   }
 
   setStorage(key: string, value: any) {
@@ -511,9 +545,14 @@ class RetrieveHelper extends RetrieveBase {
   }
 
   destroy() {
-    this.events.clear();
-    document.querySelector(this.globalScrollSelector)?.removeEventListener('scroll', this.handleScroll);
+    this.clearEvents();
+    // 销毁阶段滚动容器可能已从 document 移除，不能再依赖 querySelector。
+    // 必须使用注册时保存的 DOM 引用，否则监听器闭包会继续持有已卸载页面 DOM。
+    this.scrollTarget?.removeEventListener('scroll', this.handleScroll);
+    this.scrollTarget = null;
     this.scrollEventAdded = false;
+    this.mousedownEvent = null;
+    this.destroyMarkInstance();
   }
 
   /**
@@ -523,7 +562,11 @@ class RetrieveHelper extends RetrieveBase {
     if (!this.scrollEventAdded) {
       const target = document.querySelector(this.globalScrollSelector);
       if (target) {
-        target.addEventListener('scroll', e => this.handleScroll(e));
+        // 必须使用稳定函数引用注册，并保存真实 DOM 引用，destroy 时才能精确移除。
+        // 之前使用 e => this.handleScroll(e) 注册，却用 this.handleScroll 移除；
+        // 且销毁时重新 querySelector 可能查不到已卸载节点，都会导致滚动容器和页面 DOM 被闭包保留。
+        target.addEventListener('scroll', this.handleScroll);
+        this.scrollTarget = target;
         this.scrollEventAdded = true;
       }
     }

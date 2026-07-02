@@ -66,6 +66,7 @@ export default {
   数据采样: 'Data Sampling',
   数据量趋势: 'Data Volume Trend',
   告警策略: 'Alert Rules',
+  '告警 ID': 'Alert ID',
   查询设置: 'Query Settings',
   分享链接: 'Copy Link',
   数据来源: 'Data Source',
@@ -106,6 +107,7 @@ export default {
   黑名单: 'Black List',
   指标维度设置: 'Metric / Dimension Setting',
   此操作存在危险: 'This operation is dangerous',
+  此操作存在风险: 'This operation is risky',
   DB设置: 'DB settings',
   DB类型: 'DB type',
   '{0}月': '{0} month',
@@ -193,6 +195,9 @@ export default {
     'After association, related observation data will be automatically obtained, including events, etc. Note: After the pipeline is selected, the startup parameters must be synchronized to configure.',
   新增流水线: 'Add Pipeline',
   批量编辑通知对象: 'Batch edit notification object',
+  快捷筛选: 'Quick filter',
+  告警分析设置: 'Alarm Analysis Settings',
+  与我相关: 'Related to me',
   // 指标模版
   函数变量: 'Function Variable',
   维度变量: 'Dimension Variable',
@@ -218,8 +223,66 @@ export default {
   固定IP: 'Static IP',
   'IP-静态拓扑': 'IP-Static Topo',
   问问小鲸: 'Ask AI',
+
+  主机检索: 'Host Search',
+  'AI 分析结论': 'AI Analysis Conclusion',
   同环比: 'Year-on-year',
   '确定解除关联?': 'Are you sure you want to disassociate?',
   蓝鲸智云: 'Tencent BlueKing',
+  可疑维度: 'Suspicious dimension',
+  可疑调用链: 'Suspicious call chain',
+  可疑日志: 'Suspicious log',
+  可疑事件: 'Suspicious event',
+  告警状态详情: 'Alarm status details',
+  相关性指标: 'Relevance indicators',
+  收敛的告警: 'Converged alarms',
+  告警流转记录: 'Alarm flow record',
+  提醒告警产生: 'Reminder alarm generated',
+  预警告警产生: 'Pre-alarm generated',
+  致命告警产生: 'Fatal alarm generated',
+  告警触发阶段: 'Alarm trigger stage',
+  提醒告警时段: 'Reminder alarm time period',
+  预警告警时段: 'Pre-alarm time period',
+  致命告警时段: 'Fatal alarm time period',
   缩放: 'DataZoom',
+
+  诊断概率: 'Diagnostic probability',
+
+  // ISSUES
+  指派负责人: 'Assign owner',
+  批量指派负责人: 'Batch assign owner',
+  批量修改优先级: 'Batch modify priority',
+
+  // Issues 详情
+  最近的告警: 'Recent alerts',
+  最早的告警: 'The earliest alarm',
+  首次告警时间: 'First alarm time',
+
+  // Issues 活动节点
+  首次出现: 'First occurrence',
+  状态流转: 'Status transition',
+  用户评论: 'User comment',
+  'Issue 拆分': 'Issue split',
+  'Issue 合并': 'Issue merge',
+
+  // Issues 详情组件
+  活动: 'Activity',
+  输入评论: 'Input comment',
+  '历史 Issue': 'History Issue',
+  优先级变更: 'Priority change',
+  负责人变更: 'Owner change',
+  维度统计: 'Dimension Statistics',
+  查看完整评论: 'View full comment',
+  编辑评论: 'Edit comment',
+
+  // Issues 拆分合并
+  合并明细: 'Merge details',
+  '已并入但隐藏的 Issue': 'Issue merged but hidden',
+  拆分依据: 'Split criteria',
+  '合并 Issue': 'Merge Issue',
+  合并设置: 'Merge settings',
+  '主 Issue': 'Main Issue',
+  '被合并 Issue': 'Merged Issue',
+  合并依据: 'Merge criteria',
+  '合并策略：': 'Merge strategy:',
 };

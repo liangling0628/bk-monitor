@@ -64,9 +64,10 @@
           :collector-data="collectorData"
           :edit-auth="editAuth"
           :edit-auth-data="editAuthData"
+          :index-set-data="collectorData"
           :index-set-id="collectorData.index_set_id"
           :is="dynamicComponent"
-          :is-show-edit-btn="true"
+          :is-show-edit-btn="!['bkdata', 'es', 'custom_report'].includes($route.query.typeKey)"
           @update-active-panel="activePanel = $event"
         ></component>
       </keep-alive>
@@ -77,20 +78,27 @@
 <script>
   import BasicTab from '@/components/basic-tab';
   import AuthContainerPage from '@/components/common/auth-container-page';
-  import UsageDetails from '@/views/manage/manage-access/components/usage-details';
-
   import * as authorityMap from '../../../../../../common/authority-map';
-  import BasicInfo from './basic-info';
-  import CollectionStatus from './collection-status';
-  import DataStatus from './data-status';
-  import DataStorage from './data-storage';
-  import FieldInfo from './field-info.tsx';
+
+  const BasicInfo = () => import(/* webpackChunkName: 'manage-collection-basic-info' */ './basic-info');
+  const CollectionStatus = () =>
+    import(/* webpackChunkName: 'manage-collection-status' */ './collection-status');
+  const DataStorage = () => import(/* webpackChunkName: 'manage-collection-data-storage' */ './data-storage');
+  const DataStatus = () => import(/* webpackChunkName: 'manage-collection-data-status' */ './data-status');
+  const FieldInfo = () => import(/* webpackChunkName: 'manage-collection-field-info' */ './field-info.tsx');
+  const UsageDetails = () =>
+    import(/* webpackChunkName: 'manage-collection-usage-details' */ '@/views/manage/manage-access/components/usage-details');
+  const IndexSetBasicInfo = () =>
+    import(
+      /* webpackChunkName: 'manage-index-set-basic-info' */ '@/views/manage/manage-access/components/index-set/manage/basic-info'
+    );
 
   export default {
     name: 'CollectionItem',
     components: {
       AuthContainerPage,
       BasicInfo,
+      IndexSetBasicInfo,
       CollectionStatus,
       DataStorage,
       DataStatus,
@@ -108,43 +116,75 @@
         editAuth: false,
         /** 编辑无权限时的弹窗数据 */
         editAuthData: null,
-        panels: [
+
+      };
+    },
+    computed: {
+      panels() {
+        const type = this.$route.query.typeKey;
+        // 第三方ES / 计算平台：仅3个 tab（与旧版 index-set/manage 对齐）
+        if (['bkdata', 'es'].includes(type)) {
+          return [
+            { name: 'basicInfo', label: this.$t('配置信息') },
+            { name: 'usageDetails', label: this.$t('使用详情') },
+            { name: 'fieldInfo', label: this.$t('字段信息') },
+          ];
+        }
+        // 自定义上报：5个 tab，无采集状态（与旧版 custom-report/detail.vue 对齐）
+        if (type === 'custom_report') {
+          return [
+            { name: 'basicInfo', label: this.$t('配置信息') },
+            { name: 'dataStorage', label: this.$t('数据存储') },
+            { name: 'fieldInfo', label: this.$t('字段信息') },
+            { name: 'dataStatus', label: this.$t('数据状态') },
+            { name: 'usageDetails', label: this.$t('使用详情') },
+          ];
+        }
+        // 标准日志采集：完整6个 tab
+        return [
           { name: 'basicInfo', label: this.$t('配置信息') },
           { name: 'collectionStatus', label: this.$t('采集状态') },
           { name: 'fieldInfo', label: this.$t('字段信息') },
           { name: 'dataStorage', label: this.$t('数据存储') },
           { name: 'dataStatus', label: this.$t('数据状态') },
           { name: 'usageDetails', label: this.$t('使用详情') },
-        ],
-      };
-    },
-    computed: {
+        ];
+      },
       dynamicComponent() {
+        const type = this.$route.query.typeKey;
+        const isBkDataOrEs = ['bkdata', 'es'].includes(type);
         const componentMaP = {
-          basicInfo: 'BasicInfo',
+          basicInfo: isBkDataOrEs ? 'IndexSetBasicInfo' : 'BasicInfo',
           collectionStatus: 'CollectionStatus',
           fieldInfo: 'FieldInfo',
           dataStorage: 'DataStorage',
           dataStatus: 'DataStatus',
           usageDetails: 'UsageDetails',
         };
-        return componentMaP[this.activePanel] || 'BasicInfo';
+        return componentMaP[this.activePanel] || (isBkDataOrEs ? 'IndexSetBasicInfo' : 'BasicInfo');
       },
     },
     created() {
       this.initPage();
-      this.getEditAuth();
+      const typeKey = this.$route.query.typeKey;
+      if (!['bkdata', 'es'].includes(typeKey)) {
+        this.getEditAuth();
+      }
     },
     methods: {
       async initPage() {
         // 进入路由需要先判断权限
         try {
+          const typeKey = this.$route.query.typeKey;
+          const isBkDataOrEs = ['bkdata', 'es'].includes(typeKey);
+          const collectorId = this.$route.params.collectorId;
+
           const paramData = {
-            action_ids: [authorityMap.VIEW_COLLECTION_AUTH],
+            action_ids: [isBkDataOrEs ? authorityMap.MANAGE_INDICES_AUTH : authorityMap.VIEW_COLLECTION_AUTH],
             resources: [
               {
-                type: 'collection',
-                id: this.$route.params.collectorId,
+                type: isBkDataOrEs ? 'indices' : 'collection',
+                id: collectorId,
               },
             ],
           };
@@ -154,13 +194,28 @@
             // 显示无权限页面
           } else {
             // 正常显示页面
-            const { data: collectorData } = await this.$http.request('collect/details', {
-              params: {
-                collector_config_id: this.$route.params.collectorId,
-              },
-            });
-            this.collectorData = collectorData;
-            this.$store.commit('collect/setCurCollect', collectorData);
+            // bkdata/es 的 initPage 已用 MANAGE_INDICES_AUTH 校验，直接复用结果
+            if (isBkDataOrEs) {
+              this.editAuth = true;
+              const [{ data: indexSetData }] = await Promise.all([
+                this.$http.request('indexSet/info', {
+                  params: {
+                    index_set_id: collectorId,
+                  },
+                }),
+                this.fetchScenarioMap(),
+              ]);
+              this.collectorData = indexSetData;
+              this.$store.commit('collect/updateCurIndexSet', indexSetData);
+            } else {
+              const { data: collectorData } = await this.$http.request('collect/details', {
+                params: {
+                  collector_config_id: collectorId,
+                },
+              });
+              this.collectorData = collectorData;
+              this.$store.commit('collect/setCurCollect', collectorData);
+            }
           }
         } catch (err) {
           console.warn(err);
@@ -183,13 +238,26 @@
           },
         });
       },
+      async fetchScenarioMap() {
+        const scenarioMap = this.$store.state.collect.scenarioMap;
+        if (!scenarioMap) {
+          const { data } = await this.$http.request('meta/scenario');
+          const map = {};
+          data.forEach(item => {
+            map[item.scenario_id] = item.scenario_name;
+          });
+          this.$store.commit('collect/updateScenarioMap', map);
+        }
+      },
       async getEditAuth() {
         try {
+          const typeKey = this.$route.query.typeKey;
+          const isBkDataOrEs = ['bkdata', 'es'].includes(typeKey);
           const paramData = {
-            action_ids: [authorityMap.MANAGE_COLLECTION_AUTH],
+            action_ids: [isBkDataOrEs ? authorityMap.MANAGE_INDICES_AUTH : authorityMap.MANAGE_COLLECTION_AUTH],
             resources: [
               {
-                type: 'collection',
+                type: isBkDataOrEs ? 'indices' : 'collection',
                 id: this.$route.params.collectorId,
               },
             ],
@@ -197,7 +265,7 @@
           const res = await this.$store.dispatch('checkAndGetData', paramData);
           if (!res.isAllowed) this.editAuthData = res.data;
           this.editAuth = res.isAllowed;
-        } catch (error) {
+        } catch {
           this.editAuth = false;
         }
       },

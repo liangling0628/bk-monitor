@@ -228,31 +228,6 @@ const getStorageUsage = {
   url: '/index_set/storage_usage/',
   method: 'post',
 };
-
-// 获取客户端日志-采集下发-日志列表数据
-const getTaskLogList = {
-  url: '/tgpa/task/',
-  method: 'get',
-};
-
-// 客户端日志-新建采集
-const createCollectionTask = {
-  url: '/tgpa/task/',
-  method: 'post',
-};
-
-// 客户端日志-获取下载链接
-const getDownloadLink = {
-  url: '/tgpa/task/download_url/',
-  method: 'get',
-};
-
-// 客户端日志-获取索引集ID
-const getTaskIndexSetId = {
-  url: '/tgpa/task/index_set_id/',
-  method: 'get',
-};
-
 /**
  * 新版采集列表接口
  */
@@ -292,6 +267,22 @@ const delIndexGroup = {
 };
 
 /**
+ * 索引组 - 添加索引集
+ */
+const addIndexSetsToGroup = {
+  url: '/index_group/:index_set_id/add_index_sets/',
+  method: 'post',
+};
+
+/**
+ * 索引组 - 删除索引集
+ */
+const removeIndexSetsFromGroup = {
+  url: '/index_group/:index_set_id/remove_index_sets/',
+  method: 'post',
+};
+
+/**
  * 获取采集列表过滤相关枚举值
  */
 const collectorFieldEnums = {
@@ -304,6 +295,24 @@ const collectorFieldEnums = {
 const getCollectorStatus = {
   url: '/databus/log_access/collector_status/',
   method: 'post',
+};
+
+// 获取客户端日志-采集下发-日志列表数据
+const getTaskLogList = {
+  url: '/tgpa/task/',
+  method: 'get',
+};
+
+// 客户端日志-新建采集
+const createCollectionTask = {
+  url: '/tgpa/task/',
+  method: 'post',
+};
+
+// 客户端日志-获取索引集ID
+const getTaskIndexSetId = {
+  url: '/tgpa/task/index_set_id/',
+  method: 'get',
 };
 
 // 客户端日志-用户上报列表
@@ -382,18 +391,19 @@ export {
   getCheckInfos,
   reviewToken,
   getStorageUsage,
-  getTaskLogList,
-  createCollectionTask,
-  getDownloadLink,
-  getTaskIndexSetId,
   /** 新版采集管理 */
   newCollectList,
   getIndexGroupList,
   addIndexGroup,
   updateIndexGroup,
   delIndexGroup,
+  addIndexSetsToGroup,
+  removeIndexSetsFromGroup,
   collectorFieldEnums,
   getCollectorStatus,
+  getTaskLogList,
+  createCollectionTask,
+  getTaskIndexSetId,
   getUserReportList,
   syncUserReport,
   getFileStatus,

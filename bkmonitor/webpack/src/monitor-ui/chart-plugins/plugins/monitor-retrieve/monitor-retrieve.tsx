@@ -32,9 +32,11 @@ import {
   i18n,
   initGlobalComponents,
   initMonitorState,
+  initWindowState,
   MonitorApmLog as Log,
   logStore,
 } from '@blueking/monitor-apm-log/main';
+import dayjs from 'dayjs';
 import { serviceLogInfo, serviceRelationList } from 'monitor-api/modules/apm_log';
 import { handleTransformToTimestamp } from 'monitor-pc/components/time-range/utils';
 
@@ -60,7 +62,12 @@ export default class MonitorRetrieve extends tsc<void> {
   isInit = false;
   empty = true;
   loading = true;
+  bklogContentDom: HTMLElement | null = null;
+  bklogContentScrollTop = 0;
+  showQuickJump = true;
+
   async created() {
+    initWindowState();
     this.init();
   }
   beforeDestroy() {
@@ -69,6 +76,8 @@ export default class MonitorRetrieve extends tsc<void> {
       window.mainComponent.$destroy();
       window.mainComponent = null;
     }
+
+    this.bklogContentDom?.removeEventListener('scroll', this.handleBklogContentScroll);
   }
 
   async init() {
@@ -102,6 +111,8 @@ export default class MonitorRetrieve extends tsc<void> {
       });
       await this.$nextTick();
       window.mainComponent.$mount(this.$el.querySelector('#main'));
+      this.bklogContentDom = (await this.handleGetBklogContent()) as HTMLElement;
+      this.bklogContentDom?.addEventListener('scroll', this.handleBklogContentScroll);
     } else {
       this.empty = true;
     }
@@ -146,11 +157,93 @@ export default class MonitorRetrieve extends tsc<void> {
     window.open(url);
   }
 
+  toUnixMilliseconds(value: unknown) {
+    if (value === undefined || value === null || value === '') return '';
+    const s = String(value).trim();
+    if (/^\d+$/.test(s)) {
+      const n = Number(s);
+      return String(n).padEnd(13, '0');
+    }
+    const d = dayjs(s);
+    return d.isValid() ? String(d.valueOf()) : s;
+  }
+
+  handleQuickJump(type: 'config' | 'log') {
+    if (type === 'config') {
+      const appName = this.$route.query['filter-app_name'];
+      const serviceName = this.$route.query['filter-service_name'];
+      const url = location.href.replace(
+        location.hash,
+        `#/apm/service-config?app_name=${appName}&service_name=${serviceName}`
+      );
+      window.open(url, '_blank');
+    } else {
+      const { from, to, indexId, unionList, start_time, end_time, addition, search_mode, keyword } = this.$route.query;
+      const startMs = this.toUnixMilliseconds(start_time || from);
+      const endMs = this.toUnixMilliseconds(end_time || to);
+      let url = '';
+      if (unionList) {
+        url = `${window.bk_log_search_url}#/retrieve?bizId=${window.bk_biz_id}&search_mode=${search_mode}&keyword=${keyword}&start_time=${startMs}&end_time=${endMs}&addition=${addition || ''}&unionList=${unionList}`;
+      } else {
+        url = `${window.bk_log_search_url}#/retrieve/${indexId}?bizId=${window.bk_biz_id}&search_mode=${search_mode}&keyword=${keyword}&start_time=${startMs}&end_time=${endMs}&addition=${addition || ''}`;
+      }
+      window.open(url, '_blank');
+    }
+  }
+
+  async handleGetBklogContent() {
+    let timer = null;
+    let target = null;
+    return new Promise(resolve => {
+      timer = setInterval(() => {
+        target = document.querySelector('.v3-bklog-content');
+        if (target) {
+          clearInterval(timer);
+          resolve(target);
+        }
+      }, 1000);
+    });
+  }
+
+  handleBklogContentScroll() {
+    this.bklogContentScrollTop = this.bklogContentDom?.scrollTop || 0;
+    this.showQuickJump = this.bklogContentScrollTop <= 14;
+  }
+
   render() {
     return (
       <div class='monitor-retrieve'>
+        {this.showQuickJump && (
+          <div
+            style={{ top: `${14 - this.bklogContentScrollTop}px` }}
+            class='quick-jump-container'
+          >
+            <bk-button
+              class='quick-jump'
+              size='small'
+              theme='primary'
+              outline
+              text
+              onClick={() => this.handleQuickJump('config')}
+            >
+              {this.$t('关联配置')}
+              <i class='icon-monitor icon-fenxiang' />
+            </bk-button>
+            <bk-button
+              class='quick-jump'
+              size='small'
+              theme='primary'
+              outline
+              text
+              onClick={() => this.handleQuickJump('log')}
+            >
+              {this.$t('更多日志')}
+              <i class='icon-monitor icon-fenxiang' />
+            </bk-button>
+          </div>
+        )}
         {this.empty ? (
-          <div class='empty-chart-log'>
+          <div class='apm-empty-log'>
             {this.loading ? (
               window.i18n.t('加载中...')
             ) : (

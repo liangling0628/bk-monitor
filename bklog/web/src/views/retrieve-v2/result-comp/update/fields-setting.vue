@@ -103,6 +103,7 @@
             />
           </div>
           <div
+            v-if="isTemplateConfig"
             style="padding-left: 12px"
             class="table-sort"
           >
@@ -169,8 +170,7 @@
   import fieldsSettingOperate from './fields-setting-operate';
   import tableSort from './table-sort';
   import { BK_LOG_STORAGE } from '@/store/store.type';
-  import RetrieveHelper, { RetrieveEvent } from '@/views/retrieve-helper';
-import { isEqual } from 'lodash-es';
+
 
   /** 导出配置字段文件名前缀 */
   const FIELD_CONFIG_FILENAME_PREFIX = 'log-field-';
@@ -294,6 +294,9 @@ import { isEqual } from 'lodash-es';
         // 当前索引集的显示字段ID
         return this.$store.state.retrieve.filedSettingConfigID;
       },
+      isSceneMode() {
+        return this.$store.getters.isSceneMode;
+      },
       currentClickConfigData() {
         // 当前选中的配置
         return this.configTabPanels.find(item => item.id === this.currentClickConfigID) || this.configTabPanels?.[0];
@@ -357,10 +360,7 @@ import { isEqual } from 'lodash-es';
      },
       /** 保存或应用 */
       async confirmModifyFields() {
-        const updateSortList = this.$refs?.tableSortRef?.shadowSort || this.cachedSortFields;
         const currentVisibleList = this.$refs.fieldSettingRef.shadowVisible.map(item => item.field_name);
-        const oldSortList = this.$store.state.indexFieldInfo.user_custom_config.sortList;
-        const isSortListChanged = updateSortList.length && !isEqual(oldSortList, updateSortList);
         if (currentVisibleList.length === 0) {
           this.messageWarn(this.$t('显示字段不能为空'));
           return;
@@ -368,9 +368,10 @@ import { isEqual } from 'lodash-es';
         try {
           // 字段模板保持配置逻辑，表格设置打开时不需要执行
           if (this.isTemplateConfig) {
+            const updateSortList = this.$refs?.tableSortRef?.shadowSort || this.cachedSortFields;
             const confirmConfigData = {
               editStr: this.currentClickConfigData.name,
-              sort_list:updateSortList,
+              sort_list: updateSortList,
               display_fields: currentVisibleList,
               id: this.currentClickConfigData.id,
             };
@@ -380,27 +381,24 @@ import { isEqual } from 'lodash-es';
             if (this.currentClickConfigData.id !== this.filedSettingConfigID) {
               await this.submitFieldsSet(this.currentClickConfigData.id);
             }
+            // 模板配置模式下，只更新模板，不同步到个人配置
+            this.cancelModifyFields();
+            return;
           }
 
+          // 个人配置模式下的保存逻辑
           this.cancelModifyFields();
-          this.$store.commit('updateState', { 'localSort': false});
           this.$store.commit('updateIsSetDefaultTableColumn', false);
-          this.$store
-            .dispatch('userFieldConfigChange', {
-              displayFields: currentVisibleList,
-              sortList: updateSortList,
-              fieldsWidth: {},
-            })
-            .then(() => {
-              this.$store.commit('resetVisibleFields', currentVisibleList);
-              this.$store.commit('updateIsSetDefaultTableColumn');
-            });
 
-            if (isSortListChanged) {
-              await this.$store.dispatch('requestIndexSetFieldInfo');
-              await this.$store.dispatch('requestIndexSetQuery');
-              RetrieveHelper.fire(RetrieveEvent.SORT_LIST_CHANGED);
-            }
+          // 先等待用户配置保存完成
+          await this.$store.dispatch('userFieldConfigChange', {
+            displayFields: currentVisibleList,
+            fieldsWidth: {},
+          });
+
+          // 更新本地显示字段状态
+          this.$store.commit('resetVisibleFields', currentVisibleList);
+          this.$store.commit('updateIsSetDefaultTableColumn');
 
         } catch (error) {
           console.warn(error);
@@ -410,29 +408,24 @@ import { isEqual } from 'lodash-es';
       },
       /** 更新config */
       async submitFieldsSet(configID) {
-        await this.$http
-          .request('retrieve/postFieldsConfig', {
-            data: {
+        const requestName = this.isSceneMode ? 'retrieve/sceneApplyFieldsConfig' : 'retrieve/postFieldsConfig';
+        const data = this.isSceneMode
+          ? { config_id: configID }
+          : {
               index_set_id: window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId,
               index_set_ids: this.unionIndexList,
               index_set_type: this.isUnionSearch ? 'union' : 'single',
               display_fields: this.shadowVisible,
               sort_list: this.cachedSortFields,
               config_id: configID,
-            },
-          })
+            };
+        await this.$http
+          .request(requestName, { data })
           .catch(e => {
             console.warn(e);
           });
       },
       cancelModifyFields() {
-        // 取消时恢复缓存数据，使用深拷贝
-        if (!this.isTemplateConfig) {
-          // 只更新父组件的数据，子组件会通过 props 自动更新
-          this.shadowVisible = structuredClone(this.cachedVisibleFields);
-          // this.shadowSort = structuredClone(this.cachedSortFields);
-          this.cachedSortFields = structuredClone(this.shadowSort);
-        }
         this.$emit('cancel');
         this.isSortFieldChanged = false;
       },
@@ -541,21 +534,29 @@ import { isEqual } from 'lodash-es';
       },
       /** 更新配置 */
       async handleUpdateConfig(updateItem, isCreate = false, successMsg) {
-        const requestStr = isCreate ? 'create' : 'update';
-        const data = {
+        const requestName = this.isSceneMode
+          ? `retrieve/scene${isCreate ? 'Create' : 'Update'}Config`
+          : `retrieve/${isCreate ? 'create' : 'update'}FieldsConfig`;
+        const baseData = {
           name: updateItem.editStr,
           sort_list: updateItem.sort_list,
           display_fields: updateItem.display_fields,
-          config_id: undefined,
-          index_set_id: window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId,
-          index_set_ids: this.unionIndexList,
-          index_set_type: this.isUnionSearch ? 'union' : 'single',
+          ...(!isCreate && { config_id: updateItem.id }),
         };
-        if (!isCreate) data.config_id = updateItem.id;
+        const data = this.isSceneMode
+          ? {
+              ...baseData,
+              bk_biz_id: this.$store.state.bkBizId,
+              scene_id: this.$store.state.indexItem.scene_active,
+            }
+          : {
+              ...baseData,
+              index_set_id: window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId,
+              index_set_ids: this.unionIndexList,
+              index_set_type: this.isUnionSearch ? 'union' : 'single',
+            };
         try {
-          await this.$http.request(`retrieve/${requestStr}FieldsConfig`, {
-            data,
-          });
+          await this.$http.request(requestName, { data });
           if (this.activeFieldTab === 'sort') {
             if (this.isSortFieldChanged) {
               this.$store.dispatch('requestIndexSetQuery', { formChartChange: false }).then(() => {
@@ -577,24 +578,24 @@ import { isEqual } from 'lodash-es';
       /** 删除配置 */
       async handleDeleteConfig(configID) {
         try {
-          await this.$http.request('retrieve/deleteFieldsConfig', {
-            data: {
-              config_id: configID,
-              index_set_id: window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId,
-              index_set_ids: this.unionIndexList,
-              index_set_type: this.isUnionSearch ? 'union' : 'single',
-            },
-          });
+          const requestName = this.isSceneMode ? 'retrieve/sceneDeleteConfig' : 'retrieve/deleteFieldsConfig';
+          const data = this.isSceneMode
+            ? { config_id: configID }
+            : {
+                config_id: configID,
+                index_set_id: window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId,
+                index_set_ids: this.unionIndexList,
+                index_set_type: this.isUnionSearch ? 'union' : 'single',
+              };
+          await this.$http.request(requestName, { data });
         } catch (error) {
         } finally {
           this.initRequestConfigListShow();
           this.newConfigStr = '';
           if (this.filedSettingConfigID === configID) {
             this.currentClickConfigID = this.configTabPanels[0].id;
-            const { display_fields } = this.configTabPanels[0];
-            this.$store.commit('resetVisibleFields', display_fields);
-            this.$store.dispatch('requestIndexSetQuery');
-            this.cancelModifyFields();
+            // 切换应用到第一个模板，不修改个人配置数据
+            await this.submitFieldsSet(this.currentClickConfigID);
           }
         }
       },
@@ -616,7 +617,7 @@ import { isEqual } from 'lodash-es';
           });
         });
         // 后台给的 display_fields 可能有无效字段 所以进行过滤，获得排序后的字段
-        this.shadowVisible =
+        const newShadowVisible =
           configData ||
           this.currentClickConfigData.display_fields
             ?.map(displayName => {
@@ -629,24 +630,36 @@ import { isEqual } from 'lodash-es';
             })
             ?.filter(Boolean) ||
           [];
+
+        // 触发响应式更新：先清空再赋值
+        this.shadowVisible = [];
+        this.$nextTick(() => {
+          this.shadowVisible = newShadowVisible;
+        });
       },
       /** 获取配置列表 */
       async getFiledConfigList() {
         this.isLoading = true;
         try {
-          const res = await this.$http.request('retrieve/getFieldsListConfig', {
-            data: {
-              ...(this.isUnionSearch
-                ? { index_set_ids: this.unionIndexList }
-                : {
-                    index_set_id: window.__IS_MONITOR_COMPONENT__
-                      ? this.$route.query.indexId
-                      : this.$route.params.indexId,
-                  }),
-              scope: 'default',
-              index_set_type: this.isUnionSearch ? 'union' : 'single',
-            },
-          });
+          const requestName = this.isSceneMode ? 'retrieve/sceneListConfig' : 'retrieve/getFieldsListConfig';
+          const data = this.isSceneMode
+            ? {
+                bk_biz_id: this.$store.state.bkBizId,
+                scene_id: this.$store.state.indexItem.scene_active,
+                scope: 'default',
+              }
+            : {
+                ...(this.isUnionSearch
+                  ? { index_set_ids: this.unionIndexList }
+                  : {
+                      index_set_id: window.__IS_MONITOR_COMPONENT__
+                        ? this.$route.query.indexId
+                        : this.$route.params.indexId,
+                    }),
+                scope: 'default',
+                index_set_type: this.isUnionSearch ? 'union' : 'single',
+              };
+          const res = await this.$http.request(requestName, { data });
           this.configTabPanels = res.data.map(item => ({
             ...item,
             isShowEdit: false,

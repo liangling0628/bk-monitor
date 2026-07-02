@@ -30,12 +30,18 @@ import useResizeObserve from '@/hooks/use-resize-observe';
 import useRetrieveEvent from '@/hooks/use-retrieve-event';
 import useStore from '@/hooks/use-store';
 import { getDefaultRetrieveParams, updateURLArgs as updateUrlArgs } from '@/store/default-values';
-import { BK_LOG_STORAGE, RouteParams, SEARCH_MODE_DIC } from '@/store/store.type';
+import { BK_LOG_STORAGE, type RouteParams, SEARCH_MODE_DIC } from '@/store/store.type';
+import RequestPool from '@/store/request-pool';
 import RouteUrlResolver, { RetrieveUrlResolver } from '@/store/url-resolver';
 import RetrieveHelper, { RetrieveEvent } from '@/views/retrieve-helper';
 import { useRoute, useRouter } from 'vue-router/composables';
 
+import { getSceneFieldKeys, getDefaultOp, getSceneConfig, getAllSceneFieldOpKeys } from './search-bar/scene-filter/scene-config';
+import { resetRetrieveData } from './search-bar/scene-filter/scene-retrieve-utils';
+import { isFeatureToggleOn } from '@/hooks/use-feature-toggle';
+
 import $http from '@/api';
+import { RetrieveType } from '../retrieve-v2/sub-bar/retrieve-type-switch';
 
 export default () => {
   const store = useStore();
@@ -43,10 +49,11 @@ export default () => {
   const route = useRoute();
   const searchBarHeight = ref(0);
   const isPreApiLoaded = ref(false);
-
   const favoriteWidth = ref(RetrieveHelper.favoriteWidth);
   const isFavoriteShown = ref(RetrieveHelper.isFavoriteShown);
   const trendGraphHeight = ref(0);
+  // 场景筛选面板高度，用于判断吸顶状态
+  const sceneFilterPanelHeight = ref(0);
 
   const leftFieldSettingWidth = computed(() => {
     const { width, show } = store.state.storage[BK_LOG_STORAGE.FIELD_SETTING];
@@ -65,6 +72,9 @@ export default () => {
       bkBizId: store.state.storage[BK_LOG_STORAGE.BK_BIZ_ID],
       search_mode: SEARCH_MODE_DIC[store.state.storage[BK_LOG_STORAGE.SEARCH_TYPE]] ?? 'ui',
     });
+    // 场景筛选值由 requestSceneConfigs 独立从 URL 解析处理，此处不覆盖
+    delete routeParams.scene_filter_values;
+
     let activeTab = 'single';
     Object.assign(routeParams, { ids: [] });
 
@@ -88,7 +98,9 @@ export default () => {
 
     store.commit('updateIndexItem', routeParams);
     store.commit('updateSpace', routeParams.spaceUid);
-    store.commit('updateState', { indexId: routeParams.index_id });
+    if (routeParams.index_id !== undefined) {
+      store.commit('updateState', { indexId: routeParams.index_id });
+    }
     store.commit('updateStorage', {
       [BK_LOG_STORAGE.INDEX_SET_ACTIVE_TAB]: activeTab,
     });
@@ -96,20 +108,24 @@ export default () => {
 
   RetrieveHelper.setScrollSelector('.v3-bklog-content');
 
-  const handleSearchBarHeightChange = (height) => {
+  const handleSearchBarHeightChange = height => {
     searchBarHeight.value = height;
   };
 
-  const handleFavoriteWidthChange = (width) => {
+  const handleFavoriteWidthChange = width => {
     favoriteWidth.value = width;
   };
 
-  const hanldeFavoriteShown = (isShown) => {
+  const hanldeFavoriteShown = isShown => {
     isFavoriteShown.value = isShown;
   };
 
-  const handleGraphHeightChange = (height) => {
+  const handleGraphHeightChange = height => {
     trendGraphHeight.value = height;
+  };
+
+  const handleSceneFilterPanelHeightChange = (height: number) => {
+    sceneFilterPanelHeight.value = height;
   };
 
   const { addEvent } = useRetrieveEvent();
@@ -117,6 +133,7 @@ export default () => {
   addEvent(RetrieveEvent.FAVORITE_WIDTH_CHANGE, handleFavoriteWidthChange);
   addEvent(RetrieveEvent.FAVORITE_SHOWN_CHANGE, hanldeFavoriteShown);
   addEvent(RetrieveEvent.TREND_GRAPH_HEIGHT_CHANGE, handleGraphHeightChange);
+  addEvent(RetrieveEvent.SCENE_FILTER_PANEL_HEIGHT_CHANGE, handleSceneFilterPanelHeightChange);
 
   const spaceUid = computed(() => store.state.spaceUid);
   const bkBizId = computed(() => store.state.bkBizId);
@@ -136,6 +153,7 @@ export default () => {
       '--left-collection-width': `${isFavoriteShown.value ? favoriteWidth.value : 0}px`,
       '--trend-graph-height': `${trendGraphHeight.value}px`,
       '--header-height': fromMonitor.value ? '0px' : '52px',
+      '--scene-toolbar-height': isSceneMode.value ? `${52 + (hasSceneFilterTags.value ? 34 : 0)}px` : '0px',
     };
   });
 
@@ -151,45 +169,52 @@ export default () => {
     return { width: '100%' };
   });
 
+  const resolveAdditionKeyword = (): Promise<void> => {
+    const { search_mode: searchMode, addition, keyword } = route.query;
+
+    if (!searchMode && addition?.length > 4 && keyword?.length > 0) {
+      store.commit('updateStorage', { [BK_LOG_STORAGE.SEARCH_TYPE]: 1 });
+
+      const resolver = new RouteUrlResolver({
+        route,
+        resolveFieldList: ['addition'],
+      });
+      const target = resolver.convertQueryToStore<RouteParams>();
+
+      if (target.addition?.length) {
+        return $http
+          .request('retrieve/generateQueryString', {
+            data: { addition: target.addition },
+          })
+          .then(res => {
+            if (res.result) {
+              const newKeyword = `${keyword} AND ${res.data?.querystring}`;
+              store.commit('updateIndexItemParams', { keyword: newKeyword });
+            }
+          })
+          .catch(err => {
+            console.error(err);
+          });
+      }
+    }
+
+    return Promise.resolve();
+  };
+
   const setSearchMode = () => {
     const { search_mode: searchMode, addition, keyword } = route.query;
 
-    // 此时说明来自旧版URL，同时带有 addition 和 keyword
-    // 这种情况下需要将 addition 转换为 keyword 进行查询合并
-    // 同时设置 search_mode 为 sql
     if (!searchMode) {
       if (addition?.length > 4 && keyword?.length > 0) {
-        // 这里不好做同步请求，所以直接设置 search_mode 为 sql
+        const mergedKeyword = store.state.indexItem.keyword;
         router.push({
-          query: { ...route.query, search_mode: 'sql', addition: '[]' },
+          query: {
+            ...route.query,
+            search_mode: 'sql',
+            keyword: mergedKeyword,
+            addition: '[]',
+          },
         });
-        const resolver = new RouteUrlResolver({
-          route,
-          resolveFieldList: ['addition'],
-        });
-        const target = resolver.convertQueryToStore<RouteParams>();
-
-        if (target.addition?.length) {
-          $http
-            .request('retrieve/generateQueryString', {
-              data: {
-                addition: target.addition,
-              },
-            })
-            .then((res) => {
-              if (res.result) {
-                const newKeyword = `${keyword} AND ${res.data?.querystring}`;
-                router.replace({
-                  query: { ...route.query, keyword: newKeyword, addition: [] },
-                });
-                store.commit('updateIndexItemParams', { keyword: newKeyword });
-              }
-            })
-            .catch((err) => {
-              console.error(err);
-            });
-        }
-
         return;
       }
 
@@ -295,6 +320,7 @@ export default () => {
             query: {
               page_from: route.name,
               type: 'indexset',
+              from: route.query.from,
             },
           });
           return;
@@ -354,7 +380,7 @@ export default () => {
         const indexSetIds = [];
 
         if (indexSetIdList.value.length) {
-          indexSetIdList.value.forEach((id) => {
+          indexSetIdList.value.forEach(id => {
             const item = flatIndexSetList.value.find(item => filterFn(id, item));
             if (!item) {
               emptyIndexSetList.push(id);
@@ -378,9 +404,10 @@ export default () => {
 
         // 如果经过上述逻辑，缓存中没有索引信息，则默认取第一个有数据的索引
         if (!indexSetIdList.value.length) {
-          const defIndexItem =            flatIndexSetList.value.find(
-            item => item.permission?.[VIEW_BUSINESS] && item.tags.every(tag => tag.tag_id !== 4),
-          ) ?? flatIndexSetList.value[0];
+          const defIndexItem =
+            flatIndexSetList.value.find(
+              item => item.permission?.[VIEW_BUSINESS] && item.tags.every(tag => tag.tag_id !== 4),
+            ) ?? flatIndexSetList.value[0];
           const defaultId = [defIndexItem?.index_set_id];
 
           if (defaultId) {
@@ -390,10 +417,12 @@ export default () => {
           }
         }
 
-        const indexId =          store.state.storage[BK_LOG_STORAGE.INDEX_SET_ACTIVE_TAB] === 'single'
-          ? store.state.indexItem.ids[0]
-          : undefined;
-        const unionList =          store.state.storage[BK_LOG_STORAGE.INDEX_SET_ACTIVE_TAB] === 'union' ? store.state.indexItem.ids : undefined;
+        const indexId =
+          store.state.storage[BK_LOG_STORAGE.INDEX_SET_ACTIVE_TAB] === 'single'
+            ? store.state.indexItem.ids[0]
+            : undefined;
+        const unionList =
+          store.state.storage[BK_LOG_STORAGE.INDEX_SET_ACTIVE_TAB] === 'union' ? store.state.indexItem.ids : undefined;
 
         // 修复：当 URL 中的 indexId 无效时，已经在上面选择了默认索引
         // 这里应该判断当前是否有有效的索引ID，而不是判断 emptyIndexSetList
@@ -421,42 +450,79 @@ export default () => {
 
           RetrieveHelper.setIndexsetId(store.state.indexItem.ids, type, false);
 
-          store
-            .dispatch('requestIndexSetFieldInfo')
-            .then((resp) => {
-              RetrieveHelper.fire(RetrieveEvent.TREND_GRAPH_SEARCH);
-              RetrieveHelper.fire(RetrieveEvent.LEFT_FIELD_INFO_UPDATE);
+          RetrieveHelper.fire(RetrieveEvent.TREND_GRAPH_PENDING);
 
-              if (
-                route.query.tab === 'origin'
-                || route.query.tab === undefined
-                || route.query.tab === null
-                || route.query.tab === ''
-              ) {
-                if (resp?.data?.fields?.length) {
-                  store.dispatch('requestIndexSetQuery').then(() => {
-                    RetrieveHelper.setSearchingValue(false);
-                  });
+          resolveAdditionKeyword().then(async () => {
+            if (isFeatureToggleOn('scene_search', [String(store.state.bkBizId), String(store.state.spaceUid)])) {
+              if (store.state.indexItem.retrieve_type === RetrieveType.Scene) {
+                // 场景化检索：请求场景配置，从URL获取筛选参数
+                const sceneCleared = await requestSceneConfigs();
+                if (!sceneCleared && store.getters.isSceneFilterEmpty) {
+                  RetrieveHelper.setSearchingValue(false);
+                  return;
                 }
+              } else {
+                requestSceneConfigs();
+              }
+            }
 
-                if (!resp?.data?.fields?.length) {
-                  store.commit('updateIndexSetQueryResult', {
-                    is_error: true,
-                    exception_msg: 'index-set-field-not-found',
-                  });
+            store
+              .dispatch('requestIndexSetFieldInfo')
+              .then(resp => {
+                RetrieveHelper.fire(RetrieveEvent.TREND_GRAPH_SEARCH);
+                RetrieveHelper.fire(RetrieveEvent.LEFT_FIELD_INFO_UPDATE);
+
+                if (
+                  route.query.tab === 'origin' ||
+                  route.query.tab === undefined ||
+                  route.query.tab === null ||
+                  route.query.tab === ''
+                ) {
+                  if (resp?.data?.fields?.length) {
+                    store
+                      .dispatch('requestIndexSetQuery')
+                      .catch(err => {
+                        console.error('requestIndexSetQuery failed:', err);
+                      })
+                      .finally(() => {
+                        RetrieveHelper.setSearchingValue(false);
+                      });
+                  }
+
+                  if (!resp?.data?.fields?.length) {
+                    store.commit('updateIndexSetQueryResult', {
+                      is_error: true,
+                      exception_msg: 'index-set-field-not-found',
+                    });
+                    RetrieveHelper.setSearchingValue(false);
+                    if (isSceneMode.value) {
+                      RetrieveHelper.fire(RetrieveEvent.SCENE_FIELD_EMPTY);
+                    }
+                  }
+                } else {
                   RetrieveHelper.setSearchingValue(false);
                 }
 
-                return;
-              }
-
-              RetrieveHelper.setSearchingValue(false);
-            })
-            .catch((err) => {
-              // 请求失败时也要关闭 loading 状态，避免页面一直处于加载中
-              console.error('requestIndexSetFieldInfo failed:', err);
-              RetrieveHelper.setSearchingValue(false);
-            });
+                setSearchMode();
+                setDefaultRouteUrl();
+                if (indexId) {
+                  router.replace({
+                    params: { ...route.params, indexId },
+                    query: {
+                      ...route.query,
+                      ...queryTab,
+                      unionList: unionList ? JSON.stringify(unionList) : undefined,
+                    },
+                  });
+                }
+              })
+              .catch(err => {
+                console.error('requestIndexSetFieldInfo failed:', err);
+                RetrieveHelper.setSearchingValue(false);
+                setSearchMode();
+                setDefaultRouteUrl();
+              });
+          });
         }
 
         if (!indexSetIdList.value.length) {
@@ -478,16 +544,17 @@ export default () => {
           store.getters.isUnionSearch,
         );
 
-        if (indexId) {
-          router.replace({
-            params: { ...route.params, indexId },
-            query: {
-              ...route.query,
-              ...queryTab,
-              unionList: unionList ? JSON.stringify(unionList) : undefined,
-            },
-          });
-        }
+      })
+      .catch(err => {
+        // 任何异常（请求失败 / then 内同步代码抛错）都要确保 loading 能退出
+        // 否则 isPreApiLoaded 永远为 false，页面 v-bkloading 会一直转圈
+        console.error('getIndexSetList failed:', err);
+        isPreApiLoaded.value = true;
+        RetrieveHelper.setSearchingValue(false);
+        store.commit('updateIndexSetQueryResult', {
+          is_error: true,
+          exception_msg: err?.message || 'get-index-set-list-failed',
+        });
       });
   };
 
@@ -506,10 +573,88 @@ export default () => {
     });
   };
 
+  /**
+   * 清空场景化检索条件并回退到常规检索
+   */
+  const clearSceneRetrieveToNormal = (configs: any[]) => {
+    store.commit('updateIndexItemParams', {
+      retrieve_type: 'normal',
+      scene_active: '',
+      scene_filter_values: {},
+      keyword: '',
+      addition: [],
+    });
+    store.commit('updateStorage', { [BK_LOG_STORAGE.SEARCH_TYPE]: 0 });
+
+    resetRetrieveData(store);
+
+    // 从 URL 中清除场景相关参数及 keyword/addition
+    const cleanQuery: Record<string, any> = { ...route.query, retrieve_type: 'normal' };
+    delete cleanQuery.scene_active;
+    delete cleanQuery.keyword;
+    delete cleanQuery.addition;
+    for (const key of getAllSceneFieldOpKeys(configs)) {
+      delete cleanQuery[key];
+    }
+    router.replace({ query: cleanQuery });
+  };
+
+  /**
+   * 请求场景配置数据，接口返回后从 URL query 中回填场景筛选值
+   */
+  const requestSceneConfigs = async (): Promise<boolean> => {
+    await store.dispatch('retrieve/requestSceneConfigs');
+    const configs = store.getters['retrieve/sceneConfigList'];
+    const sceneActive = store.state.indexItem.scene_active;
+
+    // 当前是场景化检索模式但不在灰度业务中，清空场景化检索条件并回退到常规检索
+    if (sceneActive && !isFeatureToggleOn('scene_search', [String(bkBizId.value), String(spaceUid.value)])) {
+      clearSceneRetrieveToNormal(configs);
+      return true;
+    }
+
+    if (!sceneActive || !configs.length) return false;
+
+    const sceneFieldKeys = getSceneFieldKeys(configs, sceneActive);
+    if (!sceneFieldKeys.length) return false;
+
+    // 读取当前业务的场景显示字段配置，以显示字段为主过滤回填值
+    const allDisplayFields = store.state.storage[BK_LOG_STORAGE.SCENE_DISPLAY_FIELDS] ?? {};
+    const bizDisplayFields = allDisplayFields[bkBizId.value] ?? {};
+    // 格式: Array<[fieldKey, op]> | null
+    const sceneDisplayFields: Array<[string, string]> | null | undefined = bizDisplayFields[sceneActive];
+    const displayFieldKeys = sceneDisplayFields?.map(([k]) => k);
+
+    const sceneConfig = getSceneConfig(configs, sceneActive);
+    const fieldOpsMap = new Map<string, string[]>();
+    sceneConfig?.fields.forEach(f => fieldOpsMap.set(f.key, f.ops ?? []));
+
+    const result: Record<string, any> = {};
+    for (const fieldKey of sceneFieldKeys) {
+      const val = route.query[fieldKey];
+      if (val === undefined || val === null || val === '') continue;
+      // 显示字段为 null/undefined/空数组 表示全部显示，否则只回填显示字段中的值
+      if (displayFieldKeys && displayFieldKeys.length > 0 && !displayFieldKeys.includes(fieldKey)) continue;
+
+      // 读取 URL 中的操作符参数: field[op]=op，无则使用本地存储中的 op，再无则从字段配置取默认操作符
+      const opFromUrl = route.query[`${fieldKey}[op]`];
+      const storedTuple = sceneDisplayFields?.find(([k]) => k === fieldKey);
+      const opFromStorage = (Array.isArray(storedTuple) && storedTuple.length >= 2) ? storedTuple[1] : undefined;
+      const defaultOp = getDefaultOp(fieldOpsMap.get(fieldKey));
+      const op = opFromUrl || opFromStorage || defaultOp;
+
+      result[fieldKey] = { op, value: val };
+    }
+
+    if (Object.keys(result).length) {
+      store.commit('updateIndexItem', { scene_filter_values: result });
+    }
+
+    return false;
+  };
+
   getIndexSetList(() => {
-    setSearchMode();
     reoverRouteParams();
-    setDefaultRouteUrl();
   });
 
   const handleSpaceIdChange = () => {
@@ -563,17 +708,31 @@ export default () => {
   // 滚动时，检索结果距离顶部高度
   const searchResultTop = ref(0);
 
-  addEvent(RetrieveEvent.GLOBAL_SCROLL, (event) => {
+  // 场景模式下记录原始滚动距离，用于与字段面板高度比较判断吸顶
+  const sceneScrollTop = ref(0);
+
+  const isSceneMode = computed(() => store.getters.isSceneMode);
+
+  // 判断场景模式下是否存在筛选标签（吸顶时标签栏占 34px）
+  const hasSceneFilterTags = computed(() => {
+    if (!isSceneMode.value) return false;
+    return !store.getters.isSceneFilterEmpty;
+  });
+
+  addEvent(RetrieveEvent.GLOBAL_SCROLL, event => {
     const scrollTop = (event.target as HTMLElement).scrollTop;
     paddingTop.value = scrollTop > subBarHeight.value ? subBarHeight.value : scrollTop;
 
     const diff = subBarHeight.value + trendGraphHeight.value;
     searchResultTop.value = scrollTop > diff ? diff : scrollTop;
+
+    // 场景模式需要原始 scrollTop 判断字段面板是否滚出
+    sceneScrollTop.value = scrollTop;
   });
 
   useResizeObserve(
     RetrieveHelper.getScrollSelector(),
-    (entry) => {
+    entry => {
       scrollContainerHeight.value = (entry.target as HTMLElement).offsetHeight;
     },
     0,
@@ -581,8 +740,14 @@ export default () => {
 
   /**
    * 计算检索内容的滚动位置，监听是否滚动到顶部
+   * 场景模式下：滚动距离超过字段面板高度时判定为吸顶
+   * 常规模式下：阈值为二级导航栏高度（64px）
    */
   const isSearchContextStickyTop = computed(() => {
+    if (isSceneMode.value) {
+      // 字段筛选面板完全滚出可视区域后才触发吸顶
+      return sceneFilterPanelHeight.value > 0 && sceneScrollTop.value >= sceneFilterPanelHeight.value + 8;
+    }
     return paddingTop.value === subBarHeight.value;
   });
 
@@ -590,6 +755,11 @@ export default () => {
    * 计算检索结果列表的滚动位置，监听是否滚动到顶部
    */
   const isSearchResultStickyTop = computed(() => {
+    if (isSceneMode.value) {
+      // 场景模式下，表头吸顶时机：字段筛选面板 + 趋势图都滚出后
+      return sceneFilterPanelHeight.value > 0
+        && sceneScrollTop.value >= sceneFilterPanelHeight.value + trendGraphHeight.value;
+    }
     return searchResultTop.value === subBarHeight.value + trendGraphHeight.value;
   });
 
@@ -600,14 +770,22 @@ export default () => {
   });
 
   onUnmounted(() => {
+    RequestPool.cancelAll();
     RetrieveHelper.destroy();
-    // 清理掉当前查询结果，避免下次进入空白展示
-    store.commit('updateIndexSetQueryResult', {
+    // 清理掉当前查询结果，避免下次进入空白展示，同时释放检索页大对象引用。
+    store.commit('resetIndexSetQueryResult', {
       origin_log_list: [],
       list: [],
       is_error: false,
       exception_msg: '',
     });
+    store.commit('updateSqlQueryFieldList', []);
+    store.commit('resetIndexFieldInfo', {
+      fields: [],
+      is_loading: false,
+    });
+    store.commit('retrieve/updateIndexSetList', []);
+    store.commit('retrieve/resetRuntimeState');
   });
 
   return {

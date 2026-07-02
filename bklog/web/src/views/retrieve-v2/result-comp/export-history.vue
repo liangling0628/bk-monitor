@@ -41,17 +41,18 @@
       {{ $t('下载历史') }}
     </div>
     <div class="search-history">
-      <span
-        class="top-start"
-        v-bk-tooltips="$t('查看所有的索引集的下载历史')"
+      <bk-date-picker
+        v-model="dateRange"
+        type="datetimerange"
+        :shortcuts="dateShortcuts"
+        :shortcut-close="true"
+        :use-shortcut-text="true"
+        :clearable="false"
+        :shortcut-selected-index="shortcutSelectedIndex"
+        @shortcut-change="handleShortcutChange"
+        @pick-success="handlePickSuccess"
       >
-        <bk-button
-          theme="primary"
-          @click="handleSearchAll"
-        >
-          {{ $t('查看所有') }}</bk-button
-        >
-      </span>
+      </bk-date-picker>
     </div>
     <div
       class="table-container"
@@ -106,21 +107,6 @@
             </bk-popover>
           </template>
         </bk-table-column>
-        <!-- 下载类型 -->
-        <bk-table-column
-          :label="$t('下载类型')"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <div
-              class="title-overflow"
-              v-bk-overflow-tips
-            >
-              <span>{{ row.export_type === 'async' ? $t('异步') : $t('同步') }}</span>
-            </div>
-          </template>
-        </bk-table-column>
         <!-- 导出状态 -->
         <bk-table-column
           :label="$t('导出状态')"
@@ -152,10 +138,17 @@
               :class="['status', `status-${row.export_status + ''}`]"
             >
               <i
-                v-if="row.export_status === null"
+                v-if="isShowProgress(row.export_status)"
                 class="bk-icon icon-refresh"
               ></i>
               {{ getStatusStr(row.export_status) }}
+              <span
+                v-if="isShowProgress(row.export_status)"
+                class="progress-text"
+              >
+                {{ row.progressPercent || 0 }} %
+                ({{ formatNumber(row.exported_count) }} / {{ formatNumber(row.export_total_count) }})
+              </span>
             </span>
           </template>
         </bk-table-column>
@@ -292,8 +285,10 @@
 <script>
   import { formatDate, blobDownload } from '@/common/util';
   import { mapGetters } from 'vuex';
+  import { parseTableIdConditions } from '@/store/helper.ts';
 
   import { axiosInstance } from '@/api';
+  import { formatNumber } from '@/views/retrieve-v2/result-comp/download/downloadProgress';
 
   export default {
     props: {
@@ -305,15 +300,78 @@
         type: Array,
         required: true,
       },
+      exportList: {
+        type: Array,
+        default: () => [],
+      },
+      tableLoading: {
+        type: Boolean,
+        default: false,
+      },
+      dateRangeProp: {
+        type: Array,
+        default: () => [],
+      },
+      pagination: {
+        type: Object,
+        default: () => ({
+          current: 1,
+          count: 0,
+          limit: 10,
+        }),
+      },
     },
     data() {
       return {
-        exportList: [],
         isShowDialog: false,
-        tableLoading: false,
-        isSearchAll: false, // 是否查看所有索引集下载历史
         isShowSetLabel: false, // 是否展示索引集ID
-        timer: false,
+        dateRange: [], // 日期范围
+        shortcutSelectedIndex: 3, // 当前选中的快捷键索引（默认为"最近3月"）
+        dateShortcuts: [
+          {
+            text: this.$t('近{n}天', { n: 7 }),
+            value() {
+              const end = new Date();
+              const start = new Date();
+              start.setTime(start.getTime() - 3600 * 1000 * 24 * 7);
+              return [start, end];
+            },
+          },
+          {
+            text: this.$t('本月'),
+            value() {
+              const end = new Date();
+              const start = new Date();
+              start.setDate(1);
+              start.setHours(0, 0, 0, 0);
+              return [start, end];
+            },
+          },
+          {
+            text: this.$t('上月'),
+            value() {
+              const end = new Date();
+              const start = new Date();
+              // 上月第一天
+              start.setDate(1);
+              start.setMonth(start.getMonth() - 1);
+              start.setHours(0, 0, 0, 0);
+              // 上月最后一天
+              end.setDate(0);
+              end.setHours(23, 59, 59, 999);
+              return [start, end];
+            },
+          },
+          {
+            text: this.$t('最近{n}月', { n: 3 }),
+            value() {
+              const end = new Date();
+              const start = new Date();
+              start.setTime(start.getTime() - 3600 * 1000 * 24 * 90);
+              return [start, end];
+            },
+          },
+        ],
         exportStatusList: {
           download_log: this.$t('拉取中'),
           export_package: this.$t('打包中'),
@@ -322,22 +380,17 @@
           failed: this.$t('异常'),
           download_expired: this.$t('下载链接过期'),
           data_expired: this.$t('数据源过期'),
-          null: this.$t('下载中'),
-        },
-        pagination: {
-          current: 1,
-          count: 0,
-          limit: 10,
+          null: this.$t('未启动'),
         },
         position: {
           top: 120,
         },
         enTableWidth: {
-          export_status: '190',
+          export_status: '250',
           operate: '220',
         },
         cnTableWidth: {
-          export_status: '170',
+          export_status: '230',
           operate: '150',
         },
       };
@@ -352,18 +405,31 @@
       ...mapGetters({
         unionIndexList: 'unionIndexList',
         isUnionSearch: 'isUnionSearch',
+        retrieveParams: 'retrieveParams',
       }),
+      isScene() {
+        return this.$store.getters.isSceneMode;
+      },
     },
-    watch: {
+      watch: {
       showHistoryExport(val) {
         this.isShowDialog = val;
         if (val) {
-          this.getTableList();
-          this.startStatusPolling();
+          // 同步日期范围
+          this.dateRange = this.dateRangeProp || [];
         }
+      },
+      // 同步父组件的日期范围
+      dateRangeProp: {
+        handler(val) {
+          if (val && val.length === 2) {
+            this.dateRange = val;
+          }
+        },
       },
     },
     methods: {
+      formatNumber,
       downloadExport($row) {
         // 异步导出使用downloadURL下载
         if ($row.download_url) {
@@ -371,7 +437,7 @@
           return;
         }
         this.openDownloadUrl($row);
-        this.startStatusPolling();
+        this.$emit('start-polling');
       },
       retryExport($row) {
         // 异常任务直接异步下载
@@ -380,7 +446,7 @@
         } else {
           this.downloadAsync($row.search_dict);
         }
-        this.startStatusPolling();
+        this.$emit('start-polling');
       },
       /**
        * @desc: 同步下载
@@ -390,11 +456,15 @@
         const data = params.search_dict;
         const stringParamsIndexSetID = String(params.log_index_set_id);
 
-        let downRequestUrl = `/search/index_set/${stringParamsIndexSetID}/export/`;
-        if (this.isUnionSearch) {
+        let downRequestUrl;
+        if (this.isScene) {
+          downRequestUrl = '/search/scene/export/sample/';
+        } else if (this.isUnionSearch) {
           // 判断是否是联合查询 如果是 则加参数
           downRequestUrl = '/search/index_set/union_search/export/';
           Object.assign(data, { index_set_ids: this.unionIndexList });
+        } else {
+          downRequestUrl = `/search/index_set/${stringParamsIndexSetID}/export/`;
         }
 
         axiosInstance
@@ -414,7 +484,7 @@
             blobDownload(res, downloadName);
           })
           .finally(() => {
-            this.getTableList(true);
+            this.$emit('get-table-list', true);
           });
       },
       /**
@@ -422,8 +492,16 @@
        * @param { Object } data
        */
       downloadAsync(data) {
-        this.tableLoading = true;
-        let downRequestUrl = this.isUnionSearch ? `retrieve/unionExportAsync` : 'retrieve/exportAsync';
+        this.$emit('loading-change', true);
+        let downRequestUrl;
+
+        if (this.isScene) {
+          downRequestUrl = 'retrieve/getSceneAsyncExport';
+        } else if (this.isUnionSearch) {
+          downRequestUrl = 'retrieve/unionExportAsync';
+        } else {
+          downRequestUrl = 'retrieve/exportAsync';
+        }
 
         if (this.isUnionSearch) {
           Object.assign(data, {
@@ -437,7 +515,7 @@
           });
         }
 
-        const requestConfig = this.isUnionSearch
+        const requestConfig = this.isScene || this.isUnionSearch
           ? { data }
           : {
               params: { index_set_id: window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId },
@@ -456,7 +534,7 @@
           })
           .finally(() => {
             setTimeout(() => {
-              this.getTableList(true);
+              this.$emit('get-table-list', true);
             }, 1000);
           });
       },
@@ -465,7 +543,29 @@
           return;
         }
         this.isSearchAll = true;
-        this.getTableList();
+        this.$emit('get-table-list');
+      },
+      /**
+       * @desc: 设置默认日期范围（最近3月）
+       */
+      setDefaultDateRange() {
+        const end = new Date();
+        const start = new Date();
+        start.setTime(start.getTime() - 3600 * 1000 * 24 * 90);
+        this.dateRange = [start, end];
+        this.shortcutSelectedIndex = 3;
+      },
+      /**
+       * @desc: 日期选择器快捷键变更
+       */
+      handleShortcutChange(shortcut) {
+        this.shortcutSelectedIndex = shortcut.index;
+      },
+      /**
+       * @desc: 日期选择器确认
+       */
+      handlePickSuccess() {
+        this.$emit('date-range-change', this.dateRange);
       },
       getSearchDictStr(searchObj) {
         return JSON.stringify(searchObj);
@@ -482,6 +582,9 @@
       },
       isShowShape(status) {
         return ['success', 'failed'].includes(status);
+      },
+      isShowProgress(status) {
+        return ['download_log'].includes(status);
       },
       getStatusStr(status) {
         return this.exportStatusList[status];
@@ -501,7 +604,8 @@
             case 'end_time':
             case 'time_range':
               if (dict[key] !== '') {
-                queryParamsStr[key] = encodeURIComponent(dict[key]);
+                // 不在这里编码，下面 reduce 中会统一编码，避免双重编码
+                queryParamsStr[key] = dict[key];
               }
               break;
             case 'ip_chooser':
@@ -512,93 +616,60 @@
               break;
           }
         }
+
+        // 拼接 URL 参数
         const params = Object.keys(queryParamsStr)
           .reduce((output, key) => {
             output.push(`${key}=${encodeURIComponent(queryParamsStr[key])}`);
             return output;
           }, [])
           .join('&');
-        const jumpUrl = `${window.SITE_URL}#/retrieve/${indexSetID}?spaceUid=${spaceUid}&bizId=${dict.bk_biz_id}&${params}`;
-        window.open(jumpUrl, '_blank');
-      },
-      /**
-       * @desc: 轮询
-       */
-      startStatusPolling() {
-        this.stopStatusPolling();
-        this.timer = setInterval(() => {
-          this.getTableList(false, true);
-        }, 10000);
-      },
-      stopStatusPolling() {
-        clearTimeout(this.timer);
-      },
-      /**
-       * @desc: 导出状态轮询
-       * @param { Array } data 数据
-       * @param { Boolean } isPolling 该次请求是否是轮询
-       */
-      setExportListData(data, isPolling) {
-        if (isPolling) {
-          data.forEach(item => {
-            this.exportList.forEach(row => {
-              if (row.id === item.id) {
-                Object.assign(row, { ...item });
+
+        // 场景化检索下，search_dict 会附加 table_id_conditions 和 scene_filter_values
+        // 单独解析并拼接场景化参数
+        let sceneParams = '';
+        if (dict.table_id_conditions || dict.scene_filter_values) {
+          const { scene_active, scene_filter_values } = parseTableIdConditions(
+            dict.table_id_conditions,
+            dict.scene_filter_values,
+          );
+          const sceneParts = [];
+          sceneParts.push('retrieve_type=scene');
+          if (scene_active) {
+            sceneParts.push(`scene_active=${encodeURIComponent(scene_active)}`);
+          }
+          for (const [fieldKey, fieldValue] of Object.entries(scene_filter_values)) {
+            const rawValue = fieldValue?.value ?? fieldValue;
+            const op = fieldValue?.op;
+            if (rawValue !== undefined && rawValue !== null && rawValue !== '') {
+              if (Array.isArray(rawValue)) {
+                // 数组值展开为多个同 key 参数（与 Vue Router 行为一致）
+                rawValue.forEach(v => sceneParts.push(`${fieldKey}=${encodeURIComponent(v)}`));
+              } else {
+                sceneParts.push(`${fieldKey}=${encodeURIComponent(rawValue)}`);
               }
-            });
-          });
-        } else {
-          this.exportList = data;
-          this.startStatusPolling();
-        }
-      },
-      /**
-       * @desc: 获取table列表数据
-       * @param { Boolean } isReset 是否从1页开始查询
-       * @param { Boolean } isPolling 该次请求是否是轮询
-       */
-      getTableList(isReset = false, isPolling = false) {
-        isReset && (this.pagination.current = 1);
-        !isPolling && (this.tableLoading = true);
-        const { limit, current } = this.pagination;
-        const queryUrl = this.isUnionSearch ? 'unionSearch/unionExportHistory' : 'retrieve/getExportHistoryList';
-        const params = {
-          index_set_id: window.__IS_MONITOR_COMPONENT__ ? this.$route.query.indexId : this.$route.params.indexId,
-          bk_biz_id: this.bkBizId,
-          page: current,
-          pagesize: limit,
-          show_all: this.isSearchAll,
-        };
-        if (this.isUnionSearch) {
-          Object.assign(params, { index_set_ids: this.unionIndexList });
-        }
-        this.$http
-          .request(queryUrl, {
-            params,
-          })
-          .then(res => {
-            if (res.result) {
-              this.pagination.count = res.data.total;
-              this.setExportListData(res.data.list, isPolling);
+              // 操作符参数
+              if (op) {
+                sceneParts.push(`${fieldKey}[op]=${encodeURIComponent(op)}`);
+              }
             }
-            // 查询所有索引集时才显示索引集IDLabel
-            if (this.isSearchAll) {
-              this.isShowSetLabel = true;
-            }
-          })
-          .finally(() => {
-            this.tableLoading = false;
-          });
+          }
+          sceneParams = sceneParts.join('&');
+        }
+
+        const allParams = [params, sceneParams].filter(Boolean).join('&');
+        const siteUrl = window.__IS_MONITOR_COMPONENT__ ? window.site_url : window.SITE_URL;
+        const jumpUrl = `${siteUrl}#/retrieve/${indexSetID}?spaceUid=${spaceUid}&bizId=${dict.bk_biz_id}&${allParams}`;
+        window.open(jumpUrl, '_blank', 'noopener,noreferrer');
       },
       handlePageChange(page) {
-        this.pagination.current = page;
-        this.getTableList();
+        // 通知父组件更新分页并刷新数据
+        this.$emit('pagination-change', { page });
       },
       handleLimitChange(size) {
         if (this.pagination.limit !== size) {
-          this.pagination.current = 1;
-          this.pagination.limit = size;
-          this.getTableList();
+          // 通知父组件更新分页并刷新数据
+          this.$emit('pagination-change', { limit: size });
         }
       },
       /**
@@ -607,13 +678,7 @@
       closeDialog() {
         this.isSearchAll = false;
         this.isShowSetLabel = false;
-        this.exportList = [];
-        this.pagination = {
-          current: 1,
-          count: 0,
-          limit: 10,
-        };
-        this.stopStatusPolling();
+        this.dateRange = [];
         this.$emit('handle-close-dialog');
       },
       getIndexSetIDs(row) {
@@ -635,7 +700,7 @@
   .search-history {
     width: 100%;
     margin: 10px 0 20px 0;
-    text-align: right;
+    text-align: left;
   }
 
   .export-table {
@@ -684,5 +749,12 @@
     &.status-failed i {
       color: $iconFailColor;
     }
+  }
+
+  .progress-text {
+    font-size: 12px;
+    font-weight: 700;
+    color: #3A84FF;
+    white-space: nowrap;
   }
 </style>

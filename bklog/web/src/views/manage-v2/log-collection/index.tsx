@@ -24,10 +24,11 @@
  * IN THE SOFTWARE.
  */
 
-import { defineComponent, ref } from 'vue';
+import { defineComponent, onMounted, ref } from 'vue';
 
 import useLocale from '@/hooks/use-locale';
 
+import { useOperation } from './hook/useOperation';
 import LeftList from './components/list-main/left-list';
 import TableList from './components/list-main/table-list';
 
@@ -41,27 +42,51 @@ export default defineComponent({
   setup() {
     const { t } = useLocale();
     const isShowLeft = ref(true);
+    const { indexGroupLoading, getIndexGroupList } = useOperation();
+    const listData = ref<IListItemData[]>([]);
+    const listTotal = ref(0);
     const currentIndexSet = ref<IListItemData>({
       index_set_name: t('全部采集项'),
       index_count: 0,
       index_set_id: 'all',
     });
+
+    /** 获取索引集列表 */
+    const getListData = () => {
+      getIndexGroupList((data: { list: IListItemData[]; total: number }) => {
+        listData.value = data.list || [];
+        listTotal.value = data.total || 0;
+      });
+    };
+
     /** 展开/收起左侧采集项列表 */
     const handleShowLeft = () => {
       isShowLeft.value = !isShowLeft.value;
     };
+
     /** 选中索引集 */
     const handleChoose = (item: IListItemData) => {
       currentIndexSet.value = item;
     };
 
+    onMounted(() => {
+      getListData();
+    });
+
     return () => (
       <div class='v2-log-collection-main'>
-        {isShowLeft.value && (
-          <div class='v2-log-collection-left'>
-            <LeftList on-choose={handleChoose} />
-          </div>
-        )}
+        <div
+          class='v2-log-collection-left'
+          v-show={isShowLeft.value}
+        >
+          <LeftList
+            listData={listData.value}
+            loading={indexGroupLoading.value}
+            total={listTotal.value}
+            on-choose={handleChoose}
+            on-refresh={getListData}
+          />
+        </div>
         <div class='v2-log-collection-right'>
           <button
             class='right-btn-box'
@@ -70,7 +95,12 @@ export default defineComponent({
           >
             <i class={`bk-icon icon-angle-${isShowLeft.value ? 'left' : 'right'} right-btn`} />
           </button>
-          <TableList indexSet={currentIndexSet.value} />
+          <TableList
+            indexGroupList={listData.value}
+            indexSet={currentIndexSet.value}
+            leftLoading={indexGroupLoading.value}
+            on-refresh-index-group={getListData}
+          />
         </div>
       </div>
     );

@@ -26,7 +26,12 @@ from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
 from apps.api.base import DataAPI
-from apps.api.modules.utils import add_esb_info_before_request, biz_to_tenant_getter
+from apps.api.modules.utils import (
+    add_esb_info_before_request,
+    biz_to_tenant_getter,
+    result_table_to_tenant_getter,
+    space_type_id_to_tenant_getter,
+)
 from config.domains import MONITOR_APIGATEWAY_ROOT, MONITOR_APIGATEWAY_ROOT_NEW
 from apps.api.constants import CACHE_TIME_FIVE_MINUTES
 
@@ -87,15 +92,22 @@ def parse_cluster_info(cluster_obj):
     """
     custom_option = cluster_obj["cluster_config"].get("custom_option", {})
     try:
-        cluster_obj["cluster_config"]["custom_option"] = (
-            json.loads(custom_option) if custom_option else {"bk_biz_id": ""}
-        )
-        # bk_biz_id str to int
-        biz_id = str(cluster_obj["cluster_config"]["custom_option"]["bk_biz_id"])
-        if biz_id.isdigit():
-            cluster_obj["cluster_config"]["custom_option"]["bk_biz_id"] = int(biz_id)
+        if isinstance(custom_option, str):
+            custom_option = json.loads(custom_option) if custom_option else {}
     except (ValueError, TypeError):
-        cluster_obj["cluster_config"]["custom_option"] = {}
+        custom_option = {}
+
+    if not isinstance(custom_option, dict):
+        custom_option = {}
+
+    custom_option.setdefault("bk_biz_id", "")
+    cluster_obj["cluster_config"]["custom_option"] = custom_option
+
+    # bk_biz_id str to int
+    biz_id = str(custom_option.get("bk_biz_id", ""))
+    normalized_biz_id = biz_id[1:] if biz_id.startswith("-") else biz_id
+    if normalized_biz_id.isdigit():
+        custom_option["bk_biz_id"] = int(biz_id)
 
     if cluster_obj["auth_info"] and isinstance(cluster_obj["auth_info"], str):
         cluster_obj["auth_info"] = json.loads(base64.b64decode(cluster_obj["auth_info"]))
@@ -111,7 +123,7 @@ def modify_result_table_before(params):
     @return:
     """
     params = add_esb_info_before_request(params)
-    params.update({"external_storage": {"elasticsearch": params["default_storage_config"]}})
+    params.update({"external_storage": {params["default_storage"]: params["default_storage_config"]}})
     del params["default_storage_config"]
     return params
 
@@ -200,6 +212,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("查询一个结果表的信息"),
             before_request=add_esb_info_before_request,
+            bk_tenant_id=result_table_to_tenant_getter("table_id"),
             cache_time=CACHE_TIME_FIVE_MINUTES,
         )
         self.get_result_table_storage = DataAPI(
@@ -209,6 +222,7 @@ class _TransferApi:
             description=_("查询一个结果表的存储信息"),
             before_request=add_esb_info_before_request,
             after_request=get_result_table_storage_after,
+            bk_tenant_id=result_table_to_tenant_getter("result_table_list"),
         )
         self.get_cluster_info = DataAPI(
             method="GET",
@@ -297,7 +311,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("创建结果表快照配置"),
             before_request=add_esb_info_before_request,
-            bk_tenant_id=biz_to_tenant_getter(lambda p: p["table_id"].split("_", 1)[0]),
+            bk_tenant_id=result_table_to_tenant_getter("table_id"),
         )
         self.modify_result_table_snapshot = DataAPI(
             method="POST",
@@ -305,7 +319,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("修改结果表快照配置"),
             before_request=add_esb_info_before_request,
-            bk_tenant_id=biz_to_tenant_getter(lambda p: p["table_id"].split("_", 1)[0]),
+            bk_tenant_id=result_table_to_tenant_getter("table_id"),
         )
         self.delete_result_table_snapshot = DataAPI(
             method="POST",
@@ -313,7 +327,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("删除结果表快照配置"),
             before_request=add_esb_info_before_request,
-            bk_tenant_id=biz_to_tenant_getter(lambda p: p["table_id"].split("_", 1)[0]),
+            bk_tenant_id=result_table_to_tenant_getter("table_id"),
         )
         self.list_result_table_snapshot = DataAPI(
             method="POST",
@@ -335,6 +349,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("获取结果表快照状态"),
             before_request=add_esb_info_before_request,
+            bk_tenant_id=result_table_to_tenant_getter("table_ids"),
         )
         self.restore_result_table_snapshot = DataAPI(
             method="POST",
@@ -342,7 +357,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("快照回溯"),
             before_request=add_esb_info_before_request,
-            bk_tenant_id=biz_to_tenant_getter(lambda p: p["table_id"].split("_", 1)[0]),
+            bk_tenant_id=result_table_to_tenant_getter("table_id"),
         )
         self.modify_restore_result_table_snapshot = DataAPI(
             method="POST",
@@ -461,6 +476,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("创建或更新metadata路由"),
             before_request=add_esb_info_before_request,
+            bk_tenant_id=space_type_id_to_tenant_getter(),
         )
         self.bulk_create_or_update_log_router = DataAPI(
             method="POST",
@@ -468,6 +484,7 @@ class _TransferApi:
             module=self.MODULE,
             description=_("批量创建或更新metadata路由"),
             before_request=add_esb_info_before_request,
+            bk_tenant_id=space_type_id_to_tenant_getter(),
         )
         self.list_kafka_tail = DataAPI(
             method="GET",

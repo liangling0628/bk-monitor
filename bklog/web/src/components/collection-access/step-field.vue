@@ -926,6 +926,7 @@
 <script>
   import { projectManages } from '@/common/util';
 import AuthContainerPage from '@/components/common/auth-container-page';
+import { isFeatureToggleOn } from '@/hooks/use-feature-toggle';
 import SpaceSelectorMixin from '@/mixins/space-selector-mixin';
 import { mapGetters, mapState } from 'vuex';
 import * as authorityMap from '../../common/authority-map';
@@ -956,7 +957,6 @@ import fieldTable from './field-table';
     },
     data() {
       return {
-        // isItsm: window.FEATURE_TOGGLE.collect_itsm === 'on',
         refresh: false,
         defaultRegex: '(?P<request_ip>[\d\.]+)[^[]+\[(?P<request_time>[^]]+)\]',
         isLoading: false,
@@ -1201,13 +1201,19 @@ import fieldTable from './field-table';
       },
       advanceDisable() {
         return (
-          window.FEATURE_TOGGLE.scenario_bkdata !== 'on' ||
+          !isFeatureToggleOn('scenario_bkdata', [
+            String(this.$store.state.bkBizId),
+            String(this.$store.state.spaceUid),
+          ]) ||
           this.curCollect.bkdata_data_id === null ||
           (this.isCleanField && !this.cleanCollector)
         );
       },
       advanceDisableTips() {
-        if (window.FEATURE_TOGGLE.scenario_bkdata !== 'on') {
+        if (!isFeatureToggleOn('scenario_bkdata', [
+          String(this.$store.state.bkBizId),
+          String(this.$store.state.spaceUid),
+        ])) {
           return '';
         }
         if (this.curCollect.bkdata_data_id === null) {
@@ -1216,7 +1222,10 @@ import fieldTable from './field-table';
         return '';
       },
       unAuthBkdata() {
-        return window.FEATURE_TOGGLE.scenario_bkdata !== 'on';
+        return !isFeatureToggleOn('scenario_bkdata', [
+          String(this.$store.state.bkBizId),
+          String(this.$store.state.spaceUid),
+        ]);
       },
       isSetDisabled() {
         return this.isSetEdit && this.setDisabled;
@@ -1920,7 +1929,7 @@ import fieldTable from './field-table';
           confirmFn: () => {
             const id = this.curCollect.bkdata_data_id;
             const jumpUrl = `${window.BKDATA_URL}/#/data-hub-detail/clean/list/${id}/index`;
-            window.open(jumpUrl, '_blank');
+            window.open(jumpUrl, '_blank', 'noopener,noreferrer');
             this.$emit('change-submit', true);
             // 前往高级清洗刷新页
             this.$emit('change-clean');
@@ -2468,7 +2477,7 @@ import fieldTable from './field-table';
               },
             ],
           });
-          window.open(res.data.apply_url);
+          window.open(res.data.apply_url, '_blank', 'noopener,noreferrer');
         } catch (err) {
           console.warn(err);
         } finally {
@@ -2476,7 +2485,7 @@ import fieldTable from './field-table';
         }
       },
       handleOpenDocument() {
-        window.open(this.docUrl, '_blank');
+        window.open(this.docUrl, '_blank', 'noopener,noreferrer');
       },
       /** 切换匹配模式 */
       handleSelectConfig(id) {
@@ -2616,7 +2625,7 @@ import fieldTable from './field-table';
       },
       /** 获取fields */
       async requestFields(indexSetId) {
-        if (!indexSetId) {
+        if (!indexSetId || this.curCollect.storage_cluster_id === -1 || this.curCollect.storage_cluster_id === null) {
           return;
         }
         const typeConversion = {

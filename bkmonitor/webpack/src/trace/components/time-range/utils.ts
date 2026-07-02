@@ -28,7 +28,7 @@ import { DateRange } from '@blueking/date-picker';
 import type { DateValue } from '@blueking/date-picker/vue3';
 import type { Dayjs } from 'dayjs';
 
-export type TimeRangeType = string[];
+export type TimeRangeType = (number | string)[];
 /** 相对时间范围格式正则 */
 export const CUSTOM_TIME_RANGE_REG = /^now(([-+])(\d+)([m|h|d|w|M|y|Y]))?(\/[m|h|d|w|M|y|Y|fy])?/;
 
@@ -75,6 +75,12 @@ export const handleTransformTime = (value: TimeRangeType): TimeRangeType => {
 export const handleTransformToTimestamp = (value: TimeRangeType): TimestampsType => {
   const timeRange = new TimeRange(value);
   return timeRange.unix();
+};
+
+/** 转换成毫秒 */
+export const handleTransformToTimestampMs = (value: DateValue): TimestampsType => {
+  const timeRange = new TimeRange(value as TimeRangeType);
+  return timeRange.unix().map(item => item * 1000) as TimestampsType;
 };
 
 /** 时间区间快捷选项 */

@@ -14,7 +14,6 @@ import logging
 import urllib.parse
 from collections import defaultdict
 from json import JSONDecodeError
-from urllib import parse
 
 from django.conf import settings
 from django.db.models import Max
@@ -34,9 +33,6 @@ from core.unit import load_unit
 from . import BaseContextObject
 
 logger = logging.getLogger("fta_action.run")
-
-
-DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S%z"
 
 
 class DefaultContent(BaseContextObject):
@@ -99,12 +95,12 @@ class DefaultContent(BaseContextObject):
     # 最近一次时间
     @cached_property
     def time(self):
-        return time_tools.utc2localtime(self.parent.alert.latest_time).strftime(DATETIME_FORMAT)
+        return time_tools.utc2localtime(self.parent.alert.latest_time).strftime(settings.DATETIME_FORMAT)
 
     # 首次异常时间
     @cached_property
     def begin_time(self):
-        return self.parent.alarm.begin_time.strftime(DATETIME_FORMAT)
+        return self.parent.alarm.begin_time.strftime(settings.DATETIME_FORMAT)
 
     # 持续时间
     @cached_property
@@ -177,8 +173,30 @@ class DefaultContent(BaseContextObject):
     @cached_property
     def receivers(self):
         """
-        历史负责人 + 知会人信息
+        告警接收人信息
+
+        优先级：merged_notice_receivers > notice_receiver > alarm.receivers
+        - merged_notice_receivers: 合并通知后的所有接收人（与实际发送一致）
+        - notice_receiver: 单个接收人或列表
+        - alarm.receivers: 从 alert.assignee 获取（向后兼容）
         """
+        # 优先使用合并后的接收人
+        if hasattr(self.parent, "merged_notice_receivers") and self.parent.merged_notice_receivers:
+            merged_receivers = self.parent.merged_notice_receivers
+            if isinstance(merged_receivers, list) and merged_receivers:
+                return ",".join(merged_receivers)
+            elif merged_receivers:
+                return merged_receivers if isinstance(merged_receivers, str) else str(merged_receivers)
+
+        # 使用 context 中的 notice_receiver
+        if hasattr(self.parent, "notice_receiver") and self.parent.notice_receiver:
+            notice_receiver = self.parent.notice_receiver
+            if isinstance(notice_receiver, list):
+                return ",".join(notice_receiver) if notice_receiver else ""
+            elif notice_receiver:
+                return notice_receiver if isinstance(notice_receiver, str) else str(notice_receiver)
+
+        # fallback 到 alarm.receivers
         if self.parent.alarm.receivers:
             return ",".join(self.parent.alarm.receivers)
         return None
@@ -257,11 +275,53 @@ class DefaultContent(BaseContextObject):
                 if dashboard == "pod" and pod:
                     filter_data.append({"name": pod})
                 if dashboard:
-                    query_data = parse.quote(
-                        parse.quote(json.dumps({"page": 0, "selectorSearch": filter_data, "filterDict": {}}))
-                    )
+                    # 将旧版 selectorSearch 转换为新版 k8s-new 页面的 filterBy 格式
+                    # 旧版格式: {"selectorSearch": [{"bcs_cluster_id": "xxx"}, {"keyword": "node-name"}]}
+                    # 新版格式: filterBy={"node": ["node-name"]} (JSON 字符串作为 query 参数)
+                    filter_by = {}
+                    for item in filter_data:
+                        for key, val in item.items():
+                            if key == "bcs_cluster_id":
+                                # bcs_cluster_id 在新版中单独作为 cluster 参数，不放入 filterBy
+                                filter_by["bcs_cluster_id"] = [val]
+                            elif key == "keyword":
+                                # 旧版用 keyword 统一表示名称，需根据 dashboard 类型映射到新字段
+                                if dashboard == "node":
+                                    filter_by["node"] = [val]
+                                elif dashboard == "container":
+                                    filter_by["container"] = [val]
+                                elif dashboard == "pod":
+                                    filter_by["pod"] = [val]
+                            elif key in ("namespace", "name", "pod_name"):
+                                if key == "name":
+                                    # name 字段根据 dashboard 类型映射: container 容器名 / pod 的 pod 名
+                                    if dashboard == "container":
+                                        filter_by["container"] = [val]
+                                    else:
+                                        filter_by["pod"] = [val]
+                                elif key == "pod_name":
+                                    # container 场景下 pod_name 用于定位所属 pod
+                                    if dashboard == "container":
+                                        filter_by["pod"] = [val]
+                                else:
+                                    filter_by["namespace"] = [val]
+                    # groupBy: 将旧版 dashboardId (node/pod/container) 映射为新版分组维度
+                    # 注意: performance/network 场景下 namespace 是前端常驻维度 (fixedGroupFilters)，
+                    # 但 URL 初始加载时 setGroupFilters 不会自动补上 fixed，所以需要显式带上
+                    if dashboard == "node":
+                        group_by = ["node"]
+                    elif dashboard in ("pod", "container"):
+                        group_by = ["namespace", dashboard]
+                    else:
+                        group_by = []
+                    group_by_str = json.dumps(group_by)
+                    filter_by_str = json.dumps(filter_by)
+                    # scene: 只有容量场景 (capacity) 才有 node 维度，其他维度用 performance
+                    # 前端 sceneDimensionMap: performance=[namespace,workload,pod,container], capacity=[node]
+                    scene = "capacity" if dashboard == "node" else "performance"
                     route_path = (
-                        f"#/k8s?dashboardId={dashboard}&sceneId=kubernetes&sceneType=overview&queryData={query_data}"
+                        f"#/k8s-new?cluster={cluster}&filterBy={filter_by_str}&groupBy={group_by_str}"
+                        f"&sceneId=kubernetes&scene={scene}&activeTab=list"
                     )
                     route_path = base64.b64encode(route_path.encode("utf8")).decode("utf8")
                     link = urllib.parse.urljoin(
@@ -611,7 +671,7 @@ class MultiStrategyCollectContent(DefaultContent):
         max_time = time_tools.localtime(max(source_times))
         min_time = time_tools.localtime(min(source_times))
 
-        time_range = f"{min_time.strftime(DATETIME_FORMAT)} ~ {max_time.strftime(DATETIME_FORMAT)}"
+        time_range = f"{min_time.strftime(settings.DATETIME_FORMAT)} ~ {max_time.strftime(settings.DATETIME_FORMAT)}"
         return time_range
 
     @cached_property

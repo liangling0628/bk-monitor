@@ -24,10 +24,11 @@
  * IN THE SOFTWARE.
  */
 
-import { defineComponent, computed, type PropType, ref, type ComponentPublicInstance } from 'vue';
+import { defineComponent, computed, type PropType, ref, type ComponentPublicInstance, watch } from 'vue';
 
 import useLocale from '@/hooks/use-locale';
 import useStore from '@/hooks/use-store';
+import $http from '@/api';
 
 import LineRuleConfig from '../line-rule-config';
 import LogFilter from '../log-filter';
@@ -37,6 +38,14 @@ import ConfigClusterBox from './config-cluster-box';
 import type { IContainerConfigItem, IClusterItem, IConditions } from '../../../../type';
 
 import './configuration-item-list.scss';
+
+/**
+ * 选择项类型定义
+ */
+type ISelectItem = {
+  id: string;
+  name: string;
+};
 
 /**
  * 子组件实例类型定义
@@ -141,6 +150,66 @@ export default defineComponent({
     /** 获取全局数据（字符集选项等） */
     const globalsData = computed(() => store.getters['globals/globalsData']);
 
+    /** 业务 ID */
+    const bkBizId = computed(() => store.getters.bkBizId);
+
+    /** 是否正在请求命名空间接口 */
+    const nameSpaceRequest = ref(false);
+
+    /** 命名空间选择列表 */
+    const nameSpacesSelectList = ref<ISelectItem[]>([]);
+
+    /**
+     * 判断当前所选集群是否为共享集群
+     * @returns 是否为共享集群
+     */
+    const getIsSharedCluster = (): boolean => {
+      return props.clusterList?.find(cluster => cluster.id === props.bcsClusterId)?.is_shared ?? false;
+    };
+
+    /**
+     * 获取命名空间列表
+     * @param clusterID - 集群 ID
+     * @param isFirstUpdateSelect - 是否为首次更新选择（用于详情页数据回显）
+     */
+    const getNameSpaceList = async (clusterID: string, isFirstUpdateSelect = false): Promise<void> => {
+      // 参数校验和防重复请求
+      if (!clusterID || nameSpaceRequest.value) {
+        return;
+      }
+
+      const query = { bcs_cluster_id: clusterID, bk_biz_id: bkBizId.value };
+      nameSpaceRequest.value = true;
+
+      try {
+        const res = (await $http.request('container/getNameSpace', { query })) as { code: number; data: ISelectItem[] };
+
+        if (isFirstUpdateSelect) {
+          // 首次切换集群时，合并现有命名空间和接口返回的命名空间，用于详情页数据回显
+          const firstConfig = props.data[0] as IContainerConfigItem;
+          const namespaceList: string[] = [...(firstConfig?.namespaces || [])];
+          const resIDList = (res.data || []).map((item: ISelectItem) => item.id);
+          const setList = new Set([...namespaceList, ...resIDList]);
+          setList.delete('*'); // 移除通配符，后续会重新添加
+
+          const allList = [...setList].map(item => ({ id: item, name: item }));
+          nameSpacesSelectList.value = [...allList];
+        } else {
+          nameSpacesSelectList.value = res.data || [];
+        }
+
+        // 如果不是共享集群，添加"所有"选项
+        if (!getIsSharedCluster()) {
+          nameSpacesSelectList.value.unshift({ name: t('所有'), id: '*' });
+        }
+      } catch (err) {
+        console.log('获取命名空间列表失败:', err);
+        nameSpacesSelectList.value = [];
+      } finally {
+        nameSpaceRequest.value = false;
+      }
+    };
+
     /**
      * 将索引转换为字母标识（A, B, C, ...）
      * @param index - 配置项的索引（从0开始）
@@ -151,6 +220,18 @@ export default defineComponent({
       const asciiCode = 65;
       return String.fromCharCode(asciiCode + index);
     };
+
+    const isFileType = computed(() => props.scenarioId === 'container_file');
+
+    // 监听集群 ID 变化时获取命名空间列表
+    watch(
+      () => props.bcsClusterId,
+      (newVal) => {
+        if (newVal) {
+          getNameSpaceList(newVal);
+        }
+      },
+    );
 
     /**
      * 处理配置项数据变更
@@ -171,9 +252,10 @@ export default defineComponent({
      * 这些字段在实际业务逻辑中使用，使用类型断言来兼容类型系统
      */
     const createDefaultConfigItem = (): IContainerConfigItem => {
+      const collectorType = props.data[0]?.collector_type || 'container_log_config';
       return {
-        collector_type: 'container_log_config',
-        namespaces: [],
+        collector_type: collectorType,
+        namespaces: ['*'],
         // noQuestParams 和 containerNameList 不在类型定义中，但实际业务中需要使用
         noQuestParams: {
           letterIndex: 0,
@@ -207,10 +289,10 @@ export default defineComponent({
           exclude_files: [], // 类型定义中是 string[]，但实际使用时需要转换为 { value: string }[]
           conditions: {
             type: 'none' as const,
-            match_type: 'include',
-            match_content: '',
-            separator: '|',
-            separator_filters: [{ fieldindex: '', word: '', op: '=', logic_op: 'and' }],
+            // match_type: 'include',
+            // match_content: '',
+            // separator: '|',
+            // separator_filters: [{ fieldindex: '', word: '', op: '=', logic_op: 'and' }],
           },
           multiline_pattern: '',
           multiline_max_lines: '50',
@@ -314,7 +396,6 @@ export default defineComponent({
       if (logFilterRefs.value.length <= ind) {
         logFilterRefs.value.length = ind + 1;
       }
-
       return (
         <div class='item-box'>
           {/* 配置项头部：显示字母标识和删除按钮 */}
@@ -336,6 +417,8 @@ export default defineComponent({
                 clusterList={props.clusterList}
                 config={item}
                 isNode={props.collectorType === 'node_log_config'}
+                nameSpaceRequest={nameSpaceRequest.value}
+                nameSpacesSelectList={nameSpacesSelectList.value}
                 scenarioId={props.scenarioId}
                 on-change={(data: IContainerConfigItem) => {
                   handleDataChange(data, ind);
@@ -359,59 +442,63 @@ export default defineComponent({
               </div>
             )}
             {/* 日志路径配置 */}
-            <div class='item-content-child small-width'>
-              <LogPathConfig
-                ref={(el: any) => {
-                  logPathRefs.value[ind] = el;
-                }}
-                excludeFiles={
-                  (item.params?.exclude_files || []).map((file: string | { value: string }) =>
-                    typeof file === 'string' ? { value: file } : file,
-                  ) as { value: string }[]
-                }
-                paths={
-                  (item.params?.paths || []).map((path: { value?: string }) => ({
-                    value: path.value || '',
-                  })) as { value: string }[]
-                }
-                on-update={(key: string, val: any) => {
-                  // 如果更新的是 exclude_files，需要转换为 string[] 格式存储
-                  const updatedParams = { ...item.params };
-                  if (key === 'exclude_files' && Array.isArray(val)) {
-                    updatedParams[key] = val.map((item: { value: string }) => item.value);
-                  } else {
-                    updatedParams[key] = val;
+            {isFileType.value && (
+              <div class='item-content-child small-width'>
+                <LogPathConfig
+                  ref={(el: any) => {
+                    logPathRefs.value[ind] = el;
+                  }}
+                  excludeFiles={
+                    (item.params?.exclude_files || []).map((file: string | { value: string }) =>
+                      typeof file === 'string' ? { value: file } : file,
+                    ) as { value: string }[]
                   }
-                  const updatedItem = {
-                    ...item,
-                    params: updatedParams,
-                  };
-                  handleDataChange(updatedItem, ind);
-                }}
-              />
-            </div>
+                  paths={
+                    (item.params?.paths || []).map((path: { value?: string }) => ({
+                      value: path.value || '',
+                    })) as { value: string }[]
+                  }
+                  on-update={(key: string, val: any) => {
+                    // 如果更新的是 exclude_files，需要转换为 string[] 格式存储
+                    const updatedParams = { ...item.params };
+                    if (key === 'exclude_files' && Array.isArray(val)) {
+                      updatedParams[key] = val.map((item: { value: string }) => item.value);
+                    } else {
+                      updatedParams[key] = val;
+                    }
+                    const updatedItem = {
+                      ...item,
+                      params: updatedParams,
+                    };
+                    handleDataChange(updatedItem, ind);
+                  }}
+                />
+              </div>
+            )}
             {/* 字符集选择 */}
-            <div class='item-content-child small-width'>
-              <div class='item-content-title'>{t('字符集')}</div>
-              <bk-select
-                class='encoding-select'
-                clearable={false}
-                value={item.data_encoding}
-                searchable
-                on-selected={(val: string) => {
-                  const updatedItem = { ...item, data_encoding: val };
-                  handleDataChange(updatedItem, ind);
-                }}
-              >
-                {(globalsData.value?.data_encoding || []).map((option: { id: string; name: string }) => (
-                  <bk-option
-                    id={option.id}
-                    key={option.id}
-                    name={option.name}
-                  />
-                ))}
-              </bk-select>
-            </div>
+            {isFileType.value && (
+              <div class='item-content-child small-width'>
+                <div class='item-content-title'>{t('字符集')}</div>
+                <bk-select
+                  class='encoding-select'
+                  clearable={false}
+                  value={item.data_encoding}
+                  searchable
+                  on-selected={(val: string) => {
+                    const updatedItem = { ...item, data_encoding: val };
+                    handleDataChange(updatedItem, ind);
+                  }}
+                >
+                  {(globalsData.value?.data_encoding || []).map((option: { id: string; name: string }) => (
+                    <bk-option
+                      id={option.id}
+                      key={option.id}
+                      name={option.name}
+                    />
+                  ))}
+                </bk-select>
+              </div>
+            )}
             {/* 日志过滤配置 */}
             <div class='item-content-child'>
               <div class='item-content-title'>{t('日志过滤')}</div>

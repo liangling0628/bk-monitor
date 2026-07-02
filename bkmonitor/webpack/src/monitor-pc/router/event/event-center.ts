@@ -34,6 +34,8 @@ const EventCenterDetail = () =>
 const ActionDetail = () =>
   import(/* webpackChunkName: "EventDetail" */ 'fta-solutions/pages/event/event-detail/action-detail');
 const IncidentDetail = () => import(/* webpackChunkName: "IncidentDetail" */ '../../pages/incident/incident-detail');
+const AlarmCenter = () => import(/* webpackChunkName: "AlarmCenter" */ '../../pages/alarm-center/alarm-center');
+
 // const createAsyncComponent = () => ({
 //   component: import(/* webpackChunkName: "Event" */ 'fta-solutions/pages/event/event'),
 //   // 异步组件加载时使用的组件
@@ -47,8 +49,60 @@ const IncidentDetail = () => import(/* webpackChunkName: "IncidentDetail" */ '..
 //   timeout: Infinity
 // });
 
-const isSpecEvent = location.search.indexOf('specEvent') > -1;
 export default [
+  {
+    path: '/trace/alarm-center',
+    name: 'alarm-center',
+    components: {
+      noCache: AlarmCenter,
+    },
+    props: {
+      noCache: true,
+    },
+    meta: Object.assign(
+      {
+        route: {
+          parent: 'event',
+        },
+      },
+      {
+        title: '事件中心',
+        navId: 'event-center',
+        navClass: 'event-center-nav',
+        noNavBar: true,
+        authority: {
+          map: eventCenterAuth,
+        },
+      }
+    ),
+  },
+  {
+    path: '/trace/alarm-center/detail/:alarmId',
+    name: 'alarm-center-detail',
+    components: {
+      noCache: AlarmCenter,
+    },
+    props: {
+      noCache: true,
+    },
+    meta: Object.assign(
+      {
+        route: {
+          parent: 'event',
+        },
+      },
+      {
+        title: '告警详情',
+        navId: 'event-center',
+        needBack: true,
+        noNavBar: true,
+        navClass: 'event-center-nav',
+        authority: {
+          map: eventCenterAuth,
+        },
+      }
+    ),
+  },
   {
     path: '/event-center',
     name: 'event-center',
@@ -72,16 +126,7 @@ export default [
         authority: {
           map: eventCenterAuth,
         },
-      },
-      !isSpecEvent
-        ? {
-            authorityList: ['view_event_v2'],
-            authority: {
-              page: eventCenterAuth.VIEW_AUTH,
-              map: eventCenterAuth,
-            },
-          }
-        : {}
+      }
     ),
   },
   {
@@ -107,23 +152,14 @@ export default [
         authority: {
           map: eventCenterAuth,
         },
-      },
-      !isSpecEvent
-        ? {
-            authorityList: ['view_event'],
-            authority: {
-              page: eventCenterAuth.VIEW_AUTH,
-              map: eventCenterAuth,
-            },
-          }
-        : {}
+      }
     ),
   },
   {
     path: '/event-center/detail/:id',
     name: 'event-center-detail',
     props: true,
-    beforeEnter(to, from, next) {
+    beforeEnter(to, _from, next) {
       to.params.id ? next() : next(false);
     },
     component: EventCenterDetail,
@@ -142,21 +178,14 @@ export default [
         authority: {
           map: eventCenterAuth,
         },
-      },
-      !isSpecEvent
-        ? {
-            authority: {
-              page: eventCenterAuth.VIEW_AUTH,
-            },
-          }
-        : {}
+      }
     ),
   },
   {
     path: '/event-center/action-detail/:id',
     name: 'event-center-action-detail',
     props: true,
-    beforeEnter(to, from, next) {
+    beforeEnter(to, _from, next) {
       to.params.id ? next() : next(false);
     },
     component: ActionDetail,
@@ -175,14 +204,7 @@ export default [
         authority: {
           map: eventCenterAuth,
         },
-      },
-      !isSpecEvent
-        ? {
-            authority: {
-              page: eventCenterAuth.VIEW_AUTH,
-            },
-          }
-        : {}
+      }
     ),
   },
   {
@@ -191,7 +213,7 @@ export default [
     props: {
       noCache: true,
     },
-    beforeEnter(to, from, next) {
+    beforeEnter(to, _from, next) {
       to.params.id ? next() : next(false);
     },
     components: {
@@ -210,5 +232,15 @@ export default [
         parent: 'event',
       },
     },
+  },
+  {
+    path: '/alarm-center',
+    name: 'alarm-center',
+    redirect: '/trace/alarm-center',
+  },
+  {
+    path: '/alarm-center/:alarmId',
+    name: 'alarm-center-detail',
+    redirect: '/trace/alarm-center/:alarmId',
   },
 ] as RouteConfig[];

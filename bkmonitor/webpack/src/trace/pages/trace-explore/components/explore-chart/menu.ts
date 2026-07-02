@@ -26,6 +26,7 @@
 
 import { toPng } from 'html-to-image';
 import { deepClone } from 'monitor-common/utils';
+import { openAlarmCenter } from 'monitor-common/utils/alarm-center-router';
 import { filterDictConvertedToWhere } from 'monitor-ui/chart-plugins/utils';
 
 import { commOpenUrl, getMetricId, transformLogUrlQuery } from '@/plugins/utls/menu';
@@ -49,12 +50,13 @@ export function handleExplore(targets: IDataQuery[], timeRange: string[], autoNa
     )
   );
   if (!autoNavTo) return targets;
+  const targetBizId = targets[0].data?.bk_biz_id || window.cc_biz_id;
   if (isLog) {
     const [startTime, endTime] = timeRange;
     const queryConfig = targets[0].data.query_configs[0];
     const retrieveParams: ILogUrlParams = {
       // 检索参数
-      bizId: window.cc_biz_id.toString(),
+      bizId: targetBizId.toString(),
       keyword: queryConfig.query_string, // 搜索关键字
       addition: queryConfig.where || [],
       start_time: startTime,
@@ -67,7 +69,7 @@ export function handleExplore(targets: IDataQuery[], timeRange: string[], autoNa
     window.open(url);
   } else {
     window.open(
-      `${commOpenUrl('#/data-retrieval/')}?targets=${encodeURIComponent(JSON.stringify(targets))}&from=${
+      `${commOpenUrl('#/data-retrieval/', targetBizId.toString())}?targets=${encodeURIComponent(JSON.stringify(targets))}&from=${
         timeRange[0]
       }&to=${timeRange[1]}`
     );
@@ -76,6 +78,7 @@ export function handleExplore(targets: IDataQuery[], timeRange: string[], autoNa
 
 export const handleRelateAlert = (targets: IDataQuery[], timeRange: string[]) => {
   const metricIdMap: any = {};
+  const targetBizId = targets[0].data?.bk_biz_id || window.cc_biz_id;
   targets?.forEach(target => {
     if (target.data?.query_configs?.length) {
       target.data?.query_configs?.forEach((item: any) => {
@@ -94,8 +97,17 @@ export const handleRelateAlert = (targets: IDataQuery[], timeRange: string[]) =>
   Object.keys(metricIdMap).forEach(metricId => {
     queryString += `${queryString.length ? ' or ' : ''}指标ID : ${metricId}`;
   });
-  queryString.length &&
-    window.open(commOpenUrl(`#/event-center?queryString=${queryString}&from=${timeRange[0]}&to=${timeRange[1]}`));
+  if (queryString.length) {
+    openAlarmCenter(
+      {
+        queryString,
+        from: timeRange[0],
+        to: timeRange[1],
+      },
+      '_blank',
+      targetBizId.toString()
+    );
+  }
 };
 
 export function handleAddStrategy(targets: IDataQuery[], metric: IExtendMetricData | null) {
@@ -130,7 +142,8 @@ export function handleAddStrategy(targets: IDataQuery[], metric: IExtendMetricDa
         });
       });
     }
-    window.open(`${commOpenUrl('#/strategy-config/add')}?data=${JSON.stringify(result)}`);
+    const targetBizId = targets[0].data?.bk_biz_id || window.cc_biz_id;
+    window.open(`${commOpenUrl('#/strategy-config/add', targetBizId.toString())}?data=${JSON.stringify(result)}`);
   } catch (e) {
     console.info(e);
   }

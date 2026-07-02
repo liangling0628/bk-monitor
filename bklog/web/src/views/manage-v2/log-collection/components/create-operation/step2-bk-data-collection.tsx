@@ -66,7 +66,7 @@ interface IClusterItem {
   /** 存储集群ID */
   storage_cluster_id: number | string;
   /** 存储集群名称 */
-  storage_cluster_name: string;
+  storage_display_name: string;
   /** 是否为平台集群 */
   is_platform?: boolean;
   /** 权限信息 */
@@ -155,6 +155,14 @@ interface IIndexSetData {
   sort_fields?: string[];
   /** 目标字段列表 */
   target_fields?: string[];
+  /** 所属索引集列表 */
+  parent_index_set_ids?: number[];
+  /** 时间字段 */
+  time_field?: string;
+  /** 时间字段类型 */
+  time_field_type?: string;
+  /** 时间字段精度单位 */
+  time_field_unit?: string;
   [key: string]: unknown;
 }
 
@@ -227,6 +235,27 @@ export default defineComponent({
     const collectionTableData = ref<IFieldItem[]>([]);
     /** 目标字段选择列表 */
     const targetFieldSelectList = ref<IFieldSelectItem[]>([]);
+    const targetFieldSelectMap = computed(() => new Set(targetFieldSelectList.value.map(item => item.id)));
+    /**
+     * 接口详情中的 target_fields 可能已经不在当前字段列表中。
+     * 这里把已选但缺失的字段补充为临时 option，确保 select tag 可以展示并支持删除。
+     */
+    const targetFieldOptions = computed(() => {
+      const options = [...targetFieldSelectList.value];
+      const optionSet = new Set(options.map(item => item.id));
+
+      for (const field of configData.value.target_fields || []) {
+        if (field && !optionSet.has(field)) {
+          optionSet.add(field);
+          options.push({
+            id: field,
+            name: field,
+          });
+        }
+      }
+
+      return options;
+    });
     /** 时间索引配置 */
     const timeIndex = ref<ITimeIndex | null>(null);
     /** 配置数据 */
@@ -300,7 +329,7 @@ export default defineComponent({
                     id={option.storage_cluster_id}
                     key={option.storage_cluster_id}
                     class='custom-no-padding-option'
-                    name={option.storage_cluster_name}
+                    name={option.storage_display_name}
                   />
                 ))}
               </bk-select>
@@ -320,6 +349,9 @@ export default defineComponent({
               sortable={false}
               value={configData.value.indexes}
               on-custom-add={handleAddDataSource}
+              on-change={(val: IIndexItem[]) => {
+                configData.value.indexes = val;
+              }}
             />
             <div class='data-source-table'>
               {/* 计算平台场景：显示字段列表 */}
@@ -398,12 +430,14 @@ export default defineComponent({
               display-tag
               multiple
               searchable
+              allow-create
               on-selected={(value) => {
                 configData.value.target_fields = value;
               }}
             >
-              {targetFieldSelectList.value.map(option => (
+              {targetFieldOptions.value.map(option => (
                 <bk-option
+                  class={{ 'is-missing-target-field': !targetFieldSelectMap.value.has(option.id) }}
                   id={option.id}
                   key={option.id}
                   name={option.name}
@@ -478,7 +512,17 @@ export default defineComponent({
         store.commit('collect/updateCurIndexSet', indexSetData);
 
         // 更新配置数据
-        const { indexes, index_set_name, view_roles, storage_cluster_id, sort_fields, target_fields } = indexSetData;
+        const {
+          indexes,
+          index_set_name,
+          view_roles,
+          storage_cluster_id,
+          sort_fields, target_fields,
+          parent_index_set_ids,
+          time_field,
+          time_field_type,
+          time_field_unit,
+        } = indexSetData;
         configData.value = {
           ...configData.value,
           indexes: indexes || [],
@@ -487,7 +531,17 @@ export default defineComponent({
           storage_cluster_id: storage_cluster_id ?? null,
           sort_fields: sort_fields || [],
           target_fields: target_fields || [],
+          parent_index_set_ids: parent_index_set_ids || [],
         };
+
+        // 编辑模式回填时间索引配置（ES场景必需）
+        if (time_field) {
+          timeIndex.value = {
+            time_field,
+            time_field_type,
+            time_field_unit,
+          };
+        }
 
         /**
          * 如果有索引，初始化显示列表和字段选择列表
@@ -526,7 +580,12 @@ export default defineComponent({
           const sortedClusters = sortByPermission(clusterRes.data);
           clusterList.value = sortedClusters.filter(cluster => !cluster.is_platform);
 
-          // 处理路由参数设置默认集群
+          // 编辑模式下，集群ID由 fetchIndexSetData 回填，这里只需加载集群列表用于下拉框展示
+          if (props.isEdit) {
+            return;
+          }
+
+          // 处理路由参数设置默认集群（仅新建模式）
           const targetClusterId = route.query.cluster;
           if (targetClusterId) {
             const numericClusterId = Number(targetClusterId);

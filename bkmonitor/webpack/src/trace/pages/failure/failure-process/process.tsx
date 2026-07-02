@@ -27,13 +27,16 @@ import { reactive } from 'vue';
 
 import { useI18n } from 'vue-i18n';
 
+import { incidentAlarmDetailInject } from '../composables/use-alarm-detail';
 import { LEVEL_LIST, STATUS_LIST } from '../constant';
 
 /** 文案对应表 */
 export const typeTextMap = {
   incident_create: '生成故障，包含{alert_count}个告警，故障负责人：{assignees}',
   incident_observe: '故障观察中，剩余观察时间{last_minutes}分钟',
+  incident_observe_default: '故障观察中',
   incident_recover: '故障已恢复',
+  incident_reopen: '故障在观察期间重新打开',
   incident_notice: '故障通知已发送（接收人：{receivers}）',
   incident_merge: '故障{merged_incident_name}被合并入当前故障',
   incident_merge_new: '故障【{link_incident_name}】合并入当前故障',
@@ -85,7 +88,7 @@ export const handleFun = (data, callback) => {
   callback?.(data);
   const node = JSON.parse(JSON.stringify({ ...data }));
   node.id = data.alert_id;
-  window.__BK_WEWEB_DATA__?.showDetailSlider?.(node);
+  // window.__BK_WEWEB_DATA__?.showDetailSlider?.(node);
 };
 
 /** 故障合并相关渲染函数 */
@@ -120,10 +123,18 @@ export const handleDetail = (e, data, id, bizId, callback) => {
 };
 /** 点击告警名 */
 export const handleAlertName = (extra_info, callback) => {
+  const { updateAlarmDetailData } = incidentAlarmDetailInject();
   return (
     <span
       class='link cursor'
-      onClick={() => handleFun(extra_info, callback)}
+      onClick={() => {
+        handleFun(extra_info, callback);
+        extra_info.alert_id &&
+          updateAlarmDetailData({
+            bk_biz_id: extra_info.bk_biz_id ?? window.cc_biz_id ?? window.bk_biz_id,
+            id: extra_info.alert_id,
+          });
+      }}
     >
       {extra_info.alert_name}
     </span>
@@ -198,10 +209,15 @@ export const renderMap = reactive({
     );
   },
   incident_observe: ({ extra_info }) => {
+    const { t } = useI18n();
+    const lastMinutes = extra_info?.last_minutes;
+    if (lastMinutes === undefined || lastMinutes === null || lastMinutes === '') {
+      return <span>{t(typeTextMap.incident_observe_default)}</span>;
+    }
     return (
       <i18n-t
         v-slots={{
-          last_minutes: <span class='count'>{extra_info?.last_minutes || 0}</span>,
+          last_minutes: <span class='count'>{lastMinutes}</span>,
         }}
         keypath={typeTextMap.incident_observe}
       />

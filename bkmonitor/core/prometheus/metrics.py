@@ -88,6 +88,7 @@ class StatusEnum:
 
     SUCCESS = "success"
     FAILED = "failed"
+    DEFERRED = "deferred"
 
     @classmethod
     def from_exc(cls, expr):
@@ -217,6 +218,22 @@ DETECT_PROCESS_DATA_COUNT = Counter(
     labelnames=("strategy_id", "type"),
 )
 
+# 新维度值检测(NewSeries)自监控：失败安全分支会静默不报，故指标是能力闭环的一部分。
+NEW_SERIES_PROCESS_TIME = Histogram(
+    name="bkmonitor_new_series_pre_detect_time",
+    documentation="NewSeries pre_detect(读旧态+写新态)耗时",
+    labelnames=("strategy_id",),
+    # 显式桶覆盖到 60s(整次 strategy detect 锁顶): 包装类默认桶顶=30s, 超 30s 全塌进 +Inf,
+    # p95/p99 会饱和、分不清 31s 与 59s(恰是锁危险区)。低端保留亚秒分辨率(现实最坏 ~7s)。
+    buckets=(0.1, 0.5, 1.0, 2.5, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, INF),
+)
+
+NEW_SERIES_PROCESS_COUNT = Counter(
+    name="bkmonitor_new_series_process_count",
+    documentation="NewSeries 处理计数(type: seen_write/trim/over_limit/failure)",
+    labelnames=("strategy_id", "type"),
+)
+
 # trigger
 TRIGGER_PROCESS_TIME = Histogram(
     name="bkmonitor_trigger_process_time",
@@ -286,6 +303,12 @@ ALERT_MANAGE_COUNT = Counter(
     labelnames=("status", "exception"),
 )
 
+ALERT_MANAGE_DEFERRED_COUNT = Counter(
+    name="bkmonitor_alert_manage_deferred_count",
+    documentation="alert(manager) 模块因瞬态基础设施错误延后重试的告警量(本批未 finalize, 下周期重跑, 不计入处理成功率)",
+    labelnames=("exception",),
+)
+
 ALERT_PROCESS_PULL_EVENT_COUNT = Counter(
     name="bkmonitor_alert_process_pull_event_count",
     documentation="alert(builder) 模块事件拉取条数",
@@ -319,6 +342,12 @@ PROCESS_BIG_LATENCY = Histogram(
 PROCESS_OVER_FLOW = Counter(
     name="bkmonitor_process_overflow",
     documentation="模块处理量级过大",
+    labelnames=("module", "strategy_id", "bk_biz_id", "strategy_name", "redis_node"),
+)
+
+TRIGGER_EVENT_RATE_LIMIT_DROP = Counter(
+    name="bkmonitor_trigger_event_rate_limit_drop_total",
+    documentation="trigger 模块按策略+数据时间戳限流后丢弃的 event 数",
     labelnames=("module", "strategy_id", "bk_biz_id", "strategy_name", "redis_node"),
 )
 
@@ -384,6 +413,58 @@ ALERT_QOS_COUNT = Counter(
     name="bkmonitor_alert_qos_count",
     documentation="composite 模块动作推送条数",
     labelnames=("strategy_id", "is_blocked"),
+)
+
+ISSUE_FINGERPRINT_BLOCKED = Counter(
+    name="bkmonitor_issue_fingerprint_blocked",
+    documentation="Issue 聚合按指纹路径中跳过创建的次数（按原因分类）",
+    # reason 取值：
+    #   - missing_dim：告警 dimensions 缺失 issue 配置中的某个 aggregate_dimension，无法生成指纹
+    #   - high_cardinality：单策略活跃 Issue 数已达 ISSUE_MAX_ACTIVE_PER_STRATEGY 阈值
+    #     （warn-only，告警不被丢弃；本 metric 仅用于运维监控高基数策略）
+    # label 用 bk_biz_id（业务粒度）而非 strategy_id（策略粒度），避免高基数策略推爆 metric series
+    labelnames=("bk_biz_id", "reason"),
+)
+
+ISSUE_CREATE_ACTIVITY_LOST = Counter(
+    name="bkmonitor_issue_create_activity_lost",
+    documentation="Issue CREATE 活动日志写入永久失败计数（retry 后仍失败）。"
+    "活动日志缺失不影响主功能但影响审计完整性，运维可据此发现 ES 持续异常",
+    labelnames=("bk_biz_id",),
+)
+
+ISSUE_LEGACY_FALLBACK_HIT = Counter(
+    name="bkmonitor_issue_legacy_fallback_hit",
+    documentation="部署窗口期 read-only legacy fallback 命中次数。"
+    "fingerprint 改造部署期内,worker 可能先于 web migrate 完成而看到 fingerprint=null 的活跃 Issue,"
+    "alert 被关联到 legacy Issue（不写 fingerprint）。migrate 完成后该 Issue 被 RESOLVE,"
+    "alert.issue_id 永久指向 RESOLVED Issue（best-effort,不会重新关联到新 fingerprint Issue)。"
+    "正常上线后此 metric 应在分钟级回零;持续非零说明 migrate 未成功执行",
+    labelnames=("bk_biz_id",),
+)
+
+ISSUE_LLM_TITLE_TOTAL = Counter(
+    name="bkmonitor_issue_llm_title_total",
+    documentation="Issue LLM 标题生成结果计数",
+    # result 取值：
+    #   - ok / shadow_ok：生成并写入 / shadow 模式生成未写入
+    #   - empty_log：关联日志为空（非日志类告警或取数失败），不适用
+    #   - ratelimited：业务级限流丢弃
+    #   - timeout：soft_time_limit 触发（取日志或调 LLM 阶段）
+    #   - llm_error：LLM 调用 / Issue 读写失败
+    #   - invalid_output：输出校验不过（多行/禁项/空）
+    #   - name_changed：CAS 失败（用户已改名），放弃写入
+    #   - name_duplicated：业务内标题撞名，保留默认名
+    # examples_source 取值 strategy|biz|static：自动 few-shot 是否生效及其层级；
+    # auto 桶（strategy/biz）违例率劣化是 few-shot 漂移信号，回退 = 停周期任务等缓存过期
+    labelnames=("bk_biz_id", "result", "examples_source"),
+)
+
+ISSUE_LLM_TITLE_STEP_SECONDS = Histogram(
+    name="bkmonitor_issue_llm_title_step_seconds",
+    documentation="Issue LLM 标题生成分步耗时。step=fetch_log（关联日志取数，长尾在日志平台查询侧）| llm_call",
+    labelnames=("step",),
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 20, 30, 60, INF),
 )
 
 # composite
@@ -1217,7 +1298,7 @@ AI_AGENTS_REQUESTS_TOTAL = Counter(
 MCP_REQUESTS_TOTAL = Counter(
     name="bkmonitor_mcp_requests_total",
     documentation="MCP工具调用统计",
-    labelnames=("tool_name", "bk_biz_id", "username", "status", "permission_action"),
+    labelnames=("tool_name", "bk_biz_id", "username", "status", "permission_action", "mcp_server_name"),
 )
 
 MCP_RESOURCE_REQUESTS_TOTAL = Counter(

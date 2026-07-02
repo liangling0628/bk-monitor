@@ -573,14 +573,7 @@ export default {
         STOPPED: '#C4C6CC',
       },
       isLeave: false,
-      filterEnterRouter: [
-        'service-classify',
-        'plugin-manager',
-        'plugin-edit',
-        'export-configuration',
-        'custom-scenes',
-        'custom-scenes-view',
-      ],
+      filterEnterRouter: ['service-classify', 'plugin-manager', 'plugin-edit', 'export-configuration'],
       cancelFetch: null,
       delDialogShow: false,
       collectorTaskData: {
@@ -1134,6 +1127,7 @@ export default {
      * @description: 发起搜索请求
      */
     handleKeywordChange() {
+      this.pagination.page = 1;
       this.getCollectionConfigList(false, true);
     },
     handleTableWrapperChange() {

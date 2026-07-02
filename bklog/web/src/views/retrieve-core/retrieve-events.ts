@@ -51,6 +51,11 @@ enum RetrieveEvent {
   FAVORITE_WIDTH_CHANGE = 'favorite-width-change',
 
   /**
+   * 收藏列表刷新
+   */
+  FAVORITE_LIST_REFRESH = 'favorite-list-refresh',
+
+  /**
    * 全局滚动
    */
   GLOBAL_SCROLL = 'global-scroll',
@@ -95,6 +100,11 @@ enum RetrieveEvent {
    */
   SEARCH_TIME_CHANGE = 'search-time-change',
 
+    /**
+   * 搜索时区
+   */
+    SEARCH_TIME_ZONE_CHANGE = 'search-time-zone-change',
+
   /**
    * 搜索条件改变
    */
@@ -126,6 +136,17 @@ enum RetrieveEvent {
   TREND_GRAPH_SEARCH = 'trend-graph-search',
 
   /**
+   * 趋势图进入即时加载占位态。
+   * 用于索引集 / 空间切换时，在字段列表请求返回前同步给出 UI 反馈。
+   */
+  TREND_GRAPH_PENDING = 'trend-graph-pending',
+
+  /**
+   * 趋势图清空（仅清空数据）
+   */
+  TREND_GRAPH_CLEAR = 'trend-graph-clear',
+
+  /**
    * 趋势图缩放
    */
   TREND_GRAPH_ZOOM = 'trend-graph-zoom',
@@ -149,6 +170,16 @@ enum RetrieveEvent {
    * AI 助手关闭
    */
   AI_CLOSE = 'ai-close',
+
+  /**
+   * 场景筛选面板高度变化
+   */
+  SCENE_FILTER_PANEL_HEIGHT_CHANGE = 'scene-filter-panel-height-change',
+
+  /**
+   * 获取的字段列表为空
+   */
+  SCENE_FIELD_EMPTY = 'scene-field-empty',
 }
 
 export default RetrieveEvent;

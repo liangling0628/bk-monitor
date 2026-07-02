@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
 Copyright (C) 2017-2025 Tencent. All rights reserved.
@@ -8,17 +7,25 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 """
+
 import logging
 import time
-from typing import Dict, List
 
+from elasticsearch.exceptions import ConnectionError as ESConnectionError
+from elasticsearch.exceptions import TransportError
 from elasticsearch.helpers import BulkIndexError
+from elasticsearch.helpers.errors import ScanError
 from elasticsearch_dsl import Q
+from kombu.exceptions import OperationalError as KombuOperationalError
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import ReadOnlyError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from alarm_backends.constants import CONST_ONE_DAY, CONST_ONE_HOUR
 from alarm_backends.core.alert.alert import Alert, AlertCache, AlertKey
 from alarm_backends.core.cache.strategy import StrategyCacheManager
 from alarm_backends.core.cluster import get_cluster_bk_biz_ids
+from alarm_backends.core.storage.redis_cluster import PipelineResultMismatch
 from alarm_backends.service.alert.manager.processor import AlertManager
 from alarm_backends.service.scheduler.app import app
 from bkmonitor.documents import AlertDocument, AlertLog
@@ -32,6 +39,96 @@ logger = logging.getLogger("alert.manager")
 BATCH_SIZE = 200
 # 默认检测周期
 DEFAULT_CHECK_INTERVAL = 60
+# ES 深分页每页大小
+SCAN_PAGE_SIZE = 5000
+
+# 瞬态基础设施异常(计 deferred 而非 failed): 仅纳入"本批未 finalize、下一周期重跑可自愈"的类型，
+# 其余一律计 failed。收口原则——基于已知可恢复类型显式纳入，不用基类宽松匹配：否则会把代码 / 数据 /
+# 配置类错误(不会靠重跑恢复)漂白成 deferred，从成功率口径里抹掉真实故障。新可恢复类型经确认后再扩。
+# Redis: 连接(含 BusyLoadingError 子类) / 超时 / 主从切换只读(ReadOnlyError) / pipeline 结果错位；
+#   不含 ResponseError / DataError / NoScriptError 等命令·数据·脚本错(不会自愈)。
+# Broker(Celery/kombu): RabbitMQ/AMQP 可恢复连接错误(kombu.exceptions.OperationalError)仅在 finalize 前
+#   (save_alerts 之前的 .delay)计 deferred；finalize 后(send_signal)抛出会丢 signal、终态不重发,仍计 failed
+#   (见下 is_transient_retry_exc 分支)。同名的 django.db.utils.OperationalError(DB 逻辑错)任何阶段都计 failed。
+REDIS_RETRY_EXCEPTIONS = (RedisConnectionError, RedisTimeoutError, ReadOnlyError, PipelineResultMismatch)
+
+
+def is_transient_retry_exc(exc: Exception, finalized: bool = False) -> bool:
+    """异常是否为"下一周期重跑可自愈"的瞬态基础设施错误：是则计 deferred，否则计 failed。
+
+    finalized: 本批告警状态是否已落库(save_alerts 完成)。仅影响 broker 异常的判定：finalize 后抛出的
+    broker 异常会丢 signal、终态不会被下周期重发,不可靠自愈,不计 deferred。
+    """
+    if isinstance(exc, REDIS_RETRY_EXCEPTIONS):
+        return True
+    if isinstance(exc, KombuOperationalError):
+        # Celery broker(RabbitMQ/AMQP)可恢复连接错误(kombu.exceptions.OperationalError 语义即 recoverable
+        # connection error)：publish 任务(.delay)时新建 broker 连接偶发建连/通道超时、连接重置。是否可靠
+        # 自愈取决于发生阶段:
+        #   - finalize 前(check_all 的 create_actions.delay,在告警状态/ES 持久化之前):本批未落库,下一
+        #     周期 check_abnormal_alert 重跑重发,可自愈 → deferred。
+        #   - finalize 后(send_signal 的 check_action_and_composite.delay,在 save_alerts 之后):告警状态
+        #     (含 recovered/closed)已落库,终态不会被下周期重新捞起重发 signal → 是实际丢 signal 的失败,
+        #     仍计 failed,不能从成功率口径抹掉。
+        # 按类型匹配可与同名的 django.db.utils.OperationalError(DB 逻辑错)区分,后者任何阶段都计 failed。
+        return not finalized
+    if isinstance(exc, ScanError):
+        # scan / scroll 部分分片失败，重跑可恢复
+        return True
+    if isinstance(exc, ESConnectionError):
+        # ES 连接类(ConnectionTimeout 为其子类)无 HTTP 状态码，视为瞬态
+        return True
+    if isinstance(exc, TransportError):
+        # ES 其余传输错误：仅 429(限流) / 5xx(服务端) 视为瞬态；4xx(查询 / 权限 / 版本冲突)多为代码或
+        # 配置问题，仍计 failed。status_code 取自 es-py<8；es8 起无此属性 → 落入 failed(安全方向)。
+        code = getattr(exc, "status_code", None)
+        return isinstance(code, int) and (code == 429 or 500 <= code <= 599)
+    return False
+
+
+def _search_after_hits(search, page_size: int):
+    """
+    基于 search_after + PIT 对 elasticsearch_dsl Search 对象做深分页迭代。
+
+    替代 scan()（scroll API），既避免 ES scroll context 积压，又通过 PIT 保留查询
+    开始时的快照语义，防止分页期间 refresh 导致的漏扫或重复扫描。
+
+    :param search: 已配置好 filter/source 的 elasticsearch_dsl Search 对象
+    :param page_size: 每页大小
+    """
+    es_client = AlertDocument._index._get_connection()
+    # 从 search 对象自身提取 index，保留调用方指定的 all_indices / 时间范围等差异
+    index = search._index
+    base_body = search.to_dict()
+    # 使用映射字段 id（Keyword，带 doc_values）而非元字段 _id，与 Elastic 官方推荐一致
+    base_body["sort"] = [{"id": "asc"}]
+    base_body["size"] = page_size
+
+    pit_resp = es_client.open_point_in_time(index=index, keep_alive="1m", ignore_unavailable=True)
+    pit_id = pit_resp["id"]
+
+    try:
+        search_after = None
+        while True:
+            # 每次构造独立 body，避免多次迭代间共享 dict 引发的状态污染
+            body = {**base_body, "pit": {"id": pit_id, "keep_alive": "1m"}}
+            if search_after:
+                body["search_after"] = search_after
+            # 使用 PIT 时不传 index，PIT 已携带索引快照信息
+            resp = es_client.search(body=body, request_timeout=30)
+            # ES 每轮响应可能刷新 pit_id，需同步更新
+            if resp.get("pit_id"):
+                pit_id = resp["pit_id"]
+            hits = resp["hits"]["hits"]
+            if not hits:
+                break
+            yield from hits
+            search_after = hits[-1]["sort"]
+    finally:
+        try:
+            es_client.close_point_in_time(body={"id": pit_id})
+        except Exception:
+            logger.warning("[_search_after_hits] failed to close PIT %s", pit_id)
 
 
 def check_abnormal_alert():
@@ -40,7 +137,7 @@ def check_abnormal_alert():
     """
     search = (
         AlertDocument.search(all_indices=True)
-        .filter(Q("term", status=EventStatus.ABNORMAL) & ~Q('term', is_blocked=True))
+        .filter(Q("term", status=EventStatus.ABNORMAL) & ~Q("term", is_blocked=True))
         .source(fields=["id", "strategy_id", "event.bk_biz_id"])
     )
 
@@ -48,14 +145,17 @@ def check_abnormal_alert():
     cluster_bk_biz_ids = set(get_cluster_bk_biz_ids())
 
     alerts = []
-    # 这里用 scan 迭代的查询方式，目的是为了突破 ES 查询条数 1w 的限制
-    for hit in search.params(size=5000).scan():
-        if not getattr(hit, "id", None) or not getattr(hit, "event", None) or not getattr(hit.event, "bk_biz_id", None):
+    # 使用 search_after 深分页替代 scan()，避免 ES scroll context 积压
+    for hit in _search_after_hits(search, page_size=SCAN_PAGE_SIZE):
+        src = hit.get("_source") or {}
+        alert_id = src.get("id")
+        bk_biz_id = (src.get("event") or {}).get("bk_biz_id")
+        if not alert_id or not bk_biz_id:
             continue
         # 只处理集群内的告警
-        if hit.event.bk_biz_id not in cluster_bk_biz_ids:
+        if bk_biz_id not in cluster_bk_biz_ids:
             continue
-        alerts.append({"id": hit.id, "strategy_id": getattr(hit, "strategy_id", None)})
+        alerts.append({"id": alert_id, "strategy_id": src.get("strategy_id")})
 
     if alerts:
         send_check_task(alerts)
@@ -63,7 +163,7 @@ def check_abnormal_alert():
 
 def check_blocked_alert():
     """
-    拉取异常告警，对这些告警进行状态管理
+    拉取被流控的异常告警，对这些告警进行状态管理
     """
     current_time = int(time.time())
     end_time = current_time - CONST_ONE_HOUR
@@ -71,7 +171,7 @@ def check_blocked_alert():
     logger.info("[check_blocked_alert] begin %s - %s", start_time, end_time)
     search = (
         AlertDocument.search(start_time=start_time, end_time=end_time)
-        .filter(Q("term", status=EventStatus.ABNORMAL) & Q('term', is_blocked=True))
+        .filter(Q("term", status=EventStatus.ABNORMAL) & Q("term", is_blocked=True))
         .source(fields=["id", "strategy_id", "event.bk_biz_id"])
     )
 
@@ -80,14 +180,17 @@ def check_blocked_alert():
 
     alerts = []
     total = 0
-    # 这里用 scan 迭代的查询方式，目的是为了突破 ES 查询条数 1w 的限制
-    for hit in search.params(size=BATCH_SIZE).scan():
-        if not getattr(hit, "id", None) or not getattr(hit, "event", None) or not getattr(hit.event, "bk_biz_id", None):
+    # 使用 search_after 深分页替代 scan()，避免 ES scroll context 积压
+    for hit in _search_after_hits(search, page_size=BATCH_SIZE):
+        src = hit.get("_source") or {}
+        alert_id = src.get("id")
+        bk_biz_id = (src.get("event") or {}).get("bk_biz_id")
+        if not alert_id or not bk_biz_id:
             continue
         # 只处理集群内的告警
-        if hit.event.bk_biz_id not in cluster_bk_biz_ids:
+        if bk_biz_id not in cluster_bk_biz_ids:
             continue
-        alerts.append({"id": hit.id, "strategy_id": getattr(hit, "strategy_id", None)})
+        alerts.append({"id": alert_id, "strategy_id": src.get("strategy_id")})
         total += 1
         if total % BATCH_SIZE == 0:
             alert_keys = [AlertKey(alert_id=alert["id"], strategy_id=alert.get("strategy_id")) for alert in alerts]
@@ -151,7 +254,7 @@ def check_blocked_alert_finished(alert_keys):
     )
 
 
-def send_check_task(alerts: List[Dict], run_immediately=True):
+def send_check_task(alerts: list[dict], run_immediately=True):
     """
     生成告警检测任务
     :param alerts: 告警对象列表
@@ -191,7 +294,7 @@ def send_check_task(alerts: List[Dict], run_immediately=True):
 
 
 @app.task(ignore_result=True, queue="celery_alert_manager")
-def handle_alerts(alert_keys: List[AlertKey]):
+def handle_alerts(alert_keys: list[AlertKey]):
     """
     处理告警（异步任务）
     """
@@ -216,12 +319,20 @@ def handle_alerts(alert_keys: List[AlertKey]):
     # 1. 周期维护未恢复的告警， 按 total=200 分批跑
     # 2. 产生新告警时，由alert.builder 立刻执行一次周期任务管理， total 较小。
     # 因此会存在耗时跟随total值的变化抖动。所以这里算单条告警的处理平均耗时才能体现出实际情况
-    metrics.ALERT_MANAGE_TIME.labels(status=metrics.StatusEnum.from_exc(exc), exception=exc).observe(cost / total)
-    metrics.ALERT_MANAGE_COUNT.labels(status=metrics.StatusEnum.from_exc(exc), exception=exc).inc(total)
+    if exc is not None and is_transient_retry_exc(exc, finalized=getattr(manager, "alerts_finalized", False)):
+        # 瞬态基础设施错误且本批可下周期重跑自愈: 计入 deferred 而非 failed，避免把一次节点抖动 / ES 瞬态 /
+        # finalize 前的 broker 建连抖动放大成整批失败、压垮处理成功率指标。
+        metrics.ALERT_MANAGE_TIME.labels(status=metrics.StatusEnum.DEFERRED, exception=exc).observe(cost / total)
+        metrics.ALERT_MANAGE_DEFERRED_COUNT.labels(exception=exc).inc(total)
+    else:
+        # 成功，或非瞬态(逻辑类)异常: 保留原有 success / failed 计数与可见性。
+        status = metrics.StatusEnum.from_exc(exc)
+        metrics.ALERT_MANAGE_TIME.labels(status=status, exception=exc).observe(cost / total)
+        metrics.ALERT_MANAGE_COUNT.labels(status=status, exception=exc).inc(total)
     metrics.report_all()
 
 
-def fetch_agg_interval(strategy_ids: List[int]):
+def fetch_agg_interval(strategy_ids: list[int]):
     """
     根据策略ID获取每个策略的聚合周期
     """
@@ -248,7 +359,7 @@ def fetch_agg_interval(strategy_ids: List[int]):
     return agg_interval_by_strategy
 
 
-def cal_alerts_check_interval(alerts: List[Dict]):
+def cal_alerts_check_interval(alerts: list[dict]):
     """
     计算告警的检查周期
     监控周期<30s，每15s检查一次

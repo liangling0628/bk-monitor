@@ -19,6 +19,7 @@ We undertake not to change the open source license (MIT license) applicable to t
 the project delivered to anyone in the future.
 """
 
+from collections import defaultdict
 from typing import Union
 
 from django.conf import settings
@@ -31,6 +32,7 @@ from apps.utils.function import map_if
 from apps.utils.local import get_request_username
 from apps.utils.log import logger
 from apps.utils.thread import MultiExecuteFunc
+from bkm_space.utils import bk_biz_id_to_space_uid
 
 """
 databus
@@ -48,7 +50,7 @@ from django_jsonfield_backport.models import (  # noqa  pylint: disable=unused-i
 )
 
 from apps.api import CmsiApi, TransferApi  # noqa
-from apps.log_databus.constants import CollectItsmStatus  # noqa
+from apps.log_databus.constants import DORIS_CLUSTER_TYPE, STORAGE_CLUSTER_TYPE, CollectItsmStatus  # noqa
 from apps.log_databus.constants import EtlConfig  # noqa
 from apps.log_databus.constants import TargetNodeTypeEnum  # noqa
 from apps.log_databus.constants import TargetObjectTypeEnum  # noqa
@@ -67,7 +69,7 @@ from apps.log_search.constants import (  # noqa
     GlobalCategoriesEnum,
     InnerTag,
 )
-from apps.log_search.models import LogIndexSet, Space  # noqa
+from apps.log_search.models import LogIndexSet, Space, Scenario  # noqa
 from apps.models import (  # noqa
     JsonField,
     MultiStrSplitByCommaField,
@@ -191,6 +193,7 @@ class CollectorConfig(CollectorBase):
     log_group_id = models.BigIntegerField(_("自定义日志组ID"), null=True, blank=True)
     is_nanos = models.BooleanField(_("采集项是否为纳秒采集"), default=False)
     enable_v4 = models.BooleanField(_("采集项是否为v4链路"), default=False)
+    storage_cluster_type = models.CharField(_("存储集群类型"), max_length=32, default=STORAGE_CLUSTER_TYPE)
 
     def get_name(self):
         return self.collector_config_name
@@ -217,7 +220,7 @@ class CollectorConfig(CollectorBase):
         multi_execute_func.append(
             "result_table_storage",
             TransferApi.get_result_table_storage,
-            params={"result_table_list": self.table_id, "storage_type": "elasticsearch", "no_request": True},
+            params={"result_table_list": self.table_id, "storage_type": self.storage_cluster_type, "no_request": True},
             use_request=False,
         )
         result = multi_execute_func.run(return_exception=True)
@@ -389,6 +392,60 @@ class CollectorConfig(CollectorBase):
         是否为自定义上报场景
         """
         return self.collector_scenario_id == CollectorScenarioEnum.CUSTOM.value
+
+    def create_index_set(self):
+        """
+        创建相应的索引集，is_active先设置为False，如果已存在则直接返回
+        """
+        index_set, created = LogIndexSet.objects.get_or_create(
+            collector_config_id=self.collector_config_id,
+            is_deleted=False,
+            defaults={
+                "index_set_name": _("[采集项]") + self.collector_config_name,
+                "space_uid": bk_biz_id_to_space_uid(self.bk_biz_id),
+                "scenario_id": Scenario.LOG,
+                "is_active": False,
+            },
+        )
+        if created:
+            self.index_set_id = index_set.index_set_id
+            self.save(update_fields=["index_set_id"])
+        return index_set
+
+    @staticmethod
+    def get_storage_cluster_type_by_table_id(table_id: str):
+        """
+        根据 table_id 获取存储集群类型
+        """
+        collector_config_obj = CollectorConfig.objects.filter(table_id=table_id).first()
+        return collector_config_obj.storage_cluster_type if collector_config_obj else STORAGE_CLUSTER_TYPE
+
+    @staticmethod
+    def get_storage_cluster_type_map_by_table_ids(table_ids: list | str):
+        """
+        根据 table_ids 获取存储集群类型
+        """
+        if not table_ids:
+            return {}
+        if isinstance(table_ids, str):
+            table_ids = table_ids.split(",")
+        storage_cluster_type_map = dict(
+            CollectorConfig.objects.filter(table_id__in=table_ids).values_list("table_id", "storage_cluster_type")
+        )
+        return {t_id: (storage_cluster_type_map.get(t_id) or STORAGE_CLUSTER_TYPE) for t_id in table_ids}
+
+    @staticmethod
+    def get_table_str_map_by_storage_cluster_type(table_str: str):
+        """
+        将 table_str 按照相对应的存储集群类型分组
+        """
+        if not table_str:
+            return {}
+        storage_cluster_type_map = CollectorConfig.get_storage_cluster_type_map_by_table_ids(table_str)
+        table_str_map = defaultdict(list)
+        for key, value in storage_cluster_type_map.items():
+            table_str_map[value].append(key)
+        return {storage_cluster_type: ",".join(t_ids) for storage_cluster_type, t_ids in table_str_map.items()}
 
 
 class ContainerCollectorConfig(SoftDeleteModel):
@@ -799,3 +856,22 @@ class FieldDateFormat(OperateRecordModel):
             }
             for obj in objs
         ]
+
+
+class GrokInfo(OperateRecordModel):
+    """
+    Grok模式信息
+    """
+
+    bk_biz_id = models.IntegerField(_("业务id"), db_index=True)
+    name = models.CharField(_("规则名称"), max_length=128, db_index=True)
+    pattern = models.TextField(_("表达式"))
+    is_builtin = models.BooleanField(_("是否内置"), default=False)
+    sample = models.TextField(_("样例"), null=True, blank=True)
+    description = models.TextField(_("描述"), null=True, blank=True)
+    sample_result = models.JSONField(_("样例匹配结果"), null=True, blank=True)
+
+    class Meta:
+        verbose_name = _("Grok规则")
+        verbose_name_plural = _("Grok规则")
+        unique_together = ("name", "bk_biz_id")

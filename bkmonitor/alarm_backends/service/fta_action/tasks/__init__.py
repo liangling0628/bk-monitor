@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tencent is pleased to support the open source community by making 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
 Copyright (C) 2017-2025 Tencent. All rights reserved.
@@ -15,6 +14,11 @@ from .create_action import (  # noqa
     check_create_poll_action_10_secs,
     create_actions,
     create_interval_actions,
+)
+from .issue_tasks import (  # noqa
+    generate_issue_llm_title,
+    refresh_issue_llm_title_examples,
+    sync_issue_alert_stats,
 )
 from .noise_reduce import (  # noqa
     NoiseReduceExecuteProcessor,

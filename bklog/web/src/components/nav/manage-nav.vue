@@ -43,7 +43,7 @@
       {{ getBaseName() }}
     </div>
     <ul
-      v-if="activeManageNav.children && !$route.meta.needBack"
+      v-if="showSubNav &&activeManageNav.children && !$route.meta.needBack"
       class="sub-nav-list"
       data-test-id="logCollection_ul_logCollectionNavBox"
     >
@@ -72,6 +72,10 @@
       subNavList: {
         type: Array,
         default: null,
+      },
+      showSubNav: {
+        type: Boolean,
+        default: true,
       },
     },
     data() {
@@ -138,12 +142,14 @@
       handleBack() {
         if (this.$route.meta.backName) {
           const {
-            query: { backRoute },
+            query: { backRoute, typeKey,indexSetId },
           } = this.$route;
           this.$router.push({
             name: !!backRoute ? backRoute : this.$route.meta.backName,
             query: {
               spaceUid: this.$store.state.spaceUid,
+              typeKey,
+              indexSetId,
             },
           });
         }
@@ -210,7 +216,9 @@
           'extract-link-edit': routerEditName,
           'clean-edit': routerEditName,
           'clean-template-edit': routerEditName,
-          'manage-collection': collectionName,
+          'manage-collection': ['bkdata', 'es'].includes(this.$route.query.typeKey)
+            ? storeIndexSetName
+            : collectionName,
           'custom-report-detail': collectionName,
           'custom-report-masking': routerEditName,
           collectEdit: collectionName,

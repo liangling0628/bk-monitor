@@ -23,6 +23,8 @@ from io import StringIO
 from itertools import chain
 from typing import Any
 
+import arrow
+from bk_monitor_base.strategy import StrategyNotExistError, get_strategy, parse_metric_id
 from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Count
@@ -59,8 +61,9 @@ from bkmonitor.models import (
 )
 from bkmonitor.models.bcs_cluster import BCSCluster
 from bkmonitor.share.api_auth_resource import ApiAuthResource
-from bkmonitor.strategy.new_strategy import Strategy, parse_metric_id
+from bkmonitor.utils.alert_drilling import clean_where_conditions, normalize_histogram_quantile_group_by
 from bkmonitor.utils.common_utils import count_md5
+from bkmonitor.utils.elasticsearch.handler import QueryStringGenerator
 from bkmonitor.utils.event_related_info import get_alert_relation_info
 from bkmonitor.utils.range import load_agg_condition_instance
 from bkmonitor.utils.request import get_request, get_request_tenant_id
@@ -85,6 +88,7 @@ from constants.alert import (
     EventTargetType,
 )
 from constants.data_source import DataSourceLabel, DataTypeLabel, UnifyQueryDataSources
+from constants.elasticsearch import QueryStringLogicOperators, QueryStringOperators
 from core.drf_resource import Resource, api, resource
 from core.drf_resource.exceptions import CustomException
 from core.errors.alert import AIOpsMultiAnomlayDetectError, AlertNotFoundError
@@ -104,6 +108,7 @@ from fta_web.alert.serializers import (
     AlertSearchSerializer,
     AlertSuggestionSerializer,
     EventSearchSerializer,
+    SearchConditionSerializer,
 )
 from fta_web.alert.utils import (
     generate_date_ranges,
@@ -125,6 +130,7 @@ from monitor_web.aiops.metric_recommend.constant import (
 )
 from monitor_web.constants import AlgorithmType
 from monitor_web.models import CustomEventGroup
+from utils.strategy import fill_user_groups
 
 logger = logging.getLogger("root")
 
@@ -504,7 +510,9 @@ class QuickActionTokenResource(AlertPermissionResource):
     def redirect(bk_biz_id, action_id):
         request = get_request()
         mobile_url = f"/weixin/?bizId={bk_biz_id}&collectId={action_id}"
-        pc_url = f"/?bizId={bk_biz_id}&routeHash=event-center/?collectId={action_id}#/"
+        pc_url = (
+            f"/?bizId={bk_biz_id}#/trace/alarm-center?queryString=action_id%20%3A%20{action_id}&filterMode=queryString"
+        )
         redirect_url = mobile_url if request.is_mobile() else pc_url
         return HttpResponseRedirect(redirect_url)
 
@@ -632,6 +640,7 @@ class AlertDetailResource(Resource):
 
     class RequestSerializer(serializers.Serializer):
         id = AlertIDField(required=True, label="告警ID")
+        bk_biz_id = serializers.IntegerField(required=True, label="业务ID")
 
     @classmethod
     def get_relation_info(cls, alert: AlertDocument, length_limit=True):
@@ -645,19 +654,54 @@ class AlertDetailResource(Resource):
 
         alert = AlertDocument.get(alert_id)
 
+        # 业务ID归属校验
+        bk_biz_id = validated_request_data.get("bk_biz_id")
+        if bk_biz_id and int(alert.event.bk_biz_id) != bk_biz_id:
+            raise AlertNotFoundError({"alert_id": alert_id})
+
         graph_panel = AIOPSManager.get_graph_panel(alert)
         relation_info = self.get_relation_info(alert, False)
 
         result = AlertQueryHandler.clean_document(alert)
         result["plugin_display_name"] = PluginTranslator().translate([result["plugin_id"]])[result["plugin_id"]]
         result["extend_info"] = resource.alert.alert_related_info(ids=[alert_id]).get(alert_id, {})
+        self.clean_graph_panel_where(graph_panel)
         result["graph_panel"] = graph_panel
 
         topo_info = result["extend_info"].get("topo_info", "")
-        result["relation_info"] = f"{topo_info} {relation_info}"
+        result["relation_info"] = self.build_relation_info(topo_info, relation_info)
         self.add_project_name(result)
         self.add_graph_extra_info(alert, result)
         return result
+
+    @staticmethod
+    def build_relation_info(topo_info: str, relation_info: str) -> str:
+        if not relation_info:
+            return topo_info
+
+        if not topo_info:
+            return relation_info
+
+        try:
+            relation_data = json.loads(relation_info)
+        except (TypeError, json.JSONDecodeError):
+            return f"{topo_info} {relation_info}"
+
+        if isinstance(relation_data, dict):
+            # 结构化日志需保持为 JSON，避免破坏前端解析。
+            relation_data["_alert_topo_info"] = topo_info
+            return json.dumps(relation_data, ensure_ascii=False)
+
+        return f"{topo_info} {relation_info}"
+
+    @staticmethod
+    def clean_graph_panel_where(graph_panel: dict | None) -> None:
+        if not graph_panel:
+            return
+
+        for target in graph_panel.get("targets", []):
+            for query_config in target.get("data", {}).get("query_configs", []):
+                query_config["where"] = clean_where_conditions(query_config.get("where", []))
 
     @classmethod
     def add_graph_extra_info(cls, alert, data):
@@ -1318,24 +1362,8 @@ class AlertGraphQueryResource(ApiAuthResource):
                 if attrs["data_source_label"] == DataSourceLabel.BK_LOG_SEARCH and not attrs.get("index_set_id"):
                     raise ValidationError("index_set_id can not be empty.")
 
-                # 过滤掉无效的 where 条件
-                validated_where = []
-                for condition in attrs.get("where", []):
-                    if not isinstance(condition, dict):
-                        continue
-                    value = condition.get("value")
-                    # 过滤掉 value 为 None、空列表或只包含 None 的列表
-                    if value is None:
-                        continue
-                    if isinstance(value, list):
-                        # 移除列表中的 None，如果移除后列表为空则跳过该条件
-                        filtered_value = [v for v in value if v is not None]
-                        if not filtered_value:
-                            continue
-                        condition["value"] = filtered_value
-                    validated_where.append(condition)
-
-                attrs["where"] = validated_where
+                normalize_histogram_quantile_group_by(attrs)
+                attrs["where"] = clean_where_conditions(attrs.get("where", []))
                 return attrs
 
         id = serializers.IntegerField(label="事件ID")
@@ -1449,12 +1477,6 @@ class AlertGraphQueryResource(ApiAuthResource):
             return result
 
         point = [alert.origin_alarm["data"]["value"], threshold_band["from"]]
-        point_time_list = [point[1] for point in data[0]["datapoints"]]
-        first_anomaly_in_time_range = start_time <= threshold_band["from"] <= end_time
-        if threshold_band["from"] not in point_time_list and first_anomaly_in_time_range:
-            position = bisect.bisect(point_time_list, threshold_band["from"])
-            data[0]["datapoints"].insert(position, point)
-
         mark_points = [point]
 
         # 离群检测算法特殊处理
@@ -1465,13 +1487,46 @@ class AlertGraphQueryResource(ApiAuthResource):
             # 离群检测算法不需要异常点
             mark_points = []
 
-            # 离群检测所有维度都需要区域
-            for data_item in data:
-                data_item["markTimeRange"] = [threshold_band]
+        longest_series = {"datapoints": []}
+        current_series_list = []
 
-        data[0]["markTimeRange"] = [threshold_band]
-        data[0]["markPoints"] = mark_points
-        data[0]["thresholds"] = threshold_line
+        # 遍历所有 series，给 time_offset 为 current 的 series 添加标记
+        for series in data:
+            time_offset = series.get("time_offset", "current")
+            if time_offset != "current":
+                continue
+
+            # 添加异常时间范围标记
+            series["markTimeRange"] = [threshold_band]
+
+            # 插入异常点到数据点列表中
+            point_time_list = [point[1] for point in series["datapoints"]]
+            first_anomaly_in_time_range = start_time <= threshold_band["from"] <= end_time
+            if threshold_band["from"] not in point_time_list and first_anomaly_in_time_range:
+                position = bisect.bisect(point_time_list, threshold_band["from"])
+                series["datapoints"].insert(position, point)
+
+            # 所有当前时间的 series 都添加异常点标记和阈值线
+            series["markPoints"] = mark_points
+            series["thresholds"] = threshold_line
+
+            if len(series["datapoints"]) > len(longest_series["datapoints"]):
+                longest_series = series
+
+            current_series_list.append(series)
+
+        # 以最长的 series 的时间戳为基准，对所有 series 按时间戳对齐补齐 null 值
+        # 确保每条 series 的 datapoints 时间戳序列完全一致，避免 ECharts 按索引渲染时出现时间偏移
+        # 原逻辑按索引截断仅仅尾部补齐，但稀疏 series 点数少、时间跨度大，会导致补充的时间戳与已有数据点重叠
+        if current_series_list and longest_series["datapoints"]:
+            all_timestamps = [data_point[1] for data_point in longest_series["datapoints"]]
+            for series in current_series_list:
+                if series is longest_series:
+                    continue
+                # 构建当前 series 的时间戳到值的映射
+                ts_to_value = {d_point[1]: d_point[0] for d_point in series["datapoints"]}
+                # 按基准时间戳序列重建 datapoints，缺失的时间点补 null
+                series["datapoints"] = [[ts_to_value.get(ts, None), ts] for ts in all_timestamps]
 
         return result
 
@@ -1545,7 +1600,7 @@ class SearchAlertResource(Resource):
             request_data: 请求数据
 
         Returns:
-            tuple: (是否包含 action_id 查询, 处理记录 ID 列表)
+            tuple: (是否包含 action_id 查询, detect_result dict 含 action_ids_in_query / action_ids_in_conditions)
         """
         action_ids_in_query = set()
         action_ids_in_conditions = set()
@@ -1553,9 +1608,20 @@ class SearchAlertResource(Resource):
         has_action_id = False
 
         # 检查 query_string 中的处理记录ID
+        # 兼容两种写法：内部字段名 action_id、中文显示名 "处理记录ID"
+        # 同步维护：fta_web/alert/handlers/alert.py::AlertQueryTransformer._process_action_id 白名单需与本处一致，
+        # 否则会出现 Path A 扩了时间窗但 Path B 未改写 query 的语义冲突（ES 把字面字段当未知字段，0 命中）
+        # 不支持英文 i18n "Handling Record ID"：luqum parser 不接受含空格的 field name
+        # （"Handling Record ID : X" 会被解析成 UnknownOperation(Word('Handling'), Word('Record'), SearchField('ID', Word('X')))，
+        #  此时 Path B 拿到的 search_field_origin_name 是 "ID"，永远不会命中 action_id 白名单 → 无法转换 query），
+        # 强行加白名单只会触发时间窗扩展但下游查询失败，造成"看似支持实际无效"的死代码
+        # action_id 用负向 lookbehind 避免误命中 parent_action_id / alert_action_id 等含 "action_id" 子串的合法字段
         query_string = request_data.get("query_string", "")
         if query_string:
-            action_id_matches = re.findall(r"处理记录ID\s*:\s*(\d+)", query_string)
+            action_id_matches = re.findall(
+                r"(?:(?<![A-Za-z0-9_])action_id|处理记录ID)\s*:\s*(\d+)",
+                query_string,
+            )
             if action_id_matches:
                 action_ids_in_query.update(set(action_id_matches))
 
@@ -1669,7 +1735,7 @@ class SearchAlertResource(Resource):
             return request_data
 
         # 提取出所有的时间戳
-        timestamps = [int(match[1][:timestamp_length]) for match in id_matches]
+        timestamps = [int(match[:timestamp_length]) for match in id_matches]
 
         min_timestamp = min(timestamps)  # 最小时间戳
         max_timestamp = max(timestamps)  # 最大时间戳
@@ -2079,9 +2145,22 @@ class AlertTopNResultResource(BaseTopNResource):
 
 class AlertTopNResource(Resource):
     handler_cls = AlertQueryHandler
+    # 需与前端 use-analysis.ts 中的 TAG_FIELD_BATCH_SIZE 保持同步
+    MAX_NESTED_TOP_N_FIELDS = 20
 
     class RequestSerializer(AlertSearchSerializer, BaseTopNResource.RequestSerializer):
         need_time_partition = serializers.BooleanField(required=False, default=True, label="是否需要按时间分片")
+
+        def validate(self, attrs):
+            attrs = super().validate(attrs)
+            nested_fields = [field for field in attrs.get("fields", []) if field.lstrip("-+").startswith("tags.")]
+            if len(nested_fields) > AlertTopNResource.MAX_NESTED_TOP_N_FIELDS:
+                raise ValidationError(
+                    _("标签类 TopN 字段一次最多支持 {} 个，请分批查询").format(
+                        AlertTopNResource.MAX_NESTED_TOP_N_FIELDS
+                    )
+                )
+            return attrs
 
     def perform_request(self, validated_request_data):
         if validated_request_data["bk_biz_ids"] is not None:
@@ -2334,25 +2413,25 @@ class StrategySnapshotResource(Resource):
         changed_status = self.ConfigChangedStatus.UNCHANGED
         current_strategy = None
         try:
-            strategy = StrategyModel.objects.get(id=strategy_config["id"])
-            is_enabled = strategy.is_enabled
-            current_strategy = Strategy.from_models([strategy])[0]
-        except StrategyModel.DoesNotExist:
-            changed_status = self.ConfigChangedStatus.DELETED
-        else:
-            if int(strategy.update_time.timestamp()) != strategy_config["update_time"]:
+            current_strategy = get_strategy(bk_biz_id=alert.event.bk_biz_id, strategy_id=strategy_config["id"])
+            is_enabled = current_strategy["is_enabled"]
+            current_update_time = arrow.get(current_strategy["update_time"])
+            strategy_update_time = arrow.get(strategy_config["update_time"])
+            if current_update_time.timestamp != strategy_update_time.timestamp:
                 changed_status = self.ConfigChangedStatus.UPDATED
+        except StrategyNotExistError:
+            changed_status = self.ConfigChangedStatus.DELETED
 
         if current_strategy and "intelligent_detect" in strategy_config["items"][0]["query_configs"][0]:
             if not strategy_config["items"][0]["query_configs"][0]["intelligent_detect"].get("use_sdk", False):
                 # AIOPS算法在告警检测时会对query_config本身进行修改导致查询配置无法还原，此时直接使用最新的query_config
-                strategy_config["items"][0]["query_configs"][0] = current_strategy.items[0].query_configs[0].to_dict()
+                strategy_config["items"][0]["query_configs"][0] = current_strategy["items"][0]["query_configs"][0]
 
         strategy_config.update(strategy_status=changed_status)
         strategy_config["create_time"] = utc2datetime(strategy_config["create_time"])
         strategy_config["update_time"] = utc2datetime(strategy_config["update_time"])
         strategy_config["is_enabled"] = is_enabled
-        Strategy.fill_user_groups([strategy_config])
+        fill_user_groups([strategy_config])
         return strategy_config
 
 
@@ -3283,3 +3362,53 @@ class EditDataMeaningResource(Resource):
             "alert_id": alert_id,
             "data_meaning": data_meaning,
         }
+
+
+class GenerateQueryStringResource(Resource):
+    """conditions 转 query_string。
+
+    将告警列表 UI 模式的 conditions 转换为 Lucene query_string，
+    用于 APM 嵌入页内置条件与用户条件合并，以及前端从 UI 模式切到语句模式时的条件回填。
+    """
+
+    # conditions.method 到 QueryStringOperators 的映射
+    METHOD_OPERATOR_MAPPING: dict[str, str] = {
+        "eq": QueryStringOperators.EQUAL,
+        "neq": QueryStringOperators.NOT_EQUAL,
+        "include": QueryStringOperators.INCLUDE,
+        "exclude": QueryStringOperators.NOT_INCLUDE,
+        "gt": QueryStringOperators.GT,
+        "gte": QueryStringOperators.GTE,
+        "lt": QueryStringOperators.LT,
+        "lte": QueryStringOperators.LTE,
+    }
+
+    class RequestSerializer(serializers.Serializer):
+        conditions = SearchConditionSerializer(label="搜索条件", many=True, default=[])
+
+    def perform_request(self, validated_request_data: dict[str, Any]) -> str:
+        conditions: list[dict[str, Any]] = validated_request_data["conditions"]
+        if not conditions:
+            return ""
+
+        parts: list[tuple[str, str]] = []
+        for cond in conditions:
+            generator = QueryStringGenerator(self.METHOD_OPERATOR_MAPPING)
+            generator.add_filter(cond["key"], cond["method"], cond["value"])
+            fragment: str = generator.to_query_string()
+            if not fragment:
+                continue
+
+            raw_connector: str = cond.get("condition") or ""
+            connector: str = QueryStringLogicOperators.OR if raw_connector == "or" else QueryStringLogicOperators.AND
+            parts.append((connector, fragment))
+
+        if not parts:
+            return ""
+
+        # 组装规则：按 condition 参数从左到右折叠，首个条件的 connector 忽略，后续按 connector 拼接并加括号避免优先级歧义
+        result: str = parts[0][1]
+        for connector, fragment in parts[1:]:
+            result = f"({result}) {connector} ({fragment})"
+
+        return result

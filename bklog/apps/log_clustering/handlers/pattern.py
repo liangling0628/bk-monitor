@@ -29,8 +29,15 @@ from django.db.transaction import atomic
 from django.utils.functional import cached_property
 
 from apps.api import MonitorApi, UnifyQueryApi
+from apps.feature_toggle.handlers.toggle import FeatureToggleObject
+from apps.feature_toggle.plugins.constants import (
+    BKDATA_CLUSTERING_TOGGLE,
+    UNIFY_QUERY_SEARCH,
+    UNIFY_QUERY_SEARCH_CLUSTERING,
+)
 from apps.log_clustering.constants import (
     AGGS_FIELD_PREFIX,
+    CLUSTERING_REMARK_GROUP_FALLBACK_BIZ_ID_BLACK_LIST,
     DEFAULT_ACTION_NOTICE,
     DEFAULT_ALERT_NOTICE,
     DEFAULT_LABEL,
@@ -46,14 +53,17 @@ from apps.log_clustering.constants import (
     OwnerConfigEnum,
     PatternEnum,
     RemarkConfigEnum,
+    StorageTypeEnum,
 )
 from apps.log_clustering.models import (
     AiopsSignatureAndPattern,
     ClusteringConfig,
     ClusteringRemark,
 )
+from apps.log_clustering.utils.pattern import parse_pattern_placeholders
 from apps.log_search.handlers.index_set import BaseIndexSetHandler
 from apps.log_search.handlers.search.aggs_handlers import AggsHandlers
+from apps.log_unifyquery.handler.pattern import UnifyQueryPatternHandler
 from apps.models import model_to_dict
 from apps.utils.bkdata import BkData
 from apps.utils.db import array_hash
@@ -68,6 +78,10 @@ from apps.utils.thread import MultiExecuteFunc
 from apps.utils.time_handler import generate_time_range, generate_time_range_shift
 
 
+NEW_CLASS_SIGNATURE_CHUNK_SIZE = 900
+NEW_CLASS_SIGNATURE_QUERY_MAX_WORKERS = 3
+
+
 class PatternHandler:
     def __init__(self, index_set_id, query):
         self._index_set_id = index_set_id
@@ -75,6 +89,7 @@ class PatternHandler:
         self._show_new_pattern = query.get("show_new_pattern", False)
         self._year_on_year_hour = query.get("year_on_year_hour", 0)
         self._group_by = query.get("group_by", [])
+        self._include_origin_log = query.get("include_origin_log", False)
         self._clustering_config = ClusteringConfig.get_by_index_set_id(index_set_id=index_set_id)
         self._query = query
 
@@ -111,17 +126,24 @@ class PatternHandler:
         pattern_aggs = result.get("pattern_aggs", [])
         year_on_year_result = result.get("year_on_year_result", {})
         new_class = result.get("new_class", set())
+        new_class_visible_keys = self._build_new_class_visible_keys(new_class)
         # 同步的pattern保存信息
         if self._clustering_config.signature_pattern_rt:
             pattern_map = self._get_pattern_data(patterns=list({p["key"] for p in pattern_aggs}))
         elif self._clustering_config.model_output_rt:
             # 在线训练逻辑适配
+            fields = ["signature", "pattern", "origin_pattern"]
+            if self._include_origin_log:
+                fields.append("origin_log")
             pattern_map = AiopsSignatureAndPattern.objects.filter(
                 model_id=self._clustering_config.model_output_rt
-            ).values("signature", "pattern", "origin_pattern", "origin_log")
+            ).values(*fields)
         else:
+            fields = ["signature", "pattern", "origin_pattern"]
+            if self._include_origin_log:
+                fields.append("origin_log")
             pattern_map = AiopsSignatureAndPattern.objects.filter(model_id=self._clustering_config.model_id).values(
-                "signature", "pattern", "origin_pattern", "origin_log"
+                *fields
             )
         signature_map_pattern = array_hash(pattern_map, "signature", "pattern")
         signature_map_origin_pattern = array_hash(pattern_map, "signature", "origin_pattern")
@@ -144,18 +166,16 @@ class PatternHandler:
 
         signature_map_remark = {}
         signature_map_remark_without_group = {}
-
         origin_pattern_map_remark = {}
         origin_pattern_map_remark_without_group = {}
 
         for remark in clustering_remarks:
             signature_map_remark[(remark["signature"], remark["group_hash"])] = remark
-            if not remark["groups"]:
-                # 只有不带分组的备注才允许继承到带分组的 pattern 中
+            if self._allow_remark_group_fallback and not remark["groups"]:
                 signature_map_remark_without_group[remark["signature"]] = remark
             if remark["origin_pattern"]:
                 origin_pattern_map_remark[(remark["origin_pattern"], remark["group_hash"])] = remark
-                if not remark["groups"]:
+                if self._allow_remark_group_fallback and not remark["groups"]:
                     origin_pattern_map_remark_without_group[remark["origin_pattern"]] = remark
 
         result = []
@@ -166,7 +186,7 @@ class PatternHandler:
                 continue
             signature_pattern = signature_map_pattern.get(signature, "")
             signature_origin_pattern = signature_map_origin_pattern.get(signature) or signature_pattern
-            signature_origin_log = signature_map_origin_log.get(signature, "")
+            signature_origin_log = signature_map_origin_log.get(signature) or ""
             group_key = f"{signature}|{pattern.get('group', '')}"
             year_on_year_compare = year_on_year_result.get(group_key, MIN_COUNT)
 
@@ -176,34 +196,35 @@ class PatternHandler:
 
             group_hash = ClusteringRemark.convert_groups_to_groups_hash(group_dict)
 
-            # 用于标识新类的key，包含 签名 + 所有分组字段值的元组
-            new_class_group_key = tuple(
-                [signature] + [str(group_dict.get(field, "")) for field in self._clustering_config.group_fields]
+            # 黑名单业务严格匹配 group_hash；其余业务兼容空维度备注降级展示。
+            remark_obj = None
+            exact_signature_remark_obj = signature_map_remark.get((signature, group_hash))
+            exact_origin_pattern_remark_obj = (
+                origin_pattern_map_remark.get((signature_origin_pattern, group_hash))
+                if signature_origin_pattern
+                else None
             )
+            fallback_signature_remark_obj = signature_map_remark_without_group.get(signature)
+            fallback_origin_pattern_remark_obj = (
+                origin_pattern_map_remark_without_group.get(signature_origin_pattern)
+                if signature_origin_pattern
+                else None
+            )
+            for candidate in [
+                exact_signature_remark_obj,
+                exact_origin_pattern_remark_obj,
+                fallback_signature_remark_obj,
+                fallback_origin_pattern_remark_obj,
+            ]:
+                if candidate and (candidate["remark"] or candidate["owners"]):
+                    remark_obj = candidate
+                    break
 
-            # 优先从带分组的记录中查找备注
-            if (signature, group_hash) in signature_map_remark:
-                remark = signature_map_remark[(signature, group_hash)]["remark"]
-                owners = signature_map_remark[(signature, group_hash)]["owners"]
-                strategy_id = signature_map_remark[(signature, group_hash)]["strategy_id"]
-                strategy_enabled = signature_map_remark[(signature, group_hash)]["strategy_enabled"]
-            elif signature_origin_pattern and (signature_origin_pattern, group_hash) in origin_pattern_map_remark:
-                remark = origin_pattern_map_remark[(signature_origin_pattern, group_hash)]["remark"]
-                owners = origin_pattern_map_remark[(signature_origin_pattern, group_hash)]["owners"]
-                strategy_id = origin_pattern_map_remark[(signature_origin_pattern, group_hash)]["strategy_id"]
-                strategy_enabled = origin_pattern_map_remark[(signature_origin_pattern, group_hash)]["strategy_enabled"]
-            # 如果带分组的记录中没有找到备注，则退化为使用无分组的备注内容展示
-            elif signature in signature_map_remark_without_group:
-                remark = signature_map_remark_without_group[signature]["remark"]
-                owners = signature_map_remark_without_group[signature]["owners"]
-                strategy_id = signature_map_remark_without_group[signature]["strategy_id"]
-                strategy_enabled = signature_map_remark_without_group[signature]["strategy_enabled"]
-            elif signature_origin_pattern and signature_origin_pattern in origin_pattern_map_remark_without_group:
-                remark = origin_pattern_map_remark_without_group[signature_origin_pattern]["remark"]
-                owners = origin_pattern_map_remark_without_group[signature_origin_pattern]["owners"]
-                strategy_id = origin_pattern_map_remark_without_group[signature_origin_pattern]["strategy_id"]
-                strategy_enabled = origin_pattern_map_remark_without_group[signature_origin_pattern]["strategy_enabled"]
-            # 任意一种情况都不匹配
+            if remark_obj:
+                remark = remark_obj["remark"]
+                owners = remark_obj["owners"]
+                strategy_id = remark_obj["strategy_id"]
+                strategy_enabled = remark_obj["strategy_enabled"]
             else:
                 remark = []
                 owners = []
@@ -213,6 +234,7 @@ class PatternHandler:
             result.append(
                 {
                     "pattern": signature_pattern,
+                    "placeholders": parse_pattern_placeholders(signature_pattern),
                     "origin_pattern": signature_origin_pattern,
                     "origin_log": signature_origin_log,
                     "remark": remark,
@@ -220,7 +242,12 @@ class PatternHandler:
                     "count": count,
                     "signature": signature,
                     "percentage": self.percentage(count, sum_count),
-                    "is_new_class": new_class_group_key in new_class or (signature,) in new_class,
+                    "is_new_class": self._is_new_class(
+                        signature=signature,
+                        group_dict=group_dict,
+                        new_class=new_class,
+                        new_class_visible_keys=new_class_visible_keys,
+                    ),
                     "year_on_year_count": year_on_year_compare,
                     "year_on_year_percentage": self._year_on_year_calculate_percentage(count, year_on_year_compare),
                     "group": group,
@@ -228,8 +255,59 @@ class PatternHandler:
                     "strategy_enabled": strategy_enabled,
                 }
             )
+        if self._show_new_pattern:
+            result = map_if(result, if_func=lambda x: x["is_new_class"])
         result = self._get_remark_and_owner(result)
         return result
+
+    def _build_new_class_visible_keys(self, new_class: set[tuple]) -> set[tuple]:
+        group_fields = self._clustering_config.group_fields or []
+        visible_group_fields = [field for field in group_fields if field in self._group_by]
+        if len(visible_group_fields) == len(group_fields):
+            return set()
+
+        visible_group_field_indexes = [group_fields.index(field) + 1 for field in visible_group_fields]
+        visible_keys = set()
+        for new_class_item in new_class:
+            if not new_class_item or len(new_class_item) == 1:
+                continue
+            visible_keys.add(
+                tuple(
+                    [new_class_item[0]]
+                    + [
+                        str(new_class_item[index]) if index < len(new_class_item) else ""
+                        for index in visible_group_field_indexes
+                    ]
+                )
+            )
+        return visible_keys
+
+    def _is_new_class(
+        self, signature: str, group_dict: dict, new_class: set[tuple], new_class_visible_keys: set[tuple]
+    ) -> bool:
+        group_fields = self._clustering_config.group_fields or []
+        exact_key = tuple([signature] + [str(group_dict.get(field, "")) for field in group_fields])
+        if exact_key in new_class or (signature,) in new_class:
+            return True
+
+        visible_group_fields = [field for field in group_fields if field in self._group_by]
+        if len(visible_group_fields) == len(group_fields):
+            return False
+
+        visible_key = tuple([signature] + [str(group_dict.get(field, "")) for field in visible_group_fields])
+        return visible_key in new_class_visible_keys
+
+    @cached_property
+    def _allow_remark_group_fallback(self) -> bool:
+        feature_toggle = FeatureToggleObject.toggle(BKDATA_CLUSTERING_TOGGLE)
+        feature_config = feature_toggle.feature_config if feature_toggle else {}
+        if not isinstance(feature_config, dict):
+            return True
+
+        biz_id_black_list = feature_config.get(CLUSTERING_REMARK_GROUP_FALLBACK_BIZ_ID_BLACK_LIST, [])
+        if not isinstance(biz_id_black_list, list | tuple | set):
+            return True
+        return str(self._clustering_config.bk_biz_id) not in {str(bk_biz_id) for bk_biz_id in biz_id_black_list}
 
     def _get_remark_and_owner(self, result):
         if self._remark_config == RemarkConfigEnum.REMARKED.value:
@@ -258,29 +336,26 @@ class PatternHandler:
             for new_class_tuple in new_class_query_result
             if new_class_tuple and len(new_class_tuple) > 0
         ]
+        new_class_signature_list = list(set(new_class_signature_list))
 
         if not new_class_signature_list:
             return {"pattern_aggs": [], "year_on_year_result": {}, "new_class": set()}
 
-        # 添加新类日志数据指纹 ID 列表作为条件查询的参数
-        new_class_signature_query_condition = {
-            "field": self.pattern_aggs_field,
-            "operator": "is one of",
-            "value": new_class_signature_list,
-            "condition": "and",
-        }
-
-        copy_query = copy.deepcopy(self._query)
-        copy_query.setdefault("addition", []).append(new_class_signature_query_condition)
+        chunked_queries = [
+            self._build_new_class_query(signature_chunk)
+            for signature_chunk in self._chunk_values(new_class_signature_list, NEW_CLASS_SIGNATURE_CHUNK_SIZE)
+        ]
 
         multi_execute_func = MultiExecuteFunc()
         multi_execute_func.append(
             "pattern_aggs",
-            lambda p: self._get_pattern_aggs_result(p["index_set_id"], p["query"]),
-            {"index_set_id": self._index_set_id, "query": copy_query},
+            lambda p: self._get_new_class_pattern_aggs_result(p["queries"]),
+            {"queries": copy.deepcopy(chunked_queries)},
         )
         multi_execute_func.append(
-            "year_on_year_result", lambda p: self._get_year_on_year_aggs_result(p["query"]), {"query": copy_query}
+            "year_on_year_result",
+            lambda p: self._get_new_class_year_on_year_result(p["queries"]),
+            {"queries": copy.deepcopy(chunked_queries)},
         )
 
         multi_result = multi_execute_func.run()
@@ -288,6 +363,91 @@ class PatternHandler:
         multi_result["new_class"] = new_class_query_result
 
         return multi_result
+
+    def _build_new_class_query(self, signatures):
+        new_class_signature_query_condition = {
+            "field": self.pattern_aggs_field,
+            "operator": "is one of",
+            "value": signatures,
+            "condition": "and",
+        }
+
+        copy_query = copy.deepcopy(self._query)
+        copy_query.setdefault("addition", []).append(new_class_signature_query_condition)
+        return copy_query
+
+    def _get_new_class_pattern_aggs_result(self, queries):
+        if len(queries) == 1:
+            return self._get_pattern_aggs_result(self._index_set_id, queries[0])
+
+        task_keys = []
+        multi_execute_func = MultiExecuteFunc(max_workers=min(len(queries), NEW_CLASS_SIGNATURE_QUERY_MAX_WORKERS))
+
+        for index, query in enumerate(queries):
+            task_key = f"pattern_aggs_{index}"
+            task_keys.append(task_key)
+            multi_execute_func.append(
+                task_key,
+                lambda p: self._get_pattern_aggs_result(p["index_set_id"], p["query"]),
+                {"index_set_id": self._index_set_id, "query": query},
+            )
+
+        multi_result = multi_execute_func.run()
+        return self._merge_pattern_aggs_results(
+            [multi_result.get(task_key, []) for task_key in task_keys], self._query.get("size", 10000)
+        )
+
+    def _get_new_class_year_on_year_result(self, queries):
+        if self._year_on_year_hour == MIN_COUNT:
+            return {}
+
+        if len(queries) == 1:
+            return self._get_year_on_year_aggs_result(queries[0])
+
+        task_keys = []
+        multi_execute_func = MultiExecuteFunc(max_workers=min(len(queries), NEW_CLASS_SIGNATURE_QUERY_MAX_WORKERS))
+
+        for index, query in enumerate(queries):
+            task_key = f"year_on_year_result_{index}"
+            task_keys.append(task_key)
+            multi_execute_func.append(
+                task_key,
+                lambda p: self._get_year_on_year_aggs_result(p["query"]),
+                {"query": query},
+            )
+
+        multi_result = multi_execute_func.run()
+        return self._merge_year_on_year_results([multi_result.get(task_key, {}) for task_key in task_keys])
+
+    @staticmethod
+    def _chunk_values(values, chunk_size):
+        for index in range(0, len(values), chunk_size):
+            yield values[index : index + chunk_size]
+
+    @staticmethod
+    def _merge_pattern_aggs_results(pattern_aggs_results, size):
+        merged_pattern_aggs = {}
+
+        for pattern_aggs in pattern_aggs_results:
+            for pattern in pattern_aggs or []:
+                merge_key = (pattern.get("key", ""), pattern.get("group", ""))
+                if merge_key not in merged_pattern_aggs:
+                    merged_pattern_aggs[merge_key] = {**pattern, "doc_count": 0}
+                merged_pattern_aggs[merge_key]["doc_count"] += pattern.get("doc_count", MIN_COUNT)
+
+        result = list(merged_pattern_aggs.values())
+        result.sort(key=lambda pattern: pattern.get("doc_count", MIN_COUNT), reverse=True)
+        return result[:size]
+
+    @staticmethod
+    def _merge_year_on_year_results(year_on_year_results):
+        merged_year_on_year = {}
+
+        for year_on_year_result in year_on_year_results:
+            for key, count in (year_on_year_result or {}).items():
+                merged_year_on_year[key] = merged_year_on_year.get(key, MIN_COUNT) + count
+
+        return merged_year_on_year
 
     def _multi_query(self):
         multi_execute_func = MultiExecuteFunc()
@@ -301,9 +461,19 @@ class PatternHandler:
         return multi_execute_func.run()
 
     def _get_pattern_aggs_result(self, index_set_id, query):
-        query["fields"] = [{"field_name": self.pattern_aggs_field, "sub_fields": self._build_aggs_group}]
-        aggs_result = AggsHandlers.terms(index_set_id, query)
-        return self._parse_pattern_aggs_result(self.pattern_aggs_field, aggs_result)
+        pattern_aggs_field = self.pattern_aggs_field
+        use_unify_query = self._clustering_config.storage_type == StorageTypeEnum.DORIS.value or (
+            FeatureToggleObject.switch(UNIFY_QUERY_SEARCH, query.get("bk_biz_id"))
+            and FeatureToggleObject.switch(UNIFY_QUERY_SEARCH_CLUSTERING, query.get("bk_biz_id"))
+        )
+        if use_unify_query:
+            query["index_set_ids"] = [index_set_id]
+            query["agg_field"] = pattern_aggs_field
+            return UnifyQueryPatternHandler(query).query_pattern()
+        else:
+            query["fields"] = [{"field_name": pattern_aggs_field, "sub_fields": self._build_aggs_group}]
+            aggs_result = AggsHandlers.terms(index_set_id, query)
+            return self._parse_pattern_aggs_result(pattern_aggs_field, aggs_result)
 
     @property
     def _build_aggs_group(self):
@@ -423,7 +593,7 @@ class PatternHandler:
                 BkData(self._clustering_config.new_cls_pattern_rt)
                 .select(*select_fields)
                 .where(NEW_CLASS_SENSITIVITY_FIELD, "=", self.new_class_field)
-                .time_range(int(start_time.timestamp(), int(end_time.timestamp())))
+                .time_range(int(start_time.timestamp()), int(end_time.timestamp()))
                 .query()
             )
         return {tuple(str(new_class[field]) for field in select_fields) for new_class in new_classes}
@@ -447,10 +617,13 @@ class PatternHandler:
         start_time, end_time = generate_time_range(
             NEW_CLASS_QUERY_TIME_RANGE, self._query["start_time"], self._query["end_time"], get_local_param("time_zone")
         )
+        fields = ["signature", "pattern"]
+        if self._include_origin_log:
+            fields.append("log as origin_log")
         try:
             records = (
                 BkData(self._clustering_config.signature_pattern_rt)
-                .select("signature", "pattern", "log as origin_log")
+                .select(*fields)
                 .where("signature", "IN", patterns)
                 .time_range(
                     start_time=int(start_time.shift(days=-1).timestamp())
@@ -503,7 +676,7 @@ class PatternHandler:
             {
                 "signature": record["signature"],
                 "pattern": record["pattern"],
-                "origin_log": record["log"],
+                **({"origin_log": record.get("log", "")} if self._include_origin_log else {}),
             }
             for record in result["list"]
             if record["signature"]

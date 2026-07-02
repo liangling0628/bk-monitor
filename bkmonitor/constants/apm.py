@@ -74,6 +74,14 @@ def get_label_from_enums(value: Any, enums: list[type[CachedEnum]]) -> str:
     return value
 
 
+class ApmGlobalTablePrefix:
+    COMMON = "apm_global."
+    # 共享数据源场景
+    SHARED = f"{COMMON}shared"
+    # 预计算场景
+    PRECALCULATE = f"{COMMON}precalculate_storage"
+
+
 class TraceDataSourceConfig:
     """Trace数据源配置常量"""
 
@@ -106,6 +114,25 @@ class TraceDataSourceConfig:
     }
 
     TRACE_FIELD_LIST = [
+        {
+            "field_name": "bk_biz_id",
+            "field_type": ResultTableField.FIELD_TYPE_STRING,
+            "tag": ResultTableField.FIELD_TAG_DIMENSION,
+            "option": {"es_type": "keyword"},
+            "is_config_by_user": True,
+            # metadata 创建结果表会进行保留字段检查，用于防止用户创建字段与内置字段冲突。
+            # APM 是内置场景，无需进行保留字段检查，直接放行，此处添加该豁免很重要，是否会导致创建应用流程报错。
+            "is_reserved_check": False,
+            "description": "Bk Biz Id",
+        },
+        {
+            "field_name": "app_name",
+            "field_type": ResultTableField.FIELD_TYPE_STRING,
+            "tag": ResultTableField.FIELD_TAG_DIMENSION,
+            "option": {"es_type": "keyword"},
+            "is_config_by_user": True,
+            "description": "App Name",
+        },
         {
             "field_name": "attributes",
             "field_type": ResultTableField.FIELD_TYPE_OBJECT,
@@ -902,6 +929,14 @@ class TrpcAttributes:
     TRPC_CALLEE_METHOD = "trpc.callee_method"
     TRPC_STATUS_TYPE = "trpc.status_type"
     TRPC_STATUS_CODE = "trpc.status_code"
+    TRPC_STATUS_MSG = "trpc.status_msg"
+
+
+class RpcAttributes:
+    """for rpc"""
+
+    RPC_ERROR_CODE = "rpc.error_code"
+    RPC_ERROR_MESSAGE = "rpc.error_message"
 
 
 class CommonMetricTag(CachedEnum):
@@ -1009,7 +1044,7 @@ class RPCMetricTag(CachedEnum):
         return [(member.value, member.label) for member in cls]
 
     @classmethod
-    def tags(cls) -> list[dict[str, str]]:
+    def tags(cls) -> list[dict[str, str | bool]]:
         return [
             {"text": cls.CALLER_SERVER.label, "value": cls.CALLER_SERVER.value},
             {"text": cls.CALLER_SERVICE.label, "value": cls.CALLER_SERVICE.value},
@@ -1366,8 +1401,8 @@ class BaseInnerMetricProcessor:
             return
 
         info: dict[str, Any] = cls.info(field_name)
-        metric_info["unit"] = info.get("unit", "")
-        metric_info["description"] = info.get("description", "")
+        metric_info["unit"] = info.get("unit") or metric_info.get("unit", "")
+        metric_info["description"] = info.get("description") or metric_info.get("description", "")
 
         if not cls._TAGS:
             return
@@ -1517,6 +1552,9 @@ class ApmAlertHelper:
     _STRATEGY_APP_LABEL_REGEX = re.compile(r"APM-APP\((.*?)\)")
     _STRATEGY_SERVICE_LABEL_REGEX = re.compile(r"APM-SERVICE\((.*?)\)")
 
+    APM_APP_LABEL_FORMAT = "APM-APP({app_name})"
+    APM_SERVICE_LABEL_FORMAT = "APM-SERVICE({service_name})"
+
     _RPC_METRIC_REGEX = re.compile(r"^rpc_(client|server)_handled_(?:total|seconds_(?:sum|min|max|count|bucket))$")
 
     _TABLE_APP_NAME_REGEX = re.compile(r"^(?:space_)?\d+_bkapm_(?:metric|trace)_([a-zA-Z0-9_-]+)\.__default__$")
@@ -1526,6 +1564,24 @@ class ApmAlertHelper:
         RPCMetricTag,
         RPCLogTag,
     ]
+
+    @classmethod
+    def format_app_label(cls, app_name: str) -> str:
+        """格式化 APM 应用标签字符串。
+
+        :param app_name: 应用名
+        :return: 格式化后的标签字符串，如 "APM-APP(app_demo)"
+        """
+        return cls.APM_APP_LABEL_FORMAT.format(app_name=app_name)
+
+    @classmethod
+    def format_service_label(cls, service_name: str) -> str:
+        """格式化 APM 服务标签字符串。
+
+        :param service_name: 服务名
+        :return: 格式化后的标签字符串，如 "APM-SERVICE(service_demo)"
+        """
+        return cls.APM_SERVICE_LABEL_FORMAT.format(service_name=service_name)
 
     @classmethod
     def _reg_extract(cls, regex: re.Pattern, string: str) -> str | None:
@@ -1998,7 +2054,14 @@ class SpanKindCachedEnum(CachedEnum):
 
 
 TRACE_RESULT_TABLE_OPTION = {
-    "es_unique_field_list": ["trace_id", "span_id", "parent_span_id", "start_time", "end_time", "span_name"],
+    "es_unique_field_list": [
+        "trace_id",
+        "span_id",
+        "parent_span_id",
+        "start_time",
+        "end_time",
+        "span_name",
+    ],
     # 以下为 UnifyQuery 查询所需的元数据：
     # 是否根据查询时间范围，指定具体日期的索引进行查询。
     "need_add_time": True,
@@ -2275,3 +2338,17 @@ CUSTOM_METRICS_PROMQL_FILTER = ",".join(
         '__name__!~"^(bk_apm_|apm_).*"',
     ]
 )
+
+
+# APM 主调 / 被调枚举值
+class CallSide(CachedEnum):
+    CALLER = "caller"
+    CALLEE = "callee"
+
+    @cached_property
+    def label(self) -> str:
+        return str({self.CALLER: _("主调"), self.CALLEE: _("被调")}.get(self, self.value))
+
+    @classmethod
+    def choices(cls) -> list[tuple[str, str]]:
+        return [(member.value, member.label) for member in cls]

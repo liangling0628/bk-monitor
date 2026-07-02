@@ -16,6 +16,7 @@ export const alertRelatedInfo = request('POST', 'fta/alert/v2/alert/related_info
 export const alertExtendFields = request('POST', 'fta/alert/v2/alert/extend_fields/');
 export const ackAlert = request('POST', 'fta/alert/v2/alert/ack/');
 export const alertGraphQuery = request('POST', 'fta/alert/v2/alert/graph_query/');
+export const alertGraphDrillDown = request('POST', 'fta/alert/v2/alert/graph_drill_down/');
 export const eventDateHistogram = request('POST', 'fta/alert/v2/event/date_histogram/');
 export const searchAction = request('POST', 'fta/alert/v2/action/search/');
 export const actionDetail = request('GET', 'fta/alert/v2/action/detail/');
@@ -42,14 +43,14 @@ export const alertEvents = request('POST', 'fta/alert/v2/alert/events/');
 export const alertEventTotal = request('GET', 'fta/alert/v2/alert/event_total/');
 export const alertEventTs = request('POST', 'fta/alert/v2/alert/event_ts/');
 export const alertEventTagDetail = request('POST', 'fta/alert/v2/alert/event_tag_detail/');
-export const alertK8sScenarioList = request('GET', 'fta/alert/v2/alert/k8s_scenario_list/');
-export const alertK8sMetricList = request('GET', 'fta/alert/v2/alert/k8s_metric_list/');
 export const alertK8sTarget = request('GET', 'fta/alert/v2/alert/k8s_target/');
 export const alertHostTarget = request('GET', 'fta/alert/v2/alert/host_target/');
 export const alertTraces = request('POST', 'fta/alert/v2/alert/traces/');
 export const alertLogRelationList = request('GET', 'fta/alert/v2/alert/log_relation_list/');
 export const quickAlertShield = request('GET', 'fta/alert/v2/alert/quick_shield/');
 export const quickAlertAck = request('GET', 'fta/alert/v2/alert/quick_ack/');
+export const editDataMeaning = request('POST', 'fta/alert/alert/edit_data_meaning/');
+export const generateQueryString = request('POST', 'fta/alert/v2/generate_query_string/');
 
 export default {
   listAllowedBiz,
@@ -68,6 +69,7 @@ export default {
   alertExtendFields,
   ackAlert,
   alertGraphQuery,
+  alertGraphDrillDown,
   eventDateHistogram,
   searchAction,
   actionDetail,
@@ -94,12 +96,12 @@ export default {
   alertEventTotal,
   alertEventTs,
   alertEventTagDetail,
-  alertK8sScenarioList,
-  alertK8sMetricList,
   alertK8sTarget,
   alertHostTarget,
   alertTraces,
   alertLogRelationList,
   quickAlertShield,
   quickAlertAck,
+  editDataMeaning,
+  generateQueryString,
 };

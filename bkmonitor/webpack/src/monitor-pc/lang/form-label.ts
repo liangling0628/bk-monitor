@@ -147,6 +147,7 @@ export default {
   语音拨打顺序: 'Voice Call Order',
   串行: 'Serial',
   并行: 'Parallel',
+  检测周期: 'Detection Cycle',
 
   // 专业表单 - 图表相关
   已选图表: 'Selected charts',
@@ -310,6 +311,7 @@ export default {
 
   // 说明
   反馈: 'Feedback',
+  反馈说明: 'Feedback Description',
   说明: 'Description',
   插件变更说明: 'ChangLog',
   上报格式说明: 'Format Help',
@@ -452,6 +454,7 @@ export default {
   周: 'Week',
   年: 'Year',
   天: 'Day',
+  维度组合: 'Dimension combinations',
   昨天: 'Yesterday',
   一: 'One',
   二: 'Two',
@@ -816,6 +819,7 @@ export default {
   主分片: 'Primary Shard',
   副本分片: 'Replica Shard',
   URI源: 'URI Source',
+  APM服务: 'APM Service',
 
   IMAP端口: 'IMAP Port',
   实例数: 'Instances',
@@ -1295,7 +1299,7 @@ export default {
   环境依赖: 'Environment',
   主机字段: 'Host Field',
   环境变量: 'Environment Variables',
-  默认分组: 'Default Group',
+  默认分组: 'Default',
   新建插件: 'New Plugin',
   微软雅黑: 'Microsoft YaHei',
   运行状态: 'Run Status',
@@ -1944,6 +1948,8 @@ export default {
   容器场景页: 'Container scene page',
   复制节点名: 'Copy node name',
   关联边: 'Associated edges',
+  继承自应用: 'Inherited from application',
+  去修改: 'Go to modify',
 
   // K8s 容器场景
   图表: 'Chart',
@@ -1966,6 +1972,11 @@ export default {
   非空数据: 'Non-empty data',
   非空数据占比: 'Proportion of non-empty data',
   添加方式: 'Add method',
+  数据含义: 'Data meaning',
+  'K8S-POD': 'K8S-POD',
+  'K8S-NODE': 'K8S-NODE',
+  'K8S-SERVICE': 'K8S-SERVICE',
+  'K8S-WORKLOAD': 'K8S-WORKLOAD',
 
   // 查询模板
   '模板名称:': 'Template name:',
@@ -1986,4 +1997,24 @@ export default {
   全部模板: 'All templates',
   内置模板: 'Built-in templates',
   克隆模板: 'Clone template',
+
+  '未恢复（已屏蔽）': 'Not recovered (shielded)',
+  '未恢复（未屏蔽）': 'Not recovered (not shielded)',
+  '告警问题：': 'Alarm problem:',
+  '告警原因：': 'Alarm reason:',
+  '关联故障：': 'Associated fault:',
+  '处理建议：': 'Processing suggestion:',
+  '处理经验：': 'Processing experience:',
+  告警模块: 'Alarm module',
+  事件内容: 'Event content',
+  更多事件: 'More events',
+
+  数据后保留小数位: 'Data decimal places',
+  '{0} 位': '{0} decimal places',
+  Y轴最小值自适应: 'Y-axis minimum value adaptive',
+  动作: 'Action',
+  Issue聚合: 'Issue aggregation',
+  生效告警级别: 'Effective alarm level',
+  操作时间: 'Operation time',
+  影响范围维度: 'Impact scope dimension',
 };
