@@ -74,6 +74,7 @@ from apps.log_databus.exceptions import (
     CollectorConfigNameENDuplicateException,
     CollectorConfigNotExistException,
     CollectorResultTableIDDuplicateException,
+    PublicESClusterNotExistException,
     RegexInvalidException,
     RegexMatchException,
     ResultTableNotExistException,
@@ -1472,6 +1473,7 @@ class CollectorHandler:
         etl_params=None,
         fields=None,
         storage_cluster_id=None,
+        auto_select_storage_cluster=False,
         storage_cluster_type=STORAGE_CLUSTER_TYPE,
         retention=7,
         allocation_min_days=0,
@@ -1526,6 +1528,15 @@ class CollectorHandler:
                     collector_config_name_en=collector_config_name_en
                 )
             )
+
+        # 仅 MCP 等明确请求自动选择的调用使用 Fast Create 的公共集群策略；
+        # 保留既有 custom_create 未传集群时不创建清洗配置的行为。
+        # 幂等命中已有采集项时无需选择集群。
+        if auto_select_storage_cluster and not storage_cluster_id:
+            storage_cluster_id = self.get_random_public_cluster_id(bk_biz_id=bk_biz_id)
+            if not storage_cluster_id:
+                raise PublicESClusterNotExistException()
+
         # 判断是否已存在同bk_data_name, result_table_id
         bk_data_name = self.build_bk_data_name(
             bk_biz_id=bkdata_biz_id, collector_config_name_en=collector_config_name_en
