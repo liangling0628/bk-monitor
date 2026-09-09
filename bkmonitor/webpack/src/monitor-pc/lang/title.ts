@@ -280,6 +280,7 @@ export default {
   // Issues 拆分合并
   合并明细: 'Merge details',
   '已并入但隐藏的 Issue': 'Issue merged but hidden',
+  '批量拆分为新 Issue': 'Batch Split to New Issues',
   拆分依据: 'Split criteria',
   '合并 Issue': 'Merge Issue',
   合并设置: 'Merge settings',
