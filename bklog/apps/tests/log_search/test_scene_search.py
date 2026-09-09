@@ -3,6 +3,7 @@ Unit tests for scene_search endpoints (SceneSearchViewSet).
 Covers: scenes / search / fields / date_histogram / agg_field / total / dimension_values
 """
 
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
@@ -446,7 +447,7 @@ class TestSceneSearchViewSetFields(TestCase):
 
 @override_settings(PRE_SEARCH_SECONDS=60, TIME_ZONE="UTC")
 class TestSceneSearchViewSetDateHistogram(TestCase):
-    """POST /search/scene/date_histogram/"""
+    """POST /search/scene/chart/"""
 
     @patch("apps.log_unifyquery.handler.scene_search.SceneUnifyQueryHandler.date_histogram")
     @patch("apps.log_unifyquery.handler.scene_search.get_request_external_username", return_value="")
@@ -457,8 +458,8 @@ class TestSceneSearchViewSetDateHistogram(TestCase):
 
         factory = APIRequestFactory()
         request = _make_post_request(SEARCH_POST_BODY, factory)
-        vs = _get_viewset("date_histogram", request)
-        response = vs.date_histogram(request)
+        vs = _get_viewset("chart", request)
+        response = vs.chart(request)
 
         self.assertEqual(response.status_code, 200)
         mock_dh.assert_called_once_with(interval="auto")
@@ -473,8 +474,8 @@ class TestSceneSearchViewSetDateHistogram(TestCase):
         data = {**SEARCH_POST_BODY, "interval": "5m"}
         factory = APIRequestFactory()
         request = _make_post_request(data, factory)
-        vs = _get_viewset("date_histogram", request)
-        vs.date_histogram(request)
+        vs = _get_viewset("chart", request)
+        vs.chart(request)
 
         mock_dh.assert_called_once_with(interval="5m")
 
@@ -964,7 +965,7 @@ class TestSceneDimensionValuesSerializer(TestCase):
         data = {"bk_biz_id": 2, "scene": "k8s", "dimension_key": "cluster_id"}
         s = SceneDimensionValuesSerializer(data=data)
         self.assertTrue(s.is_valid(), s.errors)
-        self.assertEqual(s.validated_data["filters"], {})
+        self.assertEqual(s.validated_data["filters"], [])
 
     def test_valid_with_filters(self):
         data = {
@@ -975,7 +976,7 @@ class TestSceneDimensionValuesSerializer(TestCase):
         }
         s = SceneDimensionValuesSerializer(data=data)
         self.assertTrue(s.is_valid(), s.errors)
-        self.assertEqual(s.validated_data["filters"], {"stream": "stdout"})
+        self.assertEqual(s.validated_data["filters"], [{"field_name": "stream", "value": ["stdout"], "op": "eq"}])
 
     def test_valid_with_list_filters(self):
         data = {
@@ -986,7 +987,10 @@ class TestSceneDimensionValuesSerializer(TestCase):
         }
         s = SceneDimensionValuesSerializer(data=data)
         self.assertTrue(s.is_valid(), s.errors)
-        self.assertEqual(s.validated_data["filters"]["stream"], ["file", "stdout"])
+        self.assertEqual(
+            s.validated_data["filters"],
+            [{"field_name": "stream", "value": ["file", "stdout"], "op": "eq"}],
+        )
 
     def test_missing_scene_fails(self):
         data = {"bk_biz_id": 2, "dimension_key": "cluster_id"}
@@ -1439,12 +1443,12 @@ class TestSceneSearchViewSetDimensionValues(TestCase):
 
 
 # =========================================================================
-# 8. _build_scene_labels / _detect_container_stream tests
+# 8. build_scene_labels / _detect_container_stream tests
 # =========================================================================
 
 
 class TestBuildSceneLabelsExtended(TestCase):
-    """Test the extended _build_scene_labels with stream detection."""
+    """Test build_scene_labels with stream detection."""
 
     def test_build_scene_labels_k8s_stdout(self):
         from apps.log_databus.constants import build_scene_labels
@@ -1504,7 +1508,7 @@ class TestBuildSceneLabelsExtended(TestCase):
 
 
 class TestBuildSceneLabelsBranchSelection(TestCase):
-    """_build_scene_labels 应通过 is_container_collector 综合判定，
+    """build_scene_labels 应通过 is_container_collector 综合判定，
     既覆盖 BCS 容器采集（is_container_environment），也覆盖
     自定义上报的容器日志（is_custom_container = custom + custom_type=log）。
     """
@@ -1536,20 +1540,20 @@ class TestBuildSceneLabelsBranchSelection(TestCase):
             is_container_environment=True,
             bcs_cluster_id="BCS-OTLP-001",
         )
-        labels = handler._build_scene_labels()
+        labels = handler.build_scene_labels()
         self.assertEqual(labels, {"scene": "trpc"})
 
     def test_otlp_trace_falls_back_to_host(self):
         """custom + otlp_trace 不在 trpc / k8s 分支，走 fallback。
 
-        trace 实际不应该走到 _build_scene_labels（不创建 ResultTable.labels），
+        trace 实际不应该走到 build_scene_labels（不创建 ResultTable.labels），
         这里只断言不会被误归到 trpc。
         """
         handler = self._new_handler(
             collector_scenario_id="custom",
             custom_type="otlp_trace",
         )
-        labels = handler._build_scene_labels()
+        labels = handler.build_scene_labels()
         self.assertEqual(labels["scene"], "host")
 
     @patch("apps.log_databus.handlers.collector.base.CollectorHandler._detect_container_stream")
@@ -1560,7 +1564,7 @@ class TestBuildSceneLabelsBranchSelection(TestCase):
             is_container_collector=True,
             bcs_cluster_id="BCS-K8S-12345",
         )
-        labels = handler._build_scene_labels()
+        labels = handler.build_scene_labels()
         self.assertEqual(labels["scene"], "k8s")
         self.assertEqual(labels["cluster_id"], "BCS-K8S-12345")
         self.assertEqual(labels["stream"], "stdout")
@@ -1576,7 +1580,7 @@ class TestBuildSceneLabelsBranchSelection(TestCase):
             bcs_cluster_id="",
             collector_scenario_id="custom",
         )
-        labels = handler._build_scene_labels()
+        labels = handler.build_scene_labels()
         self.assertEqual(labels["scene"], "k8s")
         # cluster_id / stream 为空时不写入 labels
         self.assertNotIn("cluster_id", labels)
@@ -1584,17 +1588,17 @@ class TestBuildSceneLabelsBranchSelection(TestCase):
 
     def test_non_container_falls_back_to_scenario_mapping(self):
         handler = self._new_handler(collector_scenario_id="syslog")
-        labels = handler._build_scene_labels()
+        labels = handler.build_scene_labels()
         self.assertEqual(labels["scene"], "host")
 
     def test_unknown_scenario_defaults_to_host(self):
         handler = self._new_handler(collector_scenario_id="some_future_type")
-        labels = handler._build_scene_labels()
+        labels = handler.build_scene_labels()
         self.assertEqual(labels["scene"], "host")
 
     def test_client_scenario_maps_to_client(self):
         handler = self._new_handler(collector_scenario_id="client")
-        labels = handler._build_scene_labels()
+        labels = handler.build_scene_labels()
         self.assertEqual(labels["scene"], "client")
 
 
@@ -1679,7 +1683,7 @@ class TestSyncSceneTagsToIndexSet(TestCase):
 
 @override_settings(PRE_SEARCH_SECONDS=60, TIME_ZONE="UTC")
 class TestSceneExportHistoryPagination(TestCase):
-    """Verify get_export_history uses manual Paginator (not DRF query_params)."""
+    """Verify get_export_history reads pagination parameters from the DRF request."""
 
     @patch("apps.log_unifyquery.handler.scene_async_export.get_request_app_code", return_value="bk_log_search")
     @patch("apps.log_unifyquery.handler.scene_async_export.get_request_external_username", return_value="")
@@ -1706,15 +1710,22 @@ class TestSceneExportHistoryPagination(TestCase):
             )
 
         factory = APIRequestFactory()
-        request = factory.post("/api/v1/search/scene/export/history/", data={}, format="json")
+
+        def build_request(page):
+            return _get_viewset(
+                "scene_export_history",
+                factory.post(
+                    "/api/v1/search/scene/export/history/",
+                    data={"page": page, "pagesize": 2},
+                    format="json",
+                ),
+            ).request
 
         handler = SceneAsyncExportHandler(bk_biz_id=2, search_dict={})
         response = handler.get_export_history(
-            request=request,
+            request=build_request(1),
             view=None,
             show_all=True,
-            page=1,
-            pagesize=2,
         )
 
         self.assertEqual(response.data["total"], 3)
@@ -1724,11 +1735,9 @@ class TestSceneExportHistoryPagination(TestCase):
         self.assertIn("download_count", response.data["list"][0])
 
         response2 = handler.get_export_history(
-            request=request,
+            request=build_request(2),
             view=None,
             show_all=True,
-            page=2,
-            pagesize=2,
         )
         self.assertEqual(response2.data["total"], 3)
         self.assertEqual(len(response2.data["list"]), 1)
@@ -1739,7 +1748,7 @@ class TestSceneExportHistoryPagination(TestCase):
 # =========================================================================
 
 
-@override_settings(PRE_SEARCH_SECONDS=60, TIME_ZONE="UTC")
+@override_settings(PRE_SEARCH_SECONDS=60, TIME_ZONE="UTC", IGNORE_IAM_PERMISSION=True)
 class TestSceneFieldsConfigApi(TestCase):
     """fields_config + list/create/update/delete/apply template APIs."""
 
@@ -1754,12 +1763,23 @@ class TestSceneFieldsConfigApi(TestCase):
         SceneFieldsConfig.objects.all().delete()
 
     def _patch_user(self):
-        return patch.multiple(
-            "apps.log_search.handlers.search.scene_fields_config",
-            get_request_username=MagicMock(return_value=self.USERNAME),
-            get_request_external_username=MagicMock(return_value=""),
-            get_request_app_code=MagicMock(return_value="bk_log_search"),
+        stack = ExitStack()
+        stack.enter_context(
+            patch.multiple(
+                "apps.log_search.handlers.search.scene_fields_config",
+                get_request_username=MagicMock(return_value=self.USERNAME),
+                get_request_external_username=MagicMock(return_value=""),
+                get_request_app_code=MagicMock(return_value="bk_log_search"),
+            )
         )
+        stack.enter_context(
+            patch.multiple(
+                "apps.log_search.views.scene_search_views",
+                get_request_username=MagicMock(return_value=self.USERNAME),
+                get_request_external_username=MagicMock(return_value=""),
+            )
+        )
+        return stack
 
     def test_create_list_apply_update_delete_config(self):
         from apps.log_search.constants import DEFAULT_INDEX_SET_FIELDS_CONFIG_NAME
@@ -1768,6 +1788,10 @@ class TestSceneFieldsConfigApi(TestCase):
 
         factory = APIRequestFactory()
         with self._patch_user():
+            from apps.log_search.handlers.search.scene_fields_config import SceneFieldsConfigHandler
+
+            SceneFieldsConfigHandler.get_or_create_default(self.BIZ_ID, self.SCENE_ID)
+
             # create custom template
             req_create = factory.post(
                 "/api/v1/search/scene/create_config/",
@@ -1856,12 +1880,23 @@ class TestSceneUserCustomConfig(TestCase):
         SceneFieldsConfig.objects.all().delete()
 
     def _patch_user(self):
-        return patch.multiple(
-            "apps.log_search.handlers.search.scene_fields_config",
-            get_request_username=MagicMock(return_value=self.USERNAME),
-            get_request_external_username=MagicMock(return_value=""),
-            get_request_app_code=MagicMock(return_value="bk_log_search"),
+        stack = ExitStack()
+        stack.enter_context(
+            patch.multiple(
+                "apps.log_search.handlers.search.scene_fields_config",
+                get_request_username=MagicMock(return_value=self.USERNAME),
+                get_request_external_username=MagicMock(return_value=""),
+                get_request_app_code=MagicMock(return_value="bk_log_search"),
+            )
         )
+        stack.enter_context(
+            patch.multiple(
+                "apps.log_search.views.scene_search_views",
+                get_request_username=MagicMock(return_value=self.USERNAME),
+                get_request_external_username=MagicMock(return_value=""),
+            )
+        )
+        return stack
 
     def test_get_returns_empty_dict_when_no_record(self):
         factory = APIRequestFactory()
@@ -1871,7 +1906,7 @@ class TestSceneUserCustomConfig(TestCase):
         )
         with self._patch_user():
             vs = _get_viewset("user_custom_config", request)
-            resp = vs.user_custom_config(request)
+            resp = vs.user_custom_config(vs.request)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data, {})
 
@@ -1888,7 +1923,7 @@ class TestSceneUserCustomConfig(TestCase):
                 format="json",
             )
             vs = _get_viewset("user_custom_config", req_post)
-            posted = vs.user_custom_config(req_post)
+            posted = vs.user_custom_config(vs.request)
             self.assertEqual(posted.status_code, 200)
             self.assertEqual(posted.data, self.SCENE_CONFIG_FULL)
 
@@ -1897,7 +1932,7 @@ class TestSceneUserCustomConfig(TestCase):
                 {"bk_biz_id": self.BIZ_ID, "scene_id": self.SCENE_ID},
             )
             vs = _get_viewset("user_custom_config", req_get)
-            got = vs.user_custom_config(req_get)
+            got = vs.user_custom_config(vs.request)
             self.assertEqual(got.data, self.SCENE_CONFIG_FULL)
             for key in (
                 "fieldsWidth",
@@ -1929,7 +1964,7 @@ class TestSceneUserCustomConfig(TestCase):
                 f"/api/v1/search/scene/user_custom_config/?bk_biz_id={self.BIZ_ID}&scene_id={self.SCENE_ID}",
             )
             vs = _get_viewset("user_custom_config", req_del)
-            resp = vs.user_custom_config(req_del)
+            resp = vs.user_custom_config(vs.request)
             self.assertEqual(resp.data, {"deleted": True})
             self.assertFalse(UserSceneCustomConfig.objects.filter(bk_biz_id=self.BIZ_ID).exists())
 
@@ -1956,7 +1991,7 @@ class TestSceneUserCustomConfig(TestCase):
                 format="json",
             )
             vs = _get_viewset("user_custom_config", req_post)
-            vs.user_custom_config(req_post)
+            vs.user_custom_config(vs.request)
 
             reloaded = SceneFieldsConfig.objects.get(
                 bk_biz_id=self.BIZ_ID, scene_id=self.SCENE_ID, name=DEFAULT_INDEX_SET_FIELDS_CONFIG_NAME
@@ -2148,8 +2183,8 @@ class TestSceneSearchHistoryDedupAndFilter(TestCase):
         self.assertEqual({r["id"] for r in resp.data}, {h1.id, h2.id, h3.id})
 
     def test_dedup_different_ip_chooser_not_merged(self):
-        h1 = self._write_history(keyword="A", ip_chooser={"host_list": [{"bk_host_id": 1}]})
-        h2 = self._write_history(keyword="A", ip_chooser={"host_list": [{"bk_host_id": 2}]})
+        h1 = self._write_history(keyword="A", ip_chooser={"host_list": [{"id": 1}]})
+        h2 = self._write_history(keyword="A", ip_chooser={"host_list": [{"id": 2}]})
 
         resp = self._call_history(
             {
