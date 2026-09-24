@@ -1,0 +1,23 @@
+.profiling-explore-detail-slider {
+  .profiling-explore-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding-right: 16px;
+  }
+
+  .jump-link {
+    margin-left: 8px;
+    color: #3a84ff;
+    cursor: pointer;
+
+    .icon-fenxiang {
+      margin-left: 4px;
+    }
+  }
+
+  .profiling-explore-detail-content {
+    padding: 16px 24px;
+  }
+}

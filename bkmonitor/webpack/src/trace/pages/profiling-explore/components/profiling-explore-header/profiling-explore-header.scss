@@ -1,0 +1,118 @@
+.profiling-explore-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 52px;
+  padding-right: 16px;
+  background: #fff;
+  box-shadow: 0 2px 2px 0 rgb(25 25 41 / 5%);
+
+  .header-left {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .favorite-container {
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    border-right: 1px solid #e4e9f2;
+  }
+
+  .favorite-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    cursor: pointer;
+    background: #f0f1f5;
+    border-radius: 4px;
+
+    .icon-shoucangjia {
+      font-size: 16px;
+      color: #4d4f56;
+    }
+
+    &:hover,
+    &.active {
+      background: #e1ecff;
+
+      .icon-shoucangjia {
+        color: #3a84ff;
+      }
+    }
+  }
+
+  .header-title {
+    margin: 0 16px;
+    font-size: 16px;
+    line-height: 24px;
+    color: #313238;
+    white-space: nowrap;
+  }
+
+  .mode-tab {
+    display: flex;
+    gap: 1px;
+    align-items: center;
+    height: 32px;
+    padding: 4px;
+    background: #f0f1f5;
+    border-radius: 4px;
+  }
+
+  .mode-tab-item {
+    display: flex;
+    align-items: center;
+    height: 24px;
+    padding: 0 12px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #313238;
+    cursor: pointer;
+    border-radius: 2px;
+
+    &.active {
+      color: #3a84ff;
+      background: #fff;
+    }
+  }
+
+  .header-divider {
+    flex-shrink: 0;
+    width: 1px;
+    height: 16px;
+    margin: 0 16px;
+    background: #dcdee5;
+  }
+
+  .compare-switch-group {
+    display: flex;
+    align-items: center;
+    margin-left: 16px;
+  }
+
+  .compare-switch-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: center;
+    width: 70px;
+
+    .compare-switch-label {
+      font-size: 12px;
+      line-height: 16px;
+      color: #4d4f56;
+    }
+  }
+
+  .header-tools {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+    align-items: center;
+  }
+}

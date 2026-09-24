@@ -26,6 +26,7 @@
 
 import type { EMode, IWhereItem } from '../../../../components/retrieval-filter/typing';
 import type { TimeRangeType } from '../../../../components/time-range/utils';
+import type { IProfilingFavoriteConfig } from '../../../profiling-explore/typings';
 import type { IRumFavoriteConfig } from '../../../rum-explore/typings';
 
 /** 告警收藏配置 */
@@ -69,6 +70,7 @@ type FavoriteConfigMap = {
   alarm_incident: IAlarmFavoriteConfig;
   event: IEventFavoriteConfig;
   metric: IMetricFavoriteConfig;
+  profiling: IProfilingFavoriteConfig;
   rum: IRumFavoriteConfig;
   trace: ITraceFavoriteConfig;
 };

@@ -1,0 +1,63 @@
+.application-service-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+
+  .filter-row {
+    display: flex;
+    flex-shrink: 0;
+    align-items: flex-start;
+    margin-bottom: 8px;
+  }
+
+  .compare-filter-label {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    margin-right: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 20px;
+    color: #fff;
+    background: #8f9fbd;
+    border-radius: 4px;
+    box-shadow: 0 2px 2px rgb(25 25 41 / 8%);
+
+    &.is-icon {
+      flex-direction: column;
+      width: 40px;
+
+      .icon-monitor {
+        width: 20px;
+        height: 20px;
+        font-size: 20px;
+        line-height: 20px;
+        color: #fff;
+      }
+    }
+  }
+
+  .vue3_retrieval-filter__component {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .profiling-data-type-toolbar {
+    flex-shrink: 0;
+    margin-bottom: 8px;
+  }
+
+  .profiling-trend-panel {
+    flex-shrink: 0;
+  }
+
+  .profile-visualization {
+    flex: 1;
+    min-height: 0;
+  }
+}

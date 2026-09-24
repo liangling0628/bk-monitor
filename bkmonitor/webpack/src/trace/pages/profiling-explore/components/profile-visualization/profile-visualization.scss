@@ -1,0 +1,32 @@
+.profile-visualization {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  background: #fff;
+  border-radius: 2px;
+
+  .visualization-body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    margin-top: 12px;
+  }
+
+  .visualization-content {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+
+    &.is-combine {
+      gap: 8px;
+
+      > * {
+        flex: 1;
+        min-width: 0;
+      }
+    }
+  }
+}

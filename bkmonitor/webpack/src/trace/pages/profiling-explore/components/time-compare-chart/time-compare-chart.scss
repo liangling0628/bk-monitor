@@ -1,0 +1,36 @@
+.profiling-time-compare-chart {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+
+  .time-compare-item {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    height: 180px;
+    padding: 8px 12px 0;
+    background: #fff;
+    border-radius: 2px;
+  }
+
+  .time-compare-title {
+    font-size: 14px;
+    line-height: 22px;
+    color: #313238;
+  }
+
+  .time-compare-chart-wrap {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .time-compare-empty {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    color: #979ba5;
+  }
+}

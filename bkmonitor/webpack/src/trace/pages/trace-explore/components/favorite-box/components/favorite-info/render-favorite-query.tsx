@@ -139,7 +139,7 @@ export default defineComponent({
 
     // RUM 检索的收藏配置与 trace 同构，共用一套预览渲染
     const renderTrace = () => {
-      if (!['rum', 'trace'].includes(favoriteType.value)) {
+      if (!['profiling', 'rum', 'trace'].includes(favoriteType.value)) {
         return null;
       }
       const queryParams = (props.data?.config?.queryParams ||

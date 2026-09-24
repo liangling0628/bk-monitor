@@ -1,0 +1,47 @@
+.profiling-visualization-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  height: 32px;
+
+  .view-mode-group,
+  .text-direction-group {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 3px;
+    background: #f0f1f5;
+    border-radius: 4px;
+  }
+
+  .view-mode-item,
+  .text-direction-item,
+  .download-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
+    color: #4d4f56;
+    cursor: pointer;
+    border-radius: 2px;
+
+    &.active {
+      color: #3a84ff;
+      background: #fff;
+    }
+  }
+
+  .keyword-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .download-btn {
+    width: 32px;
+    height: 32px;
+    background: #f0f1f5;
+    border-radius: 4px;
+  }
+}

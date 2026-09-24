@@ -1,4 +1,4 @@
-@import '../../../theme/mixin.scss';
+@import '../../../theme/mixin';
 
 .time-series {
   position: relative;
@@ -8,9 +8,9 @@
   width: 100%;
   height: 100%;
   background-color: transparent;
-  
+
   @include chart-plugin-is-error;
-  
+
   &-header {
     display: flex;
     flex: 0 0 46px;
@@ -26,6 +26,10 @@
     width: 100%;
     height: calc(100% - 46px);
     padding-bottom: 6px;
+
+    &.no-header {
+      height: 100%;
+    }
 
     &.right-legend {
       flex-direction: row;

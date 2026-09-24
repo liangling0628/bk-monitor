@@ -31,4 +31,9 @@ export default [
     name: 'profiling',
     component: () => import(/* webpackChunkName: "alarm-shield" */ '../../pages/profiling/profiling'),
   },
+  {
+    path: '/profiling-explore',
+    name: 'profilingExplore',
+    component: () => import(/* webpackChunkName: "profiling-explore" */ '../../pages/profiling-explore/profiling-explore'),
+  },
 ] as RouteRecordRaw[];

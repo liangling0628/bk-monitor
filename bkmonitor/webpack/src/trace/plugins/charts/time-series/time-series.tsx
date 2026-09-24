@@ -216,7 +216,7 @@ export default defineComponent({
         if (chartWrapperRef.value) {
           width = chartWrapperRef.value.clientWidth;
         } else {
-          width = timeSeriesRef.value!.clientWidth - (props.panel?.options?.legend?.placement === 'right' ? 320 : 0);
+          width = timeSeriesRef.value?.clientWidth - (props.panel?.options?.legend?.placement === 'right' ? 320 : 0);
         }
         const size = (timeRange[1] - timeRange[0]) / width;
         return size > 0 ? `${Math.ceil(size)}s` : undefined;
@@ -515,17 +515,17 @@ export default defineComponent({
         unregisterObserver();
         const series: any[] = [];
         const metricList: any[] = [];
-        const [startTime, endTime] = handleTransformToTimestamp(timeRange!.value);
+        const [startTime, endTime] = handleTransformToTimestamp(timeRange?.value);
         const params = {
           start_time: start_time ? dayjs.tz(start_time).unix() : startTime,
           end_time: end_time ? dayjs.tz(end_time).unix() : endTime,
         };
         const promiseList: any[] = [];
-        const timeShiftList = ['', ...timeOffset!.value];
+        const timeShiftList = ['', ...timeOffset?.value];
         const interval = reviewInterval(
-          viewOptions!.value.interval || 0,
+          viewOptions?.value.interval || 0,
           params.end_time - params.start_time,
-          props.panel!.collect_interval
+          props.panel?.collect_interval
         );
         const variablesService = new VariablesService({
           ...viewOptions?.value,
@@ -787,7 +787,7 @@ export default defineComponent({
       const variablesService = new VariablesService({ ...viewOptions });
       switch (item.id) {
         case 'explore':
-          handleExplore(props.panel!, viewOptions!.value, timeRange!.value);
+          handleExplore(props.panel!, viewOptions?.value, timeRange?.value);
           return;
         case 'relate-alert':
           props.panel?.targets?.forEach(target => {
@@ -798,25 +798,25 @@ export default defineComponent({
               target.data.query_configs = queryConfig;
             }
           });
-          handleRelateAlert(props.panel!, timeRange!.value);
+          handleRelateAlert(props.panel!, timeRange?.value);
           return;
         case 'screenshot':
           // 300ms 关闭动画
-          setTimeout(() => handleStoreImage(props.panel!.title, timeSeriesRef.value!), 300);
+          setTimeout(() => handleStoreImage(props.panel?.title, timeSeriesRef.value!), 300);
           return;
         case 'export-csv':
           {
             if (csvSeries.length) {
               const { tableThArr, tableTdArr } = transformSrcData(csvSeries);
               const csvString = transformTableDataToCsvStr(tableThArr, tableTdArr);
-              downCsvFile(csvString, props.panel!.title);
+              downCsvFile(csvString, props.panel?.title);
             }
           }
           return;
       }
     }
     function handleMetricClick(metric: IExtendMetricData | null) {
-      handleAddStrategy(props.panel!, metric, viewOptions!.value, timeRange!.value);
+      handleAddStrategy(props.panel!, metric, viewOptions?.value, timeRange?.value);
     }
     function handleDblClick() {
       getPanelData();
@@ -951,7 +951,11 @@ export default defineComponent({
               />
             )}
             {!this.empty ? (
-              <div class={`time-series-content ${legend?.placement === 'right' ? 'right-legend' : ''}`}>
+              <div
+                class={`time-series-content ${legend?.placement === 'right' ? 'right-legend' : ''} ${
+                  this.showChartHeader ? '' : 'no-header'
+                }`}
+              >
                 <div
                   ref='chartWrapperRef'
                   class={`chart-instance ${legend?.displayMode === 'table' ? 'is-table-legend' : ''}`}
@@ -960,7 +964,8 @@ export default defineComponent({
                     <BaseEchart
                       ref='baseChartRef'
                       width={this.width}
-                      groupId={this.panel!.dashboardId}
+                      height={this.height}
+                      groupId={this.panel?.dashboardId}
                       hoverAllTooltips={this.hoverAllTooltips}
                       options={this.options}
                       showRestore={this.showRestore}
